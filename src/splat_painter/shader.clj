@@ -20,7 +20,7 @@
   where the covariance is symmetric [c00 c01; c01 c11] in (row, col) space."
   (:require [glimmer-gl.gl :as gl]))
 
-(def ^:private max-splats 49152)
+(def max-splats "shader splat ceiling + transform-feedback buffer capacity" 49152)
 (def tile-w "splats per splat-texture row (must match the shader's TILE_W)" 4096)
 
 (def ^:private vs-src
@@ -90,10 +90,90 @@ void main(){
 }
 "))
 
-(defn sources
-  "Return {:vs-src :fs-src} — pure, no GL context (for headless inspection/tests)."
+;; --- texture-buffer render variant -------------------------------------------
+;; Same math as fs-src, but the splats come from a samplerBuffer (a 1D texture view
+;; over a buffer object) instead of a tiled 2D texture. A texture buffer has no
+;; GL_MAX_TEXTURE_SIZE ceiling, so the stream is flat (2 texels per splat, no tiling)
+;; — and it's exactly what the GPU generation pass writes via transform feedback, so
+;; the generated buffer feeds straight in with no readback/repack.
+(def ^:private fs-src-buf
+  (str "#version 330 core
+out vec4 frag;
+uniform samplerBuffer u_splats;  // RGBA32F texture buffer, 2 texels per splat
+uniform int  u_count;
+uniform vec2 u_viewport;
+uniform vec2 u_image;
+uniform vec3 u_bg;
+uniform float u_opacity;
+uniform float u_hard_sharp;
+uniform float u_hard_soft;
+uniform float u_sig_min;
+uniform float u_sig_max;
+const int MAX_SPLATS = " max-splats ";
+
+void main(){
+  float pw = u_viewport.x, ph = u_viewport.y;
+  float iw = u_image.x,    ih = u_image.y;
+  float scale = min(pw / iw, ph / ih);
+  float dw = iw * scale, dh = ih * scale;
+  vec2 fc = gl_FragCoord.xy - vec2((pw - dw) * 0.5, (ph - dh) * 0.5);
+  if (fc.x < 0.0 || fc.x > dw || fc.y < 0.0 || fc.y > dh) {
+    frag = vec4(u_bg, 1.0);
+    return;
+  }
+  vec2 imgpx = fc / scale;
+  float x = ih - imgpx.y;
+  float y = imgpx.x;
+  float T = 1.0;
+  vec3 acc = vec3(0.0);
+  for (int i = 0; i < MAX_SPLATS; i++) {
+    if (i >= u_count) break;
+    vec4 t0 = texelFetch(u_splats, 2 * i);
+    vec4 t1 = texelFetch(u_splats, 2 * i + 1);
+    float dx = x - t0.x, dy = y - t0.y;
+    float c00 = t0.z, c01 = t0.w, c11 = t1.x;
+    float det = max(c00 * c11 - c01 * c01, 1e-8);
+    float p00 = c11 / det, p11 = c00 / det, cross = -2.0 * c01 / det;
+    float pdf = 0.5 * (p00 * dx * dx + cross * dx * dy + p11 * dy * dy);
+    float sig = sqrt(sqrt(det));
+    float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
+    ts = ts * ts * (3.0 - 2.0 * ts);
+    float hardness = mix(u_hard_sharp, u_hard_soft, ts);
+    float a = u_opacity * exp(-pow(pdf, hardness));
+    float wa = T * a;
+    acc += wa * t1.yzw;
+    T *= (1.0 - a);
+  }
+  frag = vec4(acc + T * u_bg, 1.0);
+}
+"))
+
+(defn- render-uniform-locs [prog]
+  {:u_splats   (gl/gl-get-uniform-location prog "u_splats")
+   :u_count    (gl/gl-get-uniform-location prog "u_count")
+   :u_viewport (gl/gl-get-uniform-location prog "u_viewport")
+   :u_image    (gl/gl-get-uniform-location prog "u_image")
+   :u_bg       (gl/gl-get-uniform-location prog "u_bg")
+   :u_opacity  (gl/gl-get-uniform-location prog "u_opacity")
+   :u_hard_sharp (gl/gl-get-uniform-location prog "u_hard_sharp")
+   :u_hard_soft  (gl/gl-get-uniform-location prog "u_hard_soft")
+   :u_sig_min    (gl/gl-get-uniform-location prog "u_sig_min")
+   :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")})
+
+(defn build-program-buf
+  "Compile + link the samplerBuffer render variant (needs a current GL context).
+  Returns {:program :locs} or nil. Uses a fullscreen quad, so no a_pos here —
+  it shares vs-src's attribute; callers reuse the same VAO/VBO."
   []
-  {:vs-src vs-src :fs-src fs-src})
+  (when-let [prog (gl/make-program vs-src fs-src-buf)]
+    {:program prog
+     :locs    (assoc (render-uniform-locs prog)
+                     :a_pos (gl/gl-get-attrib-location prog "a_pos"))}))
+
+(defn sources
+  "Return {:vs-src :fs-src :fs-src-buf} — pure, no GL context (for headless inspection/tests)."
+  []
+  {:vs-src vs-src :fs-src fs-src :fs-src-buf fs-src-buf})
 
 (defn pack-splats
   "Flatten a seq of splats into the RGBA32F texture payload (length 2*N*4): row i

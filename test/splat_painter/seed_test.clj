@@ -1,6 +1,7 @@
 (ns splat-painter.seed-test
   (:require [clojure.test :refer [deftest is testing]]
             [splat-painter.seed :as seed]
+            [splat-painter.wavelet :as wavelet]
             [splat-painter.gaussian :as g]))
 
 (defn- approx= [tol a b] (< (Math/abs (- (double a) (double b))) tol))
@@ -143,6 +144,27 @@
     (is (approx= 0.05 8095.514   sy) "Σ mean-y")
     (is (approx= 0.5  210455.049 sd) "Σ det(cov)")
     (is (approx= 0.05 308.503    sc) "Σ colour")))
+
+(deftest layer-params-shared-spec
+  ;; layer-params is the per-level placement spec BOTH the CPU loop and the GPU generation
+  ;; shader consume, so they enumerate the same cells. Guard its contract: finest-first
+  ;; ordering (levels[0] = smallest stdev), cumulative candidate offsets, total = Σ nx·ny,
+  ;; and ssz halving per finer level. If any drifts, the GPU field diverges from the CPU golden.
+  (let [img  (gray-img 48 64 (fn [x y] (if (and (> x 16) (< x 32) (> y 20) (< y 44))
+                                         0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
+        dmap (wavelet/detail-map img)
+        {:keys [nlev levels total warp]} (seed/layer-params dmap 0.6 6.0 0.5 0.5 4000 48 64)
+        cells (map (fn [l] (* (:nx l) (:ny l))) levels)]
+    (is (= 3 nlev) "detail 0.6 -> 1+round(1.8) = 3 levels")
+    (is (= 3 (count levels)))
+    (is (= 2 (:lvl (first levels))) "finest level first")
+    (is (= 0 (:lvl (last levels)))  "base level last")
+    (is (= -1.0 (:th (last levels))) "base keeps all cells")
+    (is (= 0 (:offset (first levels))))
+    (is (= (map :offset levels) (reductions + 0 (butlast cells))) "cumulative finest-first offsets")
+    (is (= total (reduce + cells)) "total = Σ candidate cells")
+    (is (approx= 1e-9 0.475 warp) "warp = 0.95 * curvature")
+    (is (approx= 1e-6 (:ssz (last levels)) (* 2.0 (:ssz (nth levels 1)))) "base stdev = 2× next-finer")))
 
 (deftest contrast-brightens-highlights
   ;; (0.7-0.5)*2.0+0.5 = 0.9

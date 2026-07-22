@@ -92,36 +92,29 @@
           (/ (double c) (double n))
           (recur (inc i) (if (>= (aget d i) thr) (inc c) c)))))))
 
-(defn- layered-means
-  "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
-   spacing < stdev ⇒ heavy overlap, so the (black) background can never show through — then
-   progressively finer layers, each placed only where the wavelet detail is high enough, so
-   detail accumulates ON TOP of an unbroken underpainting. There is no cell grid, so no cell
-   facets; each splat's orientation/colour come from the flow + detail fields.
-
-   `size` = base (coarsest) stdev; each finer level halves it. `detail` sets how many fine
-   levels (1 = base only … up to 4) and how far they reach. `count` is the SPLAT BUDGET (the
-   Splats control): the placement fills up to that many strokes — more ⇒ smaller strokes ⇒
-   more preserved detail; fewer ⇒ larger ⇒ looser. `variation` scales a flat-region Perlin
-   warp that breaks any residual level lattice — detail strokes stay put (faithful edges).
-   If the natural field would exceed the budget, every level's stdev scales up uniformly, so
-   the base always keeps its heavy overlap ⇒ full coverage, no gaps. `curvature` (0..1) scales
-   how far the flat-region Perlin warp bends/curves the strokes off the level grid.
-   Returns [[x y stdev D]…] (D = effective detail 0..1)."
+(defn layer-params
+  "Pure per-level placement parameters — THE SHARED SPEC for the CPU loop
+   (layered-means) and the GPU generation pass, so both enumerate the same cells.
+   `levels` is ordered FINEST-FIRST (index 0 = finest); a consumer that walks
+   levels[0]→levels[n-1] emitting each cell gets paint order for free (small strokes
+   at the front, over the large base — no sort). Each level is
+   {:lvl :ssz :sp :th :nx :ny :offset}: ssz = stdev, sp = spacing, th = detail
+   threshold (−1 keeps all, base), nx·ny = candidate grid, offset = cumulative
+   candidate-cell start (finest-first). :total = Σ nx·ny (candidate count the GPU
+   draws as GL_POINTS). :warp = flat-region Perlin warp gain, :scale = the uniform
+   size-up that keeps the field under budget."
   [dmap detail size variation curvature count H W]
-  (let [smax     (double size)
-        hd       (double (dec (long H))) wd (double (dec (long W)))
-        budget   (min (double splat-budget) (max 500.0 (double count)))
-        warp     (* 0.95 (double curvature))
-        area     (double (* (long H) (long W)))
-        nlev     (long (max 1 (min 4 (inc (Math/round (* (double detail) 3.0))))))
-        deff     (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
-        thresh   (fn [lvl] (if (zero? (long lvl)) -1.0 (min 0.9 (* 0.26 (double lvl)))))
+  (let [smax    (double size)
+        budget  (min (double splat-budget) (max 500.0 (double count)))
+        warp    (* 0.95 (double curvature))
+        area    (double (* (long H) (long W)))
+        nlev    (long (max 1 (min 4 (inc (Math/round (* (double detail) 3.0))))))
+        thresh  (fn [lvl] (if (zero? (long lvl)) -1.0 (min 0.9 (* 0.26 (double lvl)))))
         ;; base layer overlaps heavily (spacing 0.72×stdev ⇒ full coverage); finer layers are
         ;; sparser accents (the base fills behind them, so gaps between fine strokes don't
         ;; matter). Overlap is FIXED, so coverage never depends on the budget.
-        overlap  (fn [lvl] (if (zero? (long lvl)) 0.72 1.25))
-        sp-of    (fn [lvl scale] (* (overlap lvl) scale (/ smax (Math/pow 2.0 (double lvl)))))
+        overlap (fn [lvl] (if (zero? (long lvl)) 0.72 1.25))
+        sp-of   (fn [lvl scale] (* (overlap lvl) scale (/ smax (Math/pow 2.0 (double lvl)))))
         ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working budget.
         K (loop [lvl 0 acc 0.0]
             (if (>= lvl nlev)
@@ -129,46 +122,70 @@
               (let [f  (if (zero? lvl) 1.0 (detail-fraction dmap (thresh lvl)))
                     sp (sp-of lvl 1.0)]
                 (recur (inc lvl) (+ acc (/ (* f area) (* sp sp)))))))
-        scale (max 1.0 (Math/sqrt (/ K budget)))]
-    ;; emit FINEST level first (lvl nlev-1 → 0) so the field is already in paint order
-    ;; (small strokes at the front, over the large base) — no sort needed downstream.
+        scale (max 1.0 (Math/sqrt (/ K budget)))
+        ;; build FINEST level first (lvl nlev-1 → 0), assigning cumulative candidate offsets
+        ;; in that same order, so GPU gl_VertexID order == CPU emission order == paint order.
+        levels (loop [lvl (dec nlev) off 0 out []]
+                 (if (< lvl 0)
+                   out
+                   (let [ssz (* scale (/ smax (Math/pow 2.0 (double lvl))))
+                         sp  (sp-of lvl scale)
+                         nx  (long (Math/ceil (/ (double H) sp)))
+                         ny  (long (Math/ceil (/ (double W) sp)))]
+                     (recur (dec lvl) (+ off (* nx ny))
+                            (conj out {:lvl lvl :ssz ssz :sp sp :th (thresh lvl)
+                                       :nx nx :ny ny :offset off})))))]
+    {:nlev nlev :warp warp :scale scale :levels levels
+     :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))}))
+
+(defn- layered-means
+  "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
+   spacing < stdev ⇒ heavy overlap, so the (black) background can never show through — then
+   progressively finer layers, each placed only where the wavelet detail is high enough, so
+   detail accumulates ON TOP of an unbroken underpainting. There is no cell grid, so no cell
+   facets; each splat's orientation/colour come from the flow + detail fields.
+
+   Per-level geometry (ssz/sp/th/nx/ny, budget scale, finest-first order) comes from
+   `layer-params` — the same spec the GPU generation pass consumes, so the two paths place
+   identical cells. Here we walk it on the CPU: threshold-test each cell, jitter + Perlin-warp
+   the survivors, and emit [x y stdev D] (D = effective detail 0..1). `variation`/`curvature`
+   feed the warp; detail strokes (D≈1) stay put → faithful edges."
+  [dmap detail size variation curvature count H W]
+  (let [hd   (double (dec (long H))) wd (double (dec (long W)))
+        deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
+        {:keys [warp levels]} (layer-params dmap detail size variation curvature count H W)]
     (persistent!
-      (loop [lvl (dec nlev) acc (transient [])]
-        (if (< lvl 0)
-          acc
-          (let [ssz (* scale (/ smax (Math/pow 2.0 (double lvl))))
-                sp  (sp-of lvl scale)
-                th  (thresh lvl)
-                nx  (long (Math/ceil (/ (double H) sp)))
-                ny  (long (Math/ceil (/ (double W) sp)))
-                acc2 (loop [i 0 acc acc]
-                       (if (>= i nx)
-                         acc
-                         (recur (inc i)
-                           (loop [j 0 acc acc]
-                             (if (>= j ny)
-                               acc
-                               (let [cx (* (+ (double i) 0.5) sp)
-                                     cy (* (+ (double j) 0.5) sp)
-                                     dv (wavelet/detail-at dmap cx cy)]
-                                 (if (and (pos? (long lvl)) (< dv th))
-                                   (recur (inc j) acc)        ; not detailed enough for this fine level
-                                   (let [jx (* sp 0.45 (- (hash01 (+ (* i 137) lvl) j 3) 0.5))
-                                         jy (* sp 0.45 (- (hash01 (+ (* i 149) lvl) j 7) 0.5))
-                                         x  (+ cx jx) y (+ cy jy)
-                                         D  (deff dv)
-                                         ;; flat-region Perlin warp breaks any residual level
-                                         ;; lattice; detail strokes (D≈1) stay put → faithful edges.
-                                         aw (* warp (- 1.0 D) ssz)
-                                         x2 (if (< aw 0.2) x
-                                              (+ x (* aw (noise/noise2 (* 0.06 x) (* 0.06 y)))))
-                                         y2 (if (< aw 0.2) y
-                                              (+ y (* aw (noise/noise2 (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))]
-                                     ;; keep centres in-bounds so no budget is wasted off-screen
-                                     ;; (edges stay covered by the splats' tails).
-                                     (recur (inc j)
-                                       (conj! acc [(max 0.0 (min hd x2)) (max 0.0 (min wd y2)) ssz D]))))))))))]
-            (recur (dec lvl) acc2)))))))
+      (reduce
+        (fn [acc {:keys [lvl ssz sp th nx ny]}]
+          (loop [i 0 acc acc]
+            (if (>= i nx)
+              acc
+              (recur (inc i)
+                (loop [j 0 acc acc]
+                  (if (>= j ny)
+                    acc
+                    (let [cx (* (+ (double i) 0.5) sp)
+                          cy (* (+ (double j) 0.5) sp)
+                          dv (wavelet/detail-at dmap cx cy)]
+                      (if (and (pos? (long lvl)) (< dv th))
+                        (recur (inc j) acc)          ; not detailed enough for this fine level
+                        (let [jx (* sp 0.45 (- (hash01 (+ (* i 137) lvl) j 3) 0.5))
+                              jy (* sp 0.45 (- (hash01 (+ (* i 149) lvl) j 7) 0.5))
+                              x  (+ cx jx) y (+ cy jy)
+                              D  (deff dv)
+                              ;; flat-region Perlin warp breaks any residual level lattice;
+                              ;; detail strokes (D≈1) stay put → faithful edges.
+                              aw (* warp (- 1.0 D) ssz)
+                              x2 (if (< aw 0.2) x
+                                   (+ x (* aw (noise/noise2 (* 0.06 x) (* 0.06 y)))))
+                              y2 (if (< aw 0.2) y
+                                   (+ y (* aw (noise/noise2 (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))]
+                          ;; keep centres in-bounds so no budget is wasted off-screen
+                          ;; (edges stay covered by the splats' tails).
+                          (recur (inc j)
+                            (conj! acc [(max 0.0 (min hd x2)) (max 0.0 (min wd y2)) ssz D])))))))))))
+        (transient [])
+        levels))))
 
 ;; --- precomputed smooth Perlin fields (flow angle, size, tone) ---------------
 ;; noise2 is ~30 ops; calling it 4× per splat over ~14k splats dominated the render.

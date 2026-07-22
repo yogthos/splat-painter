@@ -5,6 +5,7 @@
   widgets register. Needs no GL context and no display. Run with `joltc -M:check`."
   (:require [clojure.string :as str]
             [splat-painter.shader :as shader]
+            [splat-painter.gen :as gen]
             [splat-painter.seed :as seed]
             [splat-painter.image :as image]
             [splat-painter.core :as core]
@@ -54,6 +55,35 @@
     (assert-contains fs-src "T *= (1.0 - a);"                 "transmittance update")
     (assert-contains fs-src "frag = vec4(acc + T * u_bg, 1.0);" "background weighted by T")
     (assert-contains vs-src "void main()"                    "vertex main"))
+
+  ;; the samplerBuffer render variant (consumes the transform-feedback stream directly)
+  (let [{:keys [fs-src-buf]} (shader/sources)]
+    (println "render (texture-buffer variant):")
+    (assert-contains fs-src-buf "uniform samplerBuffer u_splats;" "samplerBuffer u_splats")
+    (assert-contains fs-src-buf "texelFetch(u_splats, 2 * i);"     "flat texelFetch texel0")
+    (assert-contains fs-src-buf "texelFetch(u_splats, 2 * i + 1);" "flat texelFetch texel1")
+    (assert-contains fs-src-buf "float hardness = mix(u_hard_sharp, u_hard_soft, ts);" "size-scaled hardness"))
+
+  ;; the GPU generation shader must MIRROR seed/splat-record + layered-means + noise
+  (let [{:keys [vs-src gs-src]} (gen/sources)]
+    (println "generation (vertex + geometry, transform feedback):")
+    (assert-contains vs-src "v_id = gl_VertexID;" "gen VS passes vertex id")
+    (assert-contains gs-src "layout(points, max_vertices = 1) out;" "gen GS emits points")
+    (assert-contains gs-src "out vec4 o_a;" "gen TF varying o_a")
+    (assert-contains gs-src "out vec4 o_b;" "gen TF varying o_b")
+    ;; placement (layered-means): threshold discard + jitter + Perlin warp gate
+    (assert-contains gs-src "if (lvl > 0 && dv < th) return;" "gen threshold discard")
+    (assert-contains gs-src "hash01(i*137 + lvl, j, 3)" "gen jitter x hash")
+    (assert-contains gs-src "float aw = u_warp * (1.0 - D) * ssz;" "gen warp amplitude")
+    ;; hash01 (uint wrap == CPU mod 2^32) + Perlin (permutation texture)
+    (assert-contains gs-src "uint(a)*73856093u + uint(b)*19349663u + uint(salt)*83492791u" "gen hash01 constants")
+    (assert-contains gs-src "float noise2(float x, float y){ return noise3(x, y, 0.0); }" "gen noise2")
+    ;; splat-record: elongation, covariance, colour blend
+    (assert-contains gs-src "float e   = 1.0 + u_stroke * coh * (0.25 + 0.75 * D);" "gen elongation")
+    (assert-contains gs-src "float c00 = sx2*c*c + sy2*s*s;" "gen covariance c00")
+    (assert-contains gs-src "float t = clamp(0.55 + 0.45 * max(coh0, D), 0.0, 1.0);" "gen colour blend t")
+    (assert-contains gs-src "o_a = vec4(x2, y2, c00, c01);" "gen output o_a layout")
+    (assert-contains gs-src "o_b = vec4(c11, color.r, color.g, color.b);" "gen output o_b layout"))
 
   (println "pack-splats:")
   (let [splats [{:mean [1.0 2.0] :cov [4.0 0.5 0.5 9.0] :color [0.1 0.2 0.3]}]

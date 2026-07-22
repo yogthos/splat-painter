@@ -17,6 +17,7 @@
             [glimmer-gl.gtk :as glx]        ; registers :gl-area + :scale
             [glimmer-gl.gl  :as gl]
             [splat-painter.shader    :as shader]
+            [splat-painter.gen       :as gen]
             [splat-painter.image     :as image]
             [splat-painter.seed      :as seed]
             [splat-painter.structure :as structure]
@@ -41,6 +42,11 @@
 ;; --- non-reactive image / GL state -------------------------------------------
 ;; Need a sized internal-format for macOS core-profile FBO completeness.
 (def ^:private GL-RGBA8 0x8058)
+;; GPU generation: build the whole splat field on the GPU via transform feedback
+;; (splat-painter.gen) instead of CPU seed/splat-field — ~50× faster, output verified
+;; identical to the CPU golden. Default ON; set GA_PAINTER_CPU_GEN to fall back to the
+;; CPU path (still the tested reference).
+(def ^:private gpu-gen? (not (System/getenv "GA_PAINTER_CPU_GEN")))
 (defonce image-atom (atom nil))   ; {:height :width :channels :pixels} or nil
 (defonce gl-state   (atom {}))    ; per-GLArea GL handles, keyed by area pointer
 (defonce saved?-atom (atom false)) ; one-shot headless save via GA_PAINTER_SAVE_PNG
@@ -71,10 +77,14 @@
 ;; sliders only reset their atoms; the Render button (or loading an image) calls
 ;; request-render!, and on-render rebuilds the field from the current atoms — so
 ;; you tune the sliders, then hit Render to see the result.
+;; test/headless overrides so a fixed count/size can be forced without the sliders
+(defn- cur-count [] (or (some-> (System/getenv "GA_PAINTER_COUNT") Double/parseDouble long) @count-atom))
+(defn- cur-size  [] (or (some-> (System/getenv "GA_PAINTER_SIZE")  Double/parseDouble)      @size-atom))
+
 (defn- field-for-current-controls []
   (when-let [img @image-atom]
-    (seed/splat-field img {:count     @count-atom
-                           :size      @size-atom
+    (seed/splat-field img {:count     (cur-count)
+                           :size      (cur-size)
                            :stroke    @stroke-atom
                            :detail    @detail-atom
                            :variation @variation-atom
@@ -221,7 +231,9 @@
           (g-error-free ep)))
       (let [path (g-file-get-path gfile)]
         (g-object-unref gfile)
-        (save-png! path)))
+        (if (and gpu-gen? @area-atom)
+          (do (glx/make-current @area-atom) (gpu-save-png! @area-atom path))
+          (save-png! path))))
     (ffi/free errslot)
     (g-object-unref dialog)))
 
@@ -258,6 +270,133 @@
                         gl/GL-RGBA gl/GL-FLOAT ptr)
     (ffi/free ptr)
     n))
+
+;; --- GPU generation path (transform feedback) --------------------------------
+(defn- read-fbo-binding []
+  (let [p (ffi/alloc (ffi/sizeof :int))]
+    (gl/gl-get-integerv gl/GL-FRAMEBUFFER-BINDING p)
+    (let [v (ffi/read p :int 0)] (ffi/free p) v)))
+
+(defn- gpu-controls []
+  {:count (cur-count) :size (cur-size) :stroke @stroke-atom :detail @detail-atom
+   :variation @variation-atom :curvature @curvature-atom :contrast @contrast-atom})
+
+(defn- ensure-gpu!
+  "Lazily build the GPU-generation objects (gen program, buffer-render program, perm
+   texture, transform-feedback buffer + query + VAO, texture-buffer view) and (re)upload
+   the per-image field textures when the image changes. Returns the :gpu state map."
+  [area]
+  (let [st  (get @gl-state area)
+        gpu (:gpu st)
+        gpu (if (:gen gpu)
+              gpu
+              (let [tf-buf (gl/gen-one gl/gl-gen-buffers)]
+                (gl/gl-bind-buffer gl/GL-TRANSFORM-FEEDBACK-BUFFER tf-buf)
+                (gl/gl-buffer-data gl/GL-TRANSFORM-FEEDBACK-BUFFER
+                                   (* shader/max-splats 8 (ffi/sizeof :float)) ffi/null gl/GL-DYNAMIC-COPY)
+                {:gen     (gen/build-gen-program)
+                 :render  (shader/build-program-buf)
+                 :perm    (gen/upload-perm!)
+                 :tf-buf  tf-buf
+                 :query   (gl/gen-one gl/gl-gen-queries)
+                 :gen-vao (gl/gen-one gl/gl-gen-vertex-arrays)
+                 :buf-tex (gl/gen-one gl/gl-gen-textures)}))
+        img @image-atom
+        gpu (if (identical? img (:fields-img gpu))
+              gpu
+              (assoc gpu :fields (gen/upload-fields! img (:perm gpu)) :fields-img img))]
+    (swap! gl-state assoc-in [area :gpu] gpu)
+    gpu))
+
+(defn- gpu-draw!
+  "Generate the splat field on the GPU and composite it into the currently-bound
+   framebuffer. `vw/vh` = framebuffer viewport pixels (letterbox target), `iw/ih` =
+   image pixels. Returns {:count survivors :total candidates :n rendered}."
+  [area vw vh iw ih]
+  (let [{:keys [gen render fields tf-buf query gen-vao buf-tex]} (ensure-gpu! area)
+        t0 (System/nanoTime)
+        {:keys [count total sig-min sig-max]}
+        (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw})
+        n    (min count shader/max-splats)
+        locs (:locs render)]
+    (gl/gl-finish)   ; make the transform-feedback writes visible to the texelFetch below
+    (when (System/getenv "GA_PAINTER_GPU_TIME")
+      (dotimes [_ 3] (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw}) (gl/gl-finish))
+      (let [t1 (System/nanoTime) reps 8]
+        (dotimes [_ reps] (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw}) (gl/gl-finish))
+        (println (format "gpu-gen: %d->%d  %.1f ms/gen (warm avg of %d)" total count
+                         (/ (- (System/nanoTime) t1) 1e6 reps) reps))))
+    (gl/gl-clear-color 0.05 0.06 0.09 1.0)
+    (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
+    (gl/gl-use-program (:program render))
+    (gl/gl-active-texture gl/GL-TEXTURE0)
+    (gl/gl-bind-texture gl/GL-TEXTURE-BUFFER buf-tex)
+    (gl/gl-tex-buffer gl/GL-TEXTURE-BUFFER gl/GL-RGBA32F tf-buf)
+    (gl/gl-uniform-1i (:u_splats locs) 0)
+    (gl/gl-uniform-1i (:u_count locs) (int n))
+    (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
+    (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
+    (gl/gl-uniform-3f (:u_bg locs) 0.0 0.0 0.0)
+    (gl/gl-uniform-1f (:u_opacity locs) (double @opacity-atom))
+    (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
+    (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
+    (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
+    (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
+    (gl/gl-bind-vertex-array (:vao (get @gl-state area)))
+    (gl/gl-draw-arrays gl/GL-TRIANGLE-STRIP 0 4)
+    {:count count :total total :n n}))
+
+(defn- splat-stats [splats]
+  (reduce (fn [[sx sy sd sc] {[mx my] :mean [c00 c01 _ c11] :cov [r g b] :color}]
+            [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc r g b)])
+          [0.0 0.0 0.0 0.0] splats))
+
+(defn- gpu-verify! [area tf-buf n]
+  ;; numerical m11 check: compare the GPU-generated field to the CPU golden reference
+  ;; for the current controls (aggregate Σmean/Σdet/Σcolour — exact match is impossible
+  ;; across double↔float + Perlin/hash, so we report both for a closeness read).
+  (let [gpu (gen/read-splats tf-buf n)
+        cpu (:splats (field-for-current-controls))
+        [gx gy gd gc] (splat-stats gpu)
+        [cx cy cd cc] (splat-stats cpu)]
+    (println (format "gpu-verify: count GPU %d / CPU %d  (%.1f%%)" n (count cpu)
+                     (* 100.0 (/ (double n) (max 1 (count cpu))))))
+    (println (format "  Σmean-x  GPU %.1f  CPU %.1f" gx cx))
+    (println (format "  Σmean-y  GPU %.1f  CPU %.1f" gy cy))
+    (println (format "  Σdet     GPU %.1f  CPU %.1f" gd cd))
+    (println (format "  Σcolour  GPU %.2f  CPU %.2f" gc cc))))
+
+(defn- save-rgba-jolt! [buf iw ih path]
+  ;; buf = iw*ih*4 RGBA bytes, bottom-up (glReadPixels); write top-down via the native
+  ;; jolt.png encoder (no gdk-pixbuf — its from-data path faults post-GL here).
+  (let [pimg (jolt.png/image iw ih)]
+    (dotimes [r ih]
+      (let [src (* 4 (* (- ih 1 r) iw))]
+        (dotimes [c iw]
+          (let [o (+ src (* 4 c))]
+            (jolt.png/put! pimg
+                           (double (ffi/read buf :uint8 o))
+                           (double (ffi/read buf :uint8 (+ o 1)))
+                           (double (ffi/read buf :uint8 (+ o 2))))))))
+    (jolt.png/write pimg iw ih path)))
+
+(defn- gpu-save-png! [area path]
+  (when-let [img @image-atom]
+    (let [iw (int (:width img)) ih (int (:height img))
+          prev-fbo (read-fbo-binding)]
+      (ensure-export-targets! area iw ih)
+      (gl/gl-viewport 0 0 iw ih)
+      (let [{:keys [count total n]} (gpu-draw! area iw ih iw ih)
+            buf (ffi/alloc (* iw ih 4))]
+        (println (format "gpu-save: %d candidates -> %d survivors (render %d)" total count n))
+        (when (System/getenv "GA_PAINTER_GPU_VERIFY")   ; recomputes the CPU field — dev only
+          (gpu-verify! area (:tf-buf (:gpu (get @gl-state area))) n))
+        (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
+        (save-rgba-jolt! buf iw ih path)
+        (println "gpu-save: wrote" path)
+        (ffi/free buf))
+      (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
+      (let [[w h] @viewport] (gl/gl-viewport 0 0 w h)))))
 
 ;; Build the per-GLArea GL objects once on realize. Kept shallow (one let) so the
 ;; closer count is obvious.
@@ -300,7 +439,25 @@
   (reset! viewport [w h])
   (gl/gl-viewport 0 0 w h))
 
+(defn- on-render-gpu [area]
+  (when-let [_st (get @gl-state area)]
+    (let [[w h] @viewport
+          img   @image-atom]
+      (if-not img
+        (do (gl/gl-clear-color 0.05 0.06 0.09 1.0) (gl/gl-clear gl/GL-COLOR-BUFFER-BIT))
+        (gpu-draw! area w h (:width img) (:height img)))
+      (when-let [p (System/getenv "GA_PAINTER_SAVE_PNG")]
+        (when (and (not @saved?-atom) img)
+          (reset! saved?-atom true)
+          (gpu-save-png! area p))))))
+
 (defn on-render [area]
+  (when (and (System/getenv "GA_PAINTER_TF_SMOKE") (not @saved?-atom))
+    (reset! saved?-atom true)
+    (require 'splat-painter.tf-smoke)
+    ((resolve 'splat-painter.tf-smoke/run!)))
+  (if gpu-gen?
+    (on-render-gpu area)
   (when-let [st (get @gl-state area)]
     (let [{:keys [locs tex]} st
           [w h]   @viewport
@@ -331,7 +488,7 @@
       (when-let [p (System/getenv "GA_PAINTER_SAVE_PNG")]
         (when (and (not @saved?-atom) fld)
           (reset! saved?-atom true)
-          (save-png! p))))))
+          (save-png! p)))))))
 
 ;; --- reactive control panel --------------------------------------------------
 ;; Layout rule that keeps the sidebar narrow: NO widget inside the sidebar ever

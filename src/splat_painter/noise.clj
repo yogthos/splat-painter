@@ -68,3 +68,9 @@
   "2D Perlin noise at (x,y) in [0,1]."
   [x y]
   (noise3 x y 0.0))
+
+(def perm512
+  "Ken Perlin's 256-permutation doubled to 512 (the exact table noise3 indexes),
+   exposed as an ^ints so the GPU generation shader can upload it and reproduce the
+   same warp noise. Values are 0..255."
+  p)
