@@ -1,0 +1,98 @@
+(ns splat-painter.check
+  "Headless sanity check: the shader emits well-formed GLSL (the splat loop, the
+  precision formula, every uniform), splat packing matches the texture layout,
+  the full image -> seed -> pack pipeline runs end to end, and the glimmer-gl
+  widgets register. Needs no GL context and no display. Run with `joltc -M:check`."
+  (:require [clojure.string :as str]
+            [splat-painter.shader :as shader]
+            [splat-painter.seed :as seed]
+            [splat-painter.image :as image]
+            [splat-painter.core :as core]
+            [glimmer.widget :as w]
+            [glimmer-gl.gtk]))            ; loading registers :gl-area / :scale
+
+(defn- assert-contains [src needle label]
+  (assert (str/includes? src needle) (str label " missing from shader: " needle))
+  true)
+
+(defn- hiccup-nodes
+  "Depth-first walk over a glimmer widget tree. A node is either a hiccup element
+  ([:tag props & children]) or a function-call form ([fn & args]) that yields a
+  node when applied — the latter is how control-panel/slider compose. We realize
+  (apply) call-forms so the full tree is walked."
+  [root]
+  (letfn [(realize [node]
+            (if (and (vector? node) (seq node)
+                     (not (keyword? (first node))) (ifn? (first node)))
+              (apply (first node) (rest node))
+              node))
+          (children [node]
+            (let [n (realize node)]
+              (when (and (vector? n) (keyword? (first n)))
+                (->> n rest (drop-while map?) (filter vector?)))))]
+    (tree-seq #(and (vector? %) (seq %)) children root)))
+
+(defn -main [& _]
+  (let [{:keys [vs-src fs-src]} (shader/sources)]
+    (println "shader: vs" (count vs-src) "chars, fs" (count fs-src) "chars")
+    (assert-contains fs-src "uniform sampler2D u_splats;"    "u_splats")
+    (assert-contains fs-src "uniform int  u_count;"          "u_count")
+    (assert-contains fs-src "uniform vec2 u_viewport;"       "u_viewport")
+    (assert-contains fs-src "uniform vec2 u_image;"          "u_image")
+    (assert-contains fs-src "uniform vec3 u_bg;"             "u_bg")
+    (assert-contains fs-src "texelFetch(u_splats, ivec2(2 * col,     row), 0);" "texelFetch texel0")
+    (assert-contains fs-src "texelFetch(u_splats, ivec2(2 * col + 1, row), 0);" "texelFetch texel1")
+    (assert-contains fs-src "float det = max(c00 * c11 - c01 * c01, 1e-8);" "det floor")
+    (assert-contains fs-src "float p00 = c11 / det, p11 = c00 / det, cross = -2.0 * c01 / det;"
+                    "precision (2x2 inverse)")
+    (assert-contains fs-src "uniform float u_opacity;"          "u_opacity")
+    (assert-contains fs-src "uniform float u_hard_sharp;"       "u_hard_sharp")
+    (assert-contains fs-src "uniform float u_hard_soft;"        "u_hard_soft")
+    (assert-contains fs-src "float hardness = mix(u_hard_sharp, u_hard_soft, ts);" "size-scaled hardness")
+    (assert-contains fs-src "float a = u_opacity * exp(-pow(pdf, hardness));" "opacity-scaled, size-hardness alpha")
+    (assert-contains fs-src "acc += wa * t1.yzw;"             "over-composite color accumulation")
+    (assert-contains fs-src "T *= (1.0 - a);"                 "transmittance update")
+    (assert-contains fs-src "frag = vec4(acc + T * u_bg, 1.0);" "background weighted by T")
+    (assert-contains vs-src "void main()"                    "vertex main"))
+
+  (println "pack-splats:")
+  (let [splats [{:mean [1.0 2.0] :cov [4.0 0.5 0.5 9.0] :color [0.1 0.2 0.3]}]
+        packed (shader/pack-splats splats)]
+    (println "  1 splat ->" (count packed) "floats (want 8)")
+    (assert (= 8 (count packed)))
+    (assert (= [1.0 2.0 4.0 0.5 9.0 0.1 0.2 0.3] packed))
+    (println "  layout [mean_x mean_y c00 c01  c11 r g b]: OK"))
+
+  (println "pipeline (load eye.jpeg -> seed -> pack):")
+  (let [img   (image/load-image "test/splat_painter/fixtures/eye.jpeg" 64)
+        fld   (seed/splat-field img {:count 256 :size 3.0})
+        n     (count (:splats fld))
+        packed (shader/pack-splats (:splats fld))]
+    (println (format "  image %dx%d -> %d splats -> %d texture floats"
+                     (:width img) (:height img) n (count packed)))
+    (assert (pos? n))
+    (assert (= (* 2 n 4) (count packed)))))
+
+  (println "widgets registered:"
+           (every? #(contains? @w/specs %) [:gl-area :scale]))
+  (assert (every? #(contains? @w/specs %) [:gl-area :scale]) "widgets not registered")
+  (println "layout invariants (sidebar narrow, sliders live):")
+  (let [tree     (core/app)
+        kw-node? (fn [n] (and (vector? n) (keyword? (first n))))
+        nodes    (filter kw-node? (hiccup-nodes tree))
+        props    (fn [n] (let [p (second n)] (if (map? p) p {})))
+        scales   (filter #(= :scale (first %)) nodes)
+        hexp     (filter #(:hexpand (props %)) nodes)]
+    (assert (seq scales) "expected at least one :scale in the control panel")
+    (assert (every? #(contains? (props %) :on-value) scales)
+            "every slider must wire :on-value (live repaint)")
+    (assert (every? #(not (:hexpand (props %))) scales)
+            "sliders must not :hexpand — it propagates up and balloons the sidebar")
+    (assert (every? #(contains? (props %) :width-request) scales)
+            "every slider needs :width-request so the track has size without :hexpand")
+    (assert (= 1 (count hexp)) "exactly one :hexpand widget (the GL area)")
+    (assert (= :gl-area (first (first hexp))) "the sole :hexpand must be :gl-area")
+    (println (format "  %d sliders (on-value wired, no :hexpand, :width-request set); %d :hexpand widget(s)"
+                     (count scales) (count hexp))))
+
+  (println "check: ok")

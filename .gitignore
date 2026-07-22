@@ -1,0 +1,11 @@
+2d-gaussian-splatting-Art/
+DrawingWithGaussians/
+
+# editor / tool cache (build artifacts, never source)
+.clj-kondo/
+.cpcache/
+.lsp/
+
+# macOS / tool state
+.DS_Store
+.dirge/
