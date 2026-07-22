@@ -1,0 +1,26 @@
+{:paths ["src"]
+
+ :deps {jolt-lang/glimmer-gl {:local/root "../jolt-lang/glimmer-gl"}
+        jolt-lang/glimmer    {:local/root "../jolt-lang/glimmer"}}
+
+ ;; gdk-pixbuf decodes the input image (JPEG/PNG/...) into an in-memory pixel
+ ;; buffer. OpenGL comes in transitively via glimmer-gl; GTK4/GLib via glimmer.
+ ;; On macOS Chez's dlopen default path skips Homebrew, so the full dylib path
+ ;; is listed first (Apple Silicon then Intel), then the bare name for Linux.
+ :jolt/native [{:name "gdk-pixbuf"
+                :darwin ["/opt/homebrew/lib/libgdk_pixbuf-2.0.0.dylib"
+                         "/usr/local/lib/libgdk_pixbuf-2.0.0.dylib"
+                         "libgdk_pixbuf-2.0.0.dylib"
+                         "libgdk_pixbuf-2.0.dylib"]
+                :linux  ["libgdk_pixbuf-2.0.so.0" "libgdk_pixbuf-2.0.so"]}]
+ :aliases {:probe {:main-opts ["-m" "splat-painter.probe"]}
+           :run   {:main-opts ["-m" "splat-painter.core"]}
+           :check {:main-opts ["-m" "splat-painter.check"]}
+           :prof  {:main-opts ["-m" "splat-painter.prof"]}
+           :preview {:main-opts ["-m" "splat-painter.preview"]}
+           :test  {:extra-paths ["test"] :main-opts ["-m" "splat-painter.test-runner"]}}
+
+ :tasks {run   "joltc -M:run"
+         check "joltc -M:check"
+         test  "joltc -M:test"}}
+
