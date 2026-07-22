@@ -110,6 +110,22 @@
 (deftest field-carries-opacity
   (is (= 0.42 (:opacity (seed/splat-field (solid 8 8 [1 1 1]) {:count 4 :opacity 0.42})))))
 
+(deftest splat-record-spec
+  ;; the pure per-splat math the GPU generation shader must reproduce; pin it directly so the
+  ;; CPU/GPU spec is guarded independently of placement + field sampling.
+  ;; coh=0.64, e=2 → √e; s0=5 (snoise 0); t=0.775; contrast 1, tone 1 (tnoise 0).
+  (let [{:keys [mean cov color]}
+        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0)
+        [c00 c01 _ c11] cov
+        [cr cg cb] color]
+    (is (= [10.0 20.0] mean))
+    (is (approx= 1e-6 50.0    c00))   ; sx² = (s0·√e)², e=2 ⇒ 50
+    (is (approx= 1e-6 0.0     c01))   ; θ=0 ⇒ axis-aligned
+    (is (approx= 1e-6 12.5    c11))   ; sy² = (s0/√e)² = 12.5
+    (is (approx= 1e-6 0.71    cr))    ; 0.4·0.225 + 0.8·0.775
+    (is (approx= 1e-6 0.245   cg))
+    (is (approx= 1e-6 0.1675  cb))))
+
 (deftest splat-field-golden
   ;; whole-generation regression guard (placement + covariance + colour). Pins the splat count
   ;; and a checksum of every splat's mean / det(cov) / colour for a fixed image + controls. Any

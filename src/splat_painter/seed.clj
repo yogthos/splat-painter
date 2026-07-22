@@ -240,6 +240,37 @@
     (sequential? bg) [(double (nth bg 0)) (double (nth bg 1)) (double (nth bg 2))]
     :else [0.0 0.0 0.0]))
 
+(defn splat-record
+  "The pure per-splat math — THE SPEC the GPU generation shader mirrors. Given a stroke's mean
+   (x,y), its size `csz` and detail level `dlev`, the sampled orientation fields (θ, coherence,
+   size-noise, tone-noise) and the two sampled source colours (`blur-rgb` smooth base + `raw-rgb`
+   crisp pixel), returns {:mean :cov :color}. All field/colour SAMPLING is done by the caller
+   (CPU: array lookups; GPU: texture fetches) — this fn is only the arithmetic, so both paths
+   compute identical splats.
+
+     covariance: elongation e = 1 + stroke·coh·(0.25+0.75·dlev) tapers round→thin with detail;
+                 s0 = csz·(1 + variation·snoise) jitters size; Σ = R(θ)·diag((s0·√e)²,(s0/√e)²)·Rᵀ.
+     colour:     t = 0.55 + 0.45·max(coherence,dlev) blends blur→raw (crisper at edges/detail);
+                 contrast about 0.5; tone = 1 + variation·0.3·tnoise."
+  [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast]
+  (let [coh (+ min-coh (* (- 1.0 min-coh) coherence))
+        e   (+ 1.0 (* stroke coh (+ 0.25 (* 0.75 (double dlev)))))
+        se  (Math/sqrt e)
+        s0  (* csz (+ 1.0 (* variation 0.5 (* 2.0 snoise))))
+        sx  (* s0 se)                 ; long axis along θ
+        sy  (/ s0 se)                 ; short axis across the stroke
+        t   (min 1.0 (max 0.0 (+ 0.55 (* 0.45 (max coherence (double dlev))))))
+        [br bg bb] blur-rgb [rr rg rb] raw-rgb
+        color0 [(+ (* br (- 1.0 t)) (* rr t))
+                (+ (* bg (- 1.0 t)) (* rg t))
+                (+ (* bb (- 1.0 t)) (* rb t))]
+        color-ac (if (== contrast 1.0) color0 (apply-contrast contrast color0))
+        tone (+ 1.0 (* variation 0.15 (* 2.0 tnoise)))
+        color (mapv (fn [c] (max 0.0 (min 1.0 (* c tone)))) color-ac)]
+    {:mean  [x y]
+     :cov   (gauss/covariance sx sy theta)
+     :color color}))
+
 ;; --- main -------------------------------------------------------------------
 
 (defn splat-field
@@ -264,46 +295,15 @@
         gmax-sqrt  (Math/sqrt (max (:gmax sfield) 0.0))
         nf         (or (:noise-fields image) (prep-noise sfield))
         means      (layered-means dmap detail size variation curvature n height width)
+        ;; sample the per-position fields (CPU array lookups; the GPU path fetches the same
+        ;; from field textures) then hand off to the pure `splat-record` math shared with GPU.
         splats     (vec
                      (for [[x y csz dlev] means
-                           ;; theta (final edge-seeded flow orientation) and coherence are
-                           ;; precomputed per cell (prep-noise) — the hot loop just samples.
                            :let [[theta coherence snoise tnoise] (sample-fields nf x y)
-                                 ;; broad/round dabs in flat regions, thin strokes elongated
-                                 ;; along strong edges — shape varies with local structure.
-                                 ;; Elongation ALSO tapers with detail level: fine detail strokes
-                                 ;; (high dlev) elongate fully along contours, while large flat
-                                 ;; strokes (low dlev) stay round — long flat strokes read as
-                                 ;; angular facet planes, round ones blend into a smooth wash.
-                                 coh (+ min-coh (* (- 1.0 min-coh) coherence))
-                                 e  (+ 1.0 (* stroke coh (+ 0.25 (* 0.75 (double dlev)))))
-                                 se (Math/sqrt e)
-                                 ;; csz is already the detail-varied stroke size (grid-means);
-                                 ;; modulate it by the smooth Perlin size field for organic variation
-                                 s0 (* csz (+ 1.0 (* variation 0.5 (* 2.0 snoise))))
-                                 sx (* s0 se)          ; long axis along θ
-                                 sy (/ s0 se)          ; short axis across the stroke
-                                 ;; colour: each stroke pulls toward the raw pixel (a
-                                 ;; distinct colour, so overlapping strokes read as separate
-                                 ;; marks) — fully at edges AND in high-detail cells, so
-                                 ;; text/lines keep the crisp pixel colour even where the
-                                 ;; structure tensor is incoherent; flat low-detail regions keep
-                                 ;; a little of the smooth blur base so they don't read as noise.
-                                 t (min 1.0 (max 0.0 (+ 0.55 (* 0.45 (max coherence (double dlev))))))
-                                 color0 (if (< t 0.01)
-                                          (sample-arr blur-px width height x y)
-                                          (let [[br bg bb] (sample-arr blur-px width height x y)
-                                                [rr rg rb] (sample-arr raw-px width height x y)]
-                                            [(+ (* br (- 1.0 t)) (* rr t))
-                                             (+ (* bg (- 1.0 t)) (* rg t))
-                                             (+ (* bb (- 1.0 t)) (* rb t))]))
-                                 color-ac (if (== contrast 1.0) color0 (apply-contrast contrast color0))
-                                 ;; smooth tone modulation (precomputed Perlin channel)
-                                 tone (+ 1.0 (* variation 0.15 (* 2.0 tnoise)))
-                                 color (mapv (fn [c] (max 0.0 (min 1.0 (* c tone)))) color-ac)]]
-                       {:mean  [x y]
-                        :cov   (gauss/covariance sx sy theta)
-                        :color color}))
+                                 blur-rgb (sample-arr blur-px width height x y)
+                                 raw-rgb  (sample-arr raw-px width height x y)]]
+                       (splat-record x y csz dlev theta coherence snoise tnoise
+                                     blur-rgb raw-rgb stroke variation contrast)))
         splats (if (>= palette-n 2)
                  (let [cols (map :color splats)
                        q    (p/quantize cols palette-n)]
