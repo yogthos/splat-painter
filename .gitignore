@@ -9,3 +9,8 @@ DrawingWithGaussians/
 # macOS / tool state
 .DS_Store
 .dirge/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

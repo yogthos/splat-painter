@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "splat_painter",
+  "project_id": "1530db68-5cff-4f9a-ab01-a2f56ec54231"
+}
