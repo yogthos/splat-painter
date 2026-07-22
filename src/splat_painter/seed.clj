@@ -130,9 +130,11 @@
                     sp (sp-of lvl 1.0)]
                 (recur (inc lvl) (+ acc (/ (* f area) (* sp sp)))))))
         scale (max 1.0 (Math/sqrt (/ K budget)))]
+    ;; emit FINEST level first (lvl nlev-1 → 0) so the field is already in paint order
+    ;; (small strokes at the front, over the large base) — no sort needed downstream.
     (persistent!
-      (loop [lvl 0 acc (transient [])]
-        (if (>= lvl nlev)
+      (loop [lvl (dec nlev) acc (transient [])]
+        (if (< lvl 0)
           acc
           (let [ssz (* scale (/ smax (Math/pow 2.0 (double lvl))))
                 sp  (sp-of lvl scale)
@@ -166,7 +168,7 @@
                                      ;; (edges stay covered by the splats' tails).
                                      (recur (inc j)
                                        (conj! acc [(max 0.0 (min hd x2)) (max 0.0 (min wd y2)) ssz D]))))))))))]
-            (recur (inc lvl) acc2)))))))
+            (recur (dec lvl) acc2)))))))
 
 ;; --- precomputed smooth Perlin fields (flow angle, size, tone) ---------------
 ;; noise2 is ~30 ops; calling it 4× per splat over ~14k splats dominated the render.
@@ -307,23 +309,16 @@
                        q    (p/quantize cols palette-n)]
                    (mapv (fn [s c] (assoc s :color c)) splats q))
                  splats)
-        ;; PAINT ORDER: broad strokes go down first (the underpainting), fine detail strokes
-        ;; last so they sit ON TOP. The shader composites front-to-back (index 0 = topmost
-        ;; layer), so ordering by INCREASING size puts small crisp detail strokes at the front
-        ;; and big soft strokes at the back — otherwise a big soft stroke drawn over a detail
-        ;; stroke washes it out (blurry), worse the more detail there is.
-        ;; Decorate with det (∝ size²) ONCE per splat then sort by that — sort-by would
-        ;; otherwise recompute det on every comparison (2× per compare = the hot cost).
-        keyed  (sort-by first
-                        (map (fn [s] (let [[c00 c01 _ c11] (:cov s)]
-                                       [(max (- (* c00 c11) (* c01 c01)) 1e-8) s]))
-                             splats))
-        splats (mapv second keyed)
-        ;; effective stdev = det^¼ = geometric-mean stdev = base stroke size (elongation
-        ;; cancels). keyed is sorted ascending by det, so first/last give the size range the
-        ;; shader needs to scale edge hardness by size.
-        sig-min (if (seq keyed) (Math/sqrt (Math/sqrt (first (first keyed)))) 1.0)
-        sig-max (if (seq keyed) (Math/sqrt (Math/sqrt (first (last keyed)))) 1.0)]
+        ;; PAINT ORDER needs NO sort: `layered-means` emits finest level first, so the field is
+        ;; already small→large. The shader composites front-to-back (index 0 = topmost), so the
+        ;; small crisp detail strokes sit at the front over the big soft underpainting. Dropping
+        ;; the O(n log n) sort matters at high splat counts and mirrors the GPU path (which
+        ;; likewise gets paint order for free from level order). One pass for the size range.
+        sigs   (map (fn [{[c00 c01 _ c11] :cov}]
+                      (Math/sqrt (Math/sqrt (max (- (* c00 c11) (* c01 c01)) 1e-8))))
+                    splats)
+        sig-min (if (seq sigs) (reduce min sigs) 1.0)
+        sig-max (if (seq sigs) (reduce max sigs) 1.0)]
     {:splats     splats
      :background (resolve-background background)
      :height     height
