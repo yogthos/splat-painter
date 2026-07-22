@@ -110,6 +110,24 @@
 (deftest field-carries-opacity
   (is (= 0.42 (:opacity (seed/splat-field (solid 8 8 [1 1 1]) {:count 4 :opacity 0.42})))))
 
+(deftest splat-field-golden
+  ;; whole-generation regression guard (placement + covariance + colour). Pins the splat count
+  ;; and a checksum of every splat's mean / det(cov) / colour for a fixed image + controls. Any
+  ;; change that alters the produced field — including refactoring the per-splat math into a
+  ;; shared fn for the GPU path, or the GPU output drifting from this CPU reference — trips it.
+  (let [img (gray-img 48 64 (fn [x y] (if (and (> x 16) (< x 32) (> y 20) (< y 44))
+                                        0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
+        {:keys [splats]} (seed/splat-field img {:count 4000 :size 6.0 :stroke 2.5 :detail 0.6
+                                                :variation 0.5 :curvature 0.5 :opacity 0.9 :contrast 1.0})
+        [sx sy sd sc] (reduce (fn [[sx sy sd sc] {[mx my] :mean [c00 c01 _ c11] :cov [cr cg cb] :color}]
+                                [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc cr cg cb)])
+                              [0.0 0.0 0.0 0.0] splats)]
+    (is (= 254 (count splats)))
+    (is (approx= 0.05 6438.922   sx) "Σ mean-x")
+    (is (approx= 0.05 8095.514   sy) "Σ mean-y")
+    (is (approx= 0.5  210455.049 sd) "Σ det(cov)")
+    (is (approx= 0.05 308.503    sc) "Σ colour")))
+
 (deftest contrast-brightens-highlights
   ;; (0.7-0.5)*2.0+0.5 = 0.9
   (let [img (gray-img 16 16 (fn [_ _] 0.7))
