@@ -179,7 +179,7 @@
                                             0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
         sfield (structure/analyze img)
         dmap   (wavelet/placement-map img sfield)
-        {:keys [nlev levels total warp]} (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 4000 48 64)
+        {:keys [nlev levels total warp]} (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 1.0 1.0] 4000 48 64)
         cells (map (fn [l] (* (:nx l) (:ny l))) levels)]
     (is (= 5 nlev) "detail 0.6 -> 1+round(3.6) = 5 levels")
     (is (= 5 (count levels)))
@@ -192,6 +192,20 @@
     (is (approx= 1e-9 0.475 warp) "warp = 0.95 * curvature")
     (is (approx= 1e-6 (:ssz (last levels)) (* 2.0 (:ssz (nth levels (- (count levels) 2)))))
         "base stdev = 2× the next-finer level")))
+
+(deftest tier-multipliers-scale-their-levels
+  ;; the per-tier size sliders: broad scales the base stdev, fine scales the finest,
+  ;; and 1.0 everywhere is a strict identity (the golden above pins that for the
+  ;; whole pipeline). Spacing tracks size, so overlap/coverage is preserved.
+  (let [img  (gray-img 48 64 (fn [x y] (if (and (> x 16) (< x 32) (> y 20) (< y 44))
+                                         0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
+        dmap (wavelet/placement-map img (structure/analyze img))
+        base (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 1.0 1.0] 4000 48 64)
+        wide (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [2.0 1.0 0.5] 4000 48 64)
+        ssz-of (fn [lp lvl] (:ssz (first (filter #(= lvl (:lvl %)) (:levels lp)))))]
+    (is (approx= 1e-9 (* 2.0 (ssz-of base 0)) (ssz-of wide 0)) "broad ×2 doubles the base")
+    (is (approx= 1e-9 (ssz-of base 2) (ssz-of wide 2)) "mid unchanged at 1.0")
+    (is (approx= 1e-9 (* 0.5 (ssz-of base 4)) (ssz-of wide 4)) "fine ×0.5 halves the finest")))
 
 (deftest contrast-brightens-highlights
   ;; (0.7-0.5)*2.0+0.5 = 0.9

@@ -125,6 +125,14 @@
   (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 (== l 4) 0.6 (== l 5) 0.5 :else 0.4)))
 (defn- bend-frac "how much of the Curvature bend this level keeps" [lvl]
   (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 (== l 4) 0.15 (== l 5) 0.1 :else 0.05)))
+(defn- tier-mul
+  "Per-tier size multiplier from [broad mid fine] — the user's independent control
+   of each resolution band: loosen/blur the background (broad up) while keeping
+   small details focused (fine at or below 1)."
+  [muls lvl]
+  (let [l (long lvl)]
+    (double (cond (<= l 1) (nth muls 0) (<= l 3) (nth muls 1) :else (nth muls 2)))))
+
 (defn- level-map-kind
   "Which placement map a level reads — matched to the scale it paints: broad levels
    the smoothed aggregate, mid levels the MID band map (face-feature frequencies),
@@ -153,7 +161,7 @@
    candidate-cell start (finest-first). :total = Σ nx·ny (candidate count the GPU
    draws as GL_POINTS). :warp = flat-region Perlin warp gain, :scale = the uniform
    size-up that keeps the field under budget."
-  [dmap detail size variation curvature stroke count H W]
+  [dmap detail size variation curvature stroke tier-muls count H W]
   (let [smax    (double size)
         slen    (stroke-len-frac stroke)
         budget  (min (double splat-budget) (max 500.0 (double count)))
@@ -177,7 +185,10 @@
         overlap (fn [lvl] (if (zero? (long lvl))
                             0.65
                             (* 1.25 (Math/sqrt (* (double (seg-count lvl)) slen)))))
-        sp-of   (fn [lvl scale] (* (overlap lvl) scale (/ smax (Math/pow 2.0 (double lvl)))))
+        ;; tier multipliers scale size AND spacing together (constant overlap), so
+        ;; each tier's density rebalances through the budget automatically.
+        sp-of   (fn [lvl scale] (* (overlap lvl) scale (tier-mul tier-muls lvl)
+                                   (/ smax (Math/pow 2.0 (double lvl)))))
         ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working
         ;; budget. Fine-level seeds emit segs(lvl) SEGMENTS each (a traced brush stroke),
         ;; so their term is multiplied accordingly — the budget counts splats, not seeds.
@@ -222,7 +233,7 @@
                  (if (< lvl 0)
                    out
                    (let [lsc (scale-of lvl)
-                         ssz (* lsc (/ smax (Math/pow 2.0 (double lvl))))
+                         ssz (* lsc (tier-mul tier-muls lvl) (/ smax (Math/pow 2.0 (double lvl))))
                          sp  (sp-of lvl lsc)
                          nx  (long (Math/ceil (/ area (* sp sp))))
                          ny  1]
@@ -345,11 +356,11 @@
    the surviving seed, then hand it to `stroke-segments` (base fill vs traced brush stroke).
    Emits [x y size D sn tn alpha theta coherence] per SEGMENT (D = effective detail 0..1;
    sn/tn = per-seed size/tone jitter hashes in [-0.5,0.5])."
-  [dmap nf detail size variation curvature stroke count H W blur-px]
+  [dmap nf detail size variation curvature stroke tier-muls count H W blur-px]
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
         iw   (long W) ih (long H)
         deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
-        {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke count H W)]
+        {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke tier-muls count H W)]
     (persistent!
       (reduce
         (fn [acc [idx {:keys [lvl ssz sp th nx ny segs stepf bendf map-kind traw]}]]
@@ -561,9 +572,11 @@
   "Build a splat field from `image` (see ns doc) and `controls` (see ns doc).
    Returns {:splats […] :background [r g b] :height :width :opacity}."
   [{:keys [height width pixels] :as image} controls]
-  (let [{:keys [count size stroke detail variation curvature opacity contrast background]
+  (let [{:keys [count size stroke detail variation curvature opacity contrast background
+                size-broad size-mid size-fine]
          :or   {count 6000 size 3.0 stroke 2.0 detail 0.6 variation 0.5 curvature 0.5
-                opacity 0.9 contrast 1.0 background 0.0}} controls
+                opacity 0.9 contrast 1.0 background 0.0
+                size-broad 1.0 size-mid 1.0 size-fine 1.0}} controls
         n          (long (or count 6000))
         size       (double (or size 3.0))
         stroke     (double stroke)
@@ -577,7 +590,9 @@
         ^doubles blur-px (or (:blur image) pixels)
         ^doubles blurh-px (or (:blur-heavy image) blur-px)
         nf         (or (:noise-fields image) (prep-noise sfield))
-        segments   (layered-means dmap nf detail size variation curvature stroke n height width blur-px)
+        segments   (layered-means dmap nf detail size variation curvature stroke
+                                  [(double size-broad) (double size-mid) (double size-fine)]
+                                  n height width blur-px)
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
