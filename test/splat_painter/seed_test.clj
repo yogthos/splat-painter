@@ -140,14 +140,14 @@
         [sx sy sd sc] (reduce (fn [[sx sy sd sc] {[mx my] :mean [c00 c01 _ c11] :cov [cr cg cb] :color}]
                                 [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc cr cg cb)])
                               [0.0 0.0 0.0 0.0] splats)]
-    ;; older: count=254 (pre placement-map); count=497 (dabs, nearest theta / Perlin jitter
-    ;; fields; then bilinear c2/s2). Now fine seeds — √segs sparser — trace 6-segment
-    ;; brush strokes at the old dabs' stroke width.
-    (is (= 516 (count splats)))
-    (is (approx= 0.5  13630.289  sx) "Σ mean-x")
-    (is (approx= 0.5  16416.601  sy) "Σ mean-y")
-    (is (approx= 1.0  278889.108 sd) "Σ det(cov)")
-    (is (approx= 0.05 544.818    sc) "Σ colour")))
+    ;; older: count=254 (pre placement-map); 497 (dabs); 516 (uniform 6-seg strokes).
+    ;; Now stroke behaviour is scale-relative (segs/step/bend per level) and the finest
+    ;; levels place against the sharp fine-band map.
+    (is (= 488 (count splats)))
+    (is (approx= 0.5  13015.793  sx) "Σ mean-x")
+    (is (approx= 0.5  15294.527  sy) "Σ mean-y")
+    (is (approx= 1.0  278698.397 sd) "Σ det(cov)")
+    (is (approx= 0.05 483.365    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments

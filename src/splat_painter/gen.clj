@@ -58,6 +58,12 @@ uniform int   u_nx[ML];
 uniform int   u_ny[ML];
 uniform int   u_off[ML];
 uniform int   u_lvl[ML];
+// scale-relative stroke behaviour per level slot (seed/layer-params: seg-count,
+// step-frac, bend-frac, sharp-level?)
+uniform int   u_segs[ML];
+uniform float u_stepf[ML];
+uniform float u_bendf[ML];
+uniform int   u_sharp[ML];
 uniform float u_warp;
 uniform int   u_H;
 uniform int   u_W;
@@ -129,6 +135,11 @@ float detailAt(float x, float y){
   vec4 t = texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0);
   return u_dmax > 0.0 ? min(1.0, t.r / u_dmax) : 0.0;
 }
+// the SHARP fine-band map (texel .g) — what the finest levels threshold against
+float sharpAt(float x, float y){
+  vec4 t = texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0);
+  return u_dmax > 0.0 ? min(1.0, t.g / u_dmax) : 0.0;
+}
 
 // BILINEAR orientation-field sample (mirrors seed/sample-fields exactly: same
 // continuous coord fx = x·dim/src, same floor/clamp). The texture stores cos2θ /
@@ -197,7 +208,8 @@ void main(){
   float sp = u_sp[k], ssz = u_ssz[k], th = u_th[k];
   float cx = (float(i) + 0.5) * sp;
   float cy = (float(j) + 0.5) * sp;
-  float dv = detailAt(cx, cy);
+  // each level reads the map matched to ITS scale (mirror of seed/layered-means)
+  float dv = (u_sharp[k] == 1) ? sharpAt(cx, cy) : detailAt(cx, cy);
   if (lvl > 0 && dv < th) return;                 // not detailed enough -> discard
 
   float jx = sp * 0.45 * (hash01(i*137 + lvl, j, 3) - 0.5);
@@ -224,20 +236,24 @@ void main(){
   // stepped along the orientation field (the edge tangent), sign-continuous, bent by
   // smooth Perlin noise scaled by Curvature, size+alpha tapering toward the tail.
   float dirsign = hash01(i*41 + lvl, j, 17) < 0.5 ? 1.0 : -1.0;
+  int   segs  = u_segs[k];                       // scale-relative stroke behaviour:
+  float stepf = u_stepf[k];                      // broad levels stroke long and curl,
+  float bendf = u_bendf[k];                      // fine levels make short precise marks
   float px = x2, py = y2, dxp = 0.0, dyp = 0.0;
   for (int q = 0; q < SEGS; q++) {
-    float tt = float(q) / float(SEGS - 1);
+    if (q >= segs) break;
+    float tt = float(q) / float(segs - 1);
     float sz = ssz * (1.0 - 0.45 * tt * sqrt(tt));   // width tapers to the tip
     float al = 1.0 - 0.65 * tt * tt;                 // …and the paint thins out
     emitSplat(px, py, sz, D, snoise, tnoise, al);
     vec2  tc  = fieldsAt(px, py);
-    float bend = u_curv * 0.9 * (noise2(0.05*px, 0.05*py) - 0.5);
+    float bend = u_curv * 0.9 * bendf * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
     float dx0 = cos(tc.x), dy0 = sin(tc.x);
     float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);
     float dx1 = sgn*dx0, dy1 = sgn*dy0;
     float dx = cb*dx1 - sb*dy1, dy = sb*dx1 + cb*dy1;
-    float L = ssz * 1.1;
+    float L = ssz * stepf;
     px = clamp(px + L*dx, 0.0, float(u_H - 1));
     py = clamp(py + L*dy, 0.0, float(u_W - 1));
     dxp = dx; dyp = dy;
@@ -247,6 +263,7 @@ void main(){
 (def ^:private gen-uniform-names
   ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv"
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
+   "u_segs" "u_stepf" "u_bendf" "u_sharp"
    "u_detailTex" "u_dmax" "u_detailDim" "u_detailSrc"
    "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_rawTex" "u_permTex"])
 
@@ -305,11 +322,13 @@ void main(){
         dmap (:detail img)
         Hd (long (:h dmap)) Wd (long (:w dmap))
         ^doubles dd (:detail dmap)
+        ^doubles ds (or (:sharp dmap) dd)
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
         ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
         detail-t (new-tex) noise-t (new-tex) blur-t (new-tex) raw-t (new-tex)]
-    (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) 0.0 0.0 1.0])))
+    ;; .r = aggregate placement map, .g = sharp fine-band map (finest levels read it)
+    (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) (aget ds i) 0.0 1.0])))
     ;; orientation as double-angle components (cos2θ, sin2θ) + coherence — the GS
     ;; bilinearly blends the components (fieldsAt), never the raw angle.
     (upload-rgba! noise-t  Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget c2 i) (aget s2 i) (aget co i) 0.0])))
@@ -389,6 +408,10 @@ void main(){
         ny  (pad (map :ny levels) 1)
         off (pad (map :offset levels) 0)
         lvl (pad (map :lvl levels) 0)
+        sgs (pad (map :segs levels) 1)
+        stf (pad (map :stepf levels) 1.0)
+        bnf (pad (map :bendf levels) 1.0)
+        shp (pad (map (fn [l] (if (:sharp? l) 1 0)) levels) 0)
         [sig-min sig-max] (sig-range levels variation)]
     (gl/gl-use-program program)
     ;; per-level + controls
@@ -408,6 +431,10 @@ void main(){
     (set-1iv! (:u_ny locs) ny)
     (set-1iv! (:u_off locs) off)
     (set-1iv! (:u_lvl locs) lvl)
+    (set-1iv! (:u_segs locs) sgs)
+    (set-1fv! (:u_stepf locs) stf)
+    (set-1fv! (:u_bendf locs) bnf)
+    (set-1iv! (:u_sharp locs) shp)
     ;; field textures on units 1..5 (unit 0 is the render splat buffer)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 1)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:detail fields)) (gl/gl-uniform-1i (:u_detailTex locs) 1)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 2)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:noise fields))  (gl/gl-uniform-1i (:u_noiseTex locs) 2)

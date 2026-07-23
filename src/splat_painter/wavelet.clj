@@ -91,7 +91,14 @@
         then elongate those splats along the edge
 
    The 0.30*mean(acc) floor in l(i)'s denominator keeps truly flat regions
-   (deep black background, sky) from being noise-amplified past the thresholds."
+   (deep black background, sky) from being noise-amplified past the thresholds.
+
+   ALSO returns :sharp — the same normalize+fuse pipeline over ONLY the finest two
+   Haar bands with minimal smoothing. The finest placement levels threshold against
+   it (and derive their D from it): the aggregate map is deliberately smoothed for
+   gradual stroke-density transitions, which blurs away exactly the text-scale
+   structure the smallest strokes exist to preserve. Scale-matched maps = the
+   coarse-to-fine pass paints, at each scale, what exists AT that scale."
   ([image sfield] (placement-map image sfield 512 4))
   ([image sfield max-side levels]
    (let [H (:height image) W (:width image)
@@ -102,54 +109,57 @@
          ;; gamma-corrected luma at placement-map resolution
          ^doubles lum (structure/luma-of image sh sw)
          _       (dotimes [i n] (aset lum i (Math/pow (aget lum i) 0.4545)))
-         ;; Haar multi-scale detail energy (same pipeline as detail-map)
-         acc     (double-array n)]
-     (loop [lev 1 ch sh cw sw ^doubles src lum block 2]
-       (when (and (<= lev levels) (>= ch 2) (>= cw 2))
-         (let [hc2 (quot ch 2) wc2 (quot cw 2)
-               ll  (double-array (* hc2 wc2))]
-           (haar-detail-energy! src ch cw ll acc sh sw block)
-           (recur (inc lev) hc2 wc2 ll (* 2 block)))))
-     ;; small box-blur to remove Haar block pattern (radius /40 — crisper than /24)
-     (let [blur-r  (max 1 (quot (min sh sw) 40))
-           ^doubles acc (structure/box-blur acc sh sw blur-r)
-           ;; g(i) = global normalization (today's behavior floor)
-           dmax    (loop [i 0 m 0.0] (if (< i n) (recur (inc i) (max m (aget acc i))) m))
-           ;; m(i) = wide local mean of acc for luma-relative normalization
-           wide-r  (max 2 (quot (min sh sw) 8))
-           ^doubles m-acc (structure/box-blur acc sh sw wide-r)
-           ;; denominator floor for l(i)
-           mean-acc (/ (loop [i 0 s 0.0] (if (< i n) (recur (inc i) (+ s (aget acc i))) s)) n)
-           ;; E(i) = edge strength sqrt(grad2/gmax) from structure tensor, resampled
-           ;; nearest-neighbour from the tensor grid to the placement-map grid
-           sf-h    (:h sfield) sf-w (:w sfield)
-           ^doubles sf-grad2 (:grad2 sfield)
-           sf-gmax (max (double (:gmax sfield)) 1e-12)
-           sf-srch (double (or (:src-h sfield) sf-h))
-           sf-srcw (double (or (:src-w sfield) sf-w))
-           E-arr   (double-array n)]
-       (dotimes [ri sh]
-         (dotimes [ci sw]
-           (let [x     (* ri (/ (double H) sh))
-                 y     (* ci (/ (double W) sw))
-                 sfi   (min (dec sf-h) (max 0 (long (Math/round (* x (/ sf-h sf-srch))))))
-                 sfj   (min (dec sf-w) (max 0 (long (Math/round (* y (/ sf-w sf-srcw))))))
-                 sfidx (+ (* sfi sf-w) sfj)
-                 g2    (aget sf-grad2 sfidx)]
-             (aset E-arr (+ (* ri sw) ci)
-                   (Math/sqrt (/ (max 0.0 g2) sf-gmax))))))
-       ;; P(i) = fused placement
-       (let [P (double-array n)]
-         (dotimes [i n]
-           (let [g (if (pos? dmax) (/ (aget acc i) dmax) 0.0)
-                 l (min 1.0 (/ (aget acc i) (+ (* 2.0 (aget m-acc i)) (* 0.30 mean-acc) 1e-12)))
-                 E (aget E-arr i)
-                 v (min 1.0 (max g l (* 0.85 E)))]
-             (aset P i v)))
-         ;; final light smoothing so transitions are gradual
-         (let [smooth-r (max 1 (quot (min sh sw) 50))
-               ^doubles P (structure/box-blur P sh sw smooth-r)]
-           {:h sh :w sw :detail P :dmax 1.0 :src-h H :src-w W}))))))
+         ;; Haar multi-scale detail energy (same pipeline as detail-map); snapshot the
+         ;; FINE-BAND energy (levels 1-2) before the coarse bands are added.
+         acc     (double-array n)
+         acc-fine
+         (loop [lev 1 ch sh cw sw ^doubles src lum block 2 fine nil]
+           (if (and (<= lev levels) (>= ch 2) (>= cw 2))
+             (let [hc2 (quot ch 2) wc2 (quot cw 2)
+                   ll  (double-array (* hc2 wc2))]
+               (haar-detail-energy! src ch cw ll acc sh sw block)
+               (recur (inc lev) hc2 wc2 ll (* 2 block)
+                      (if (= lev 2) (aclone acc) fine)))
+             (or fine (aclone acc))))
+         ;; E(i) = edge strength sqrt(grad2/gmax) from structure tensor, resampled
+         ;; nearest-neighbour from the tensor grid to the placement-map grid
+         sf-h    (:h sfield) sf-w (:w sfield)
+         ^doubles sf-grad2 (:grad2 sfield)
+         sf-gmax (max (double (:gmax sfield)) 1e-12)
+         sf-srch (double (or (:src-h sfield) sf-h))
+         sf-srcw (double (or (:src-w sfield) sf-w))
+         E-arr   (double-array n)
+         _ (dotimes [ri sh]
+             (dotimes [ci sw]
+               (let [x     (* ri (/ (double H) sh))
+                     y     (* ci (/ (double W) sw))
+                     sfi   (min (dec sf-h) (max 0 (long (Math/round (* x (/ sf-h sf-srch))))))
+                     sfj   (min (dec sf-w) (max 0 (long (Math/round (* y (/ sf-w sf-srcw))))))
+                     sfidx (+ (* sfi sf-w) sfj)
+                     g2    (aget sf-grad2 sfidx)]
+                 (aset E-arr (+ (* ri sw) ci)
+                       (Math/sqrt (/ (max 0.0 g2) sf-gmax))))))
+         ;; normalize+fuse one energy band: global g, local-relative l, edge E — the
+         ;; blur/smooth radii set how gradual the resulting map is.
+         fuse (fn [^doubles raw blur-r smooth-r]
+                (let [^doubles a (structure/box-blur raw sh sw blur-r)
+                      dmax    (loop [i 0 m 0.0] (if (< i n) (recur (inc i) (max m (aget a i))) m))
+                      wide-r  (max 2 (quot (min sh sw) 8))
+                      ^doubles m-a (structure/box-blur a sh sw wide-r)
+                      mean-a  (/ (loop [i 0 s 0.0] (if (< i n) (recur (inc i) (+ s (aget a i))) s)) n)
+                      P (double-array n)]
+                  (dotimes [i n]
+                    (let [g (if (pos? dmax) (/ (aget a i) dmax) 0.0)
+                          l (min 1.0 (/ (aget a i) (+ (* 2.0 (aget m-a i)) (* 0.30 mean-a) 1e-12)))
+                          E (aget E-arr i)
+                          v (min 1.0 (max g l (* 0.85 E)))]
+                      (aset P i v)))
+                  (structure/box-blur P sh sw smooth-r)))
+         ;; aggregate: smoothed for gradual density transitions (radius /40 blur, /50 final)
+         P  (fuse acc (max 1 (quot (min sh sw) 40)) (max 1 (quot (min sh sw) 50)))
+         ;; sharp: fine bands only, minimal smoothing — text/eye-scale structure survives
+         Ps (fuse acc-fine 1 1)]
+     {:h sh :w sw :detail P :sharp Ps :dmax 1.0 :src-h H :src-w W})))
 
 (defn detail-at
   "Normalized detail ∈ [0,1] at full-image coords (x=row, y=col), sampled from the
@@ -162,3 +172,11 @@
         xi (min (dec H) (max 0 (long (Math/round (* (double x) (/ (double H) src-h))))))
         yi (min (dec W) (max 0 (long (Math/round (* (double y) (/ (double W) src-w))))))]
     (if (pos? dmax) (min 1.0 (/ (aget d (+ (* xi W) yi)) dmax)) 0.0)))
+
+(defn sharp-at
+  "Like detail-at but over the :sharp fine-band map — what the finest placement
+   levels threshold against. Falls back to :detail when the map has no :sharp."
+  [dmap x y]
+  (if-let [s (:sharp dmap)]
+    (detail-at (assoc dmap :detail s) x y)
+    (detail-at dmap x y)))
