@@ -193,6 +193,8 @@ flat out float v_alpha;          // per-splat paint alpha (stroke taper)
 flat out vec2  v_major;          // stroke long-axis unit dir (rows, cols) — bristle frame
 flat out vec2  v_mean;           // splat mean — per-stroke noise seed
 flat out float v_edge;           // per-stroke edge-raggedness amount (0 on base strokes)
+flat out float v_sig;            // stroke stdev — sets the PROPORTIONAL texture frequency
+flat out float v_texg;           // size mute: full on fine strokes, faint on large ones
 out vec2 v_d;                    // image-space offset from the mean (rows, cols)
 
 void main(){
@@ -222,6 +224,11 @@ void main(){
   // fine marks (ts→0) get the full break-up, over the underpainting where it reads.
   float edgeAmt = u_tex_edge * (1.0 - ts);
   v_edge = edgeAmt;
+  // paint texture scales with the LAYER: a large low-detail stroke gets it VERY muted
+  // (a big smooth daub must not read as sandpaper); fine strokes keep full strength.
+  // v_sig drives the proportional frequency in the fragment shader.
+  v_sig  = sig;
+  v_texg = mix(1.0, 0.12, ts);
   // two triangles (0,1,2)(2,1,3) over corner ids 0..3 = (∓,∓)(±,∓)(∓,±)(±,±)
   int cid = corner == 0 ? 0 : (corner == 1 || corner == 4) ? 1
           : (corner == 2 || corner == 3) ? 2 : 3;
@@ -248,6 +255,8 @@ flat in float v_alpha;
 flat in vec2  v_major;
 flat in vec2  v_mean;
 flat in float v_edge;
+flat in float v_sig;
+flat in float v_texg;
 in vec2 v_d;
 uniform float u_opacity;
 uniform float u_tex_streak;      // bristle tonal-streak amount (0 = off)
@@ -278,15 +287,21 @@ void main(){
   float along  = dot(v_d, v_major);
   float seed   = hash21(v_mean) * 137.0;                  // per-stroke phase
 
+  // PROPORTIONAL FREQUENCY: scale the noise by stroke size so a big stroke gets
+  // proportionally COARSER cells (∝ its scale) instead of the fine sandpaper an
+  // absolute frequency paints over a large smooth daub. refSig≈3px keeps the finest
+  // strokes at their current look; larger strokes ease to lower frequency.
+  float fscale = min(1.0, 3.0 / max(v_sig, 0.5));
+
   // BRISTLE STREAKS: fine bands ACROSS the stroke, slowly varying ALONG it — the
   // grooves a loaded brush drags. One field drives both the tonal streak and the
   // ragged edge (bristles fall short / overshoot the clean ellipse).
-  float streak = vnoise(vec2(across * 0.7, along * 0.06) + seed) - 0.5;
+  float streak = vnoise(vec2(across * 0.7, along * 0.06) * fscale + seed) - 0.5;
 
   // GRAIN: a PER-STROKE isotropic mottle in the stroke's OWN frame with its own
   // seed, so every dab carries its own tooth rather than one shared canvas texture.
-  float gn = vnoise(vec2(across, along) * 0.5 + seed * 1.7)        - 0.5;
-  float gs = vnoise(vec2(across, along) * 0.5 + seed * 1.7 + 19.0) - 0.5;
+  float gn = vnoise(vec2(across, along) * 0.5 * fscale + seed * 1.7)        - 0.5;
+  float gs = vnoise(vec2(across, along) * 0.5 * fscale + seed * 1.7 + 19.0) - 0.5;
 
   // ragged edge: only ever scales pdf, so it's invisible at the core (pdf≈0) and
   // grows toward the shoulder where the contour actually reads. v_edge is 0 on the
@@ -298,7 +313,8 @@ void main(){
   // dark underlayers — gate by the stroke's own luminance so shadows stay smooth.
   float lum  = dot(v_color, vec3(0.299, 0.587, 0.114));
   float gate = smoothstep(0.02, 0.32, lum);
-  float sAmt = u_tex_streak * gate, gAmt = u_tex_grain * gate;
+  // v_texg mutes streak+grain on the large low-detail strokes (see the vertex shader).
+  float sAmt = u_tex_streak * gate * v_texg, gAmt = u_tex_grain * gate * v_texg;
 
   // grain INHERITS the stroke's colour + lightness: it mottles brightness and the
   // stroke's OWN saturation (thicker vs thinner pigment = a richer/greyer version of
