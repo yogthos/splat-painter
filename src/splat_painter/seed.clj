@@ -247,11 +247,16 @@
         ;; The grid uses bmin = min(1,b): the densest spacing any region needs.
         bmul    (double (nth tier-muls 0))
         bmin    (min 1.0 bmul)
-        gmul    (fn [lvl] (if (<= (long lvl) 1) bmin (tier-mul tier-muls lvl)))
         smul    (fn [lvl] (if (<= (long lvl) 1) 1.0 (tier-mul tier-muls lvl)))
+        ;; final nominal size floored at ~a pixel AFTER the tier multiplier: a tier
+        ;; dial at 0.4 must make its layer finer, never reduce it to sub-pixel dust —
+        ;; dusted mid/fine layers punch the gradation ladder out of the painting and
+        ;; leave raw base-to-line transitions (Mid/Fine turned left looked worse).
+        nsize   (fn [lvl] (max 0.7 (* (smul lvl) (lsize lvl))))
         ;; tier multipliers scale size AND spacing together (constant overlap), so
         ;; each tier's density rebalances through the budget automatically.
-        sp-of   (fn [lvl scale] (* (overlap lvl) scale (gmul lvl) (lsize lvl)))
+        sp-of   (fn [lvl scale] (* (overlap lvl) scale
+                                   (if (<= (long lvl) 1) (* bmin (lsize lvl)) (nsize lvl))))
         ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working
         ;; budget. Fine-level seeds emit segs(lvl) SEGMENTS each (a traced brush stroke),
         ;; so their term is multiplied accordingly — the budget counts splats, not seeds.
@@ -306,7 +311,7 @@
                  (if (< lvl 0)
                    out
                    (let [lsc (scale-of lvl)
-                         ssz (* lsc (smul lvl) (lsize lvl))
+                         ssz (* lsc (nsize lvl))
                          sp  (sp-of lvl lsc)
                          nx  (long (Math/ceil (/ area (* sp sp))))
                          ny  1]
@@ -339,8 +344,12 @@
             d   (if (< (Math/abs den) 1e-9)
                   0.0
                   (max -1.0 (min 1.0 (/ (- em ep) (* 2.0 den)))))]
-        [(max 0.0 (min hd (+ x (* nx h d))))
-         (max 0.0 (min wd (+ y (* ny h d))))]))))
+        ;; DAMPED corrector (×0.65): the edge map is texel-quantized, so the full
+        ;; parabola step jitters; partial correction still converges over the
+        ;; chain's repeated snaps but filters the quantization wobble out of the
+        ;; traced line.
+        [(max 0.0 (min hd (+ x (* nx h d 0.65))))
+         (max 0.0 (min wd (+ y (* ny h d 0.65))))]))))
 
 (defn- map-at
   "Sample the placement map matched to a level's scale."
@@ -436,6 +445,11 @@
                        [(max 0.0 (min hd (+ ox (* (double side) 0.55 ssz snx))))
                         (max 0.0 (min wd (+ oy (* (double side) 0.55 ssz sny))))])))
           [x y] (offset x y)
+          ;; the side sign relative to the stroke's MOTION frame: at the head the
+          ;; motion perpendicular is dirsign·(field normal), so side·dirsign along
+          ;; (−dy,dx) reproduces the head offset — and stays consistent through
+          ;; field sign flips that would wobble a per-step θ resample.
+          sidem (* (double side) (double dirsign))
           [hr hg hb0] (sample-arr blur-px iw ih x y)]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
         (if (or (> k kmax) (< fade 0.15))
@@ -457,7 +471,11 @@
                 ;; follow the line only while there IS a line: when local coherence
                 ;; collapses (busy texture, letter junctions) the liner stroke runs
                 ;; dry fast — long chains wandering through dense detail smear it.
-                fade (if (and (pos? k) (>= (long lvl) 4) (< coh 0.35))
+                ;; …but a strong edge under the brush keeps the line alive: real
+                ;; ink lines push THROUGH junctions (glasses frame crossing a brow),
+                ;; where coherence dips while edge energy stays high.
+                fade (if (and (pos? k) (>= (long lvl) 4) (< coh 0.35)
+                              (< (wavelet/edge-at dmap px py) 0.5))
                        (* fade 0.5)
                        fade)
                 t   (/ (double k) (double kmax))
@@ -476,7 +494,13 @@
                 lal2 (+ lal (* (- 0.9 lal) body))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
                 al  (* lal2 fade (- 1.0 (* 0.65 t t)))           ; taper × glaze × dry-out
-                acc (conj acc [px py sz D sn tn al th coh hb cx0 cy0 traw])
+                ;; the brush-load RE-MIXES with the canvas as the stroke travels:
+                ;; the colour-sample point slides up to 35% from the head toward
+                ;; the current position, so long strokes grade into their
+                ;; surroundings instead of carrying one colour to a hard break.
+                wsl (if (>= (long lvl) 4) (* 0.35 t) 0.0)
+                acc (conj acc [px py sz D sn tn al th coh hb
+                               (+ cx0 (* wsl (- px cx0))) (+ cy0 (* wsl (- py cy0))) traw])
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
                 ;; broad strokes curl freely, fine marks stay faithful to the edge.
@@ -492,13 +516,29 @@
                       (if (neg? (+ (* dx0 dxp) (* dy0 dyp))) -1.0 1.0))
                 dx1 (* sgn dx0) dy1 (* sgn dy0)
                 dx (- (* cb dx1) (* sb dy1)) dy (+ (* sb dx1) (* cb dy1))
+                ;; DIRECTION MOMENTUM: a hand-pulled stroke has inertia — re-deciding
+                ;; direction from the noisy field every step turns thin traced lines
+                ;; wavy. Liner strokes blend half the previous step's direction and
+                ;; plow straight through junctions where the field goes incoherent.
+                [dx dy] (if (and (>= (long lvl) 4) (pos? k))
+                          (let [mx (+ (* 0.5 dx) (* 0.5 dxp))
+                                my (+ (* 0.5 dy) (* 0.5 dyp))
+                                ml (Math/sqrt (+ (* mx mx) (* my my)))]
+                            (if (> ml 1e-6) [(/ mx ml) (/ my ml)] [dx dy]))
+                          [dx dy])
                 ;; the Stroke slider is stroke LENGTH: it scales the chain step (the
                 ;; curve-following extent), not the segment ellipse. 2.5 (default) = 1.
                 L  (* ssz (double stepf) (stroke-len-frac stroke))]
             (let [nx0 (max 0.0 (min hd (+ px (* L dx))))
                   ny0 (max 0.0 (min wd (+ py (* L dy))))
                   [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd) [nx0 ny0])
-                  [nx2 ny2] (offset nx1 ny1)]
+                  ;; side offset along the stroke's OWN motion perpendicular — the
+                  ;; path is a stable frame; re-sampling θ at every step let field
+                  ;; noise wobble the offset into a wavy line.
+                  [nx2 ny2] (if (zero? (double side))
+                              [nx1 ny1]
+                              [(max 0.0 (min hd (+ nx1 (* sidem 0.55 ssz (- dy)))))
+                               (max 0.0 (min wd (+ ny1 (* sidem 0.55 ssz dx))))])]
               (recur (inc k) nx2 ny2 dx dy fade acc))))))))
 
 (defn- layered-means

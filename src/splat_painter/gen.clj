@@ -221,8 +221,10 @@ vec2 edgeSnap(float x, float y){
   if (max(e0, max(ep, em)) < 0.12) return vec2(x, y);
   float den = (em + ep) - 2.0*e0;
   float d = (abs(den) < 1e-9) ? 0.0 : clamp((em - ep) / (2.0*den), -1.0, 1.0);
-  return vec2(clamp(x + nx*h*d, 0.0, float(u_H - 1)),
-              clamp(y + ny*h*d, 0.0, float(u_W - 1)));
+  // damped corrector (mirror seed): partial correction filters texel-quantization
+  // wobble out of the traced line; repeated per-step snaps still converge
+  return vec2(clamp(x + nx*h*d*0.65, 0.0, float(u_H - 1)),
+              clamp(y + ny*h*d*0.65, 0.0, float(u_W - 1)));
 }
 
 // IMPASTO meeting line (mirror seed/stroke-segments offset): back a bodied liner
@@ -391,6 +393,9 @@ void main(){
   }
   vec2 so0 = sideOffset(x2, y2, side, 0.55 * ssz2);
   x2 = so0.x; y2 = so0.y;
+  // side sign in the stroke's MOTION frame (mirror seed): stays consistent
+  // through field sign flips that would wobble a per-step theta resample
+  float sidem = side * dirsign;
   float px = x2, py = y2, dxp = 0.0, dyp = 0.0;
   // progressive refinement: finer layers GLAZE (translucent touches over the
   // accumulated underpainting) instead of overwriting it; the overlapping fine
@@ -412,7 +417,9 @@ void main(){
     // follow the line only while there IS a line (mirror seed/stroke-segments):
     // when coherence collapses (busy texture, letter junctions) the liner stroke
     // runs dry fast — long chains wandering through dense detail smear it.
-    if (q > 0 && lvl >= 4 && tc.y < 0.35) fade *= 0.5;
+    // ...but a strong edge under the brush keeps the line alive: real ink lines
+    // push THROUGH junctions, where coherence dips while edge energy stays high
+    if (q > 0 && lvl >= 4 && tc.y < 0.35 && edgeAt(px, py) < 0.5) fade *= 0.5;
     float tt = float(q) / float(segs - 1);
     // IMPASTO body (mirror seed/stroke-segments): fine liner strokes on a strong
     // edge paint nearly opaque — the contour is defined by thin bodied lines whose
@@ -422,7 +429,10 @@ void main(){
     float lal2 = lal + (0.9 - lal) * body;
     float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));  // width tapers to the tip
     float al = lal2 * fade * (1.0 - 0.65 * tt * tt); // taper × glaze × dry-out
-    emitSplat(px, py, cpx, cpy, sz, D, snoise, tnoise, al, hb, traw);
+    // the brush-load RE-MIXES with the canvas (mirror seed): the colour-sample
+    // point slides up to 35% toward the current position along the stroke
+    float wsl = (lvl >= 4) ? 0.35 * tt : 0.0;
+    emitSplat(px, py, cpx + wsl*(px - cpx), cpy + wsl*(py - cpy), sz, D, snoise, tnoise, al, hb, traw);
     // bend gated by coherence: straight strongly-oriented edges trace straight
     float bend = u_curv * 0.9 * bendf * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
@@ -430,13 +440,24 @@ void main(){
     float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);
     float dx1 = sgn*dx0, dy1 = sgn*dy0;
     float dx = cb*dx1 - sb*dy1, dy = sb*dx1 + cb*dy1;
+    // DIRECTION MOMENTUM (mirror seed): liner strokes blend half the previous
+    // step's direction — a field-noise-driven turn every step waves the line
+    if (lvl >= 4 && q > 0) {
+      float mx = 0.5*dx + 0.5*dxp, my = 0.5*dy + 0.5*dyp;
+      float ml = sqrt(mx*mx + my*my);
+      if (ml > 1e-6) { dx = mx/ml; dy = my/ml; }
+    }
     // the Stroke slider is stroke LENGTH: it scales the chain step (2.5 ≈ 1.0)
     float L = ssz2 * stepf * (0.4 + 0.24 * u_stroke);
     px = clamp(px + L*dx, 0.0, float(u_H - 1));
     py = clamp(py + L*dy, 0.0, float(u_W - 1));
     if (snapE) { vec2 sp3 = edgeSnap(px, py); px = sp3.x; py = sp3.y; }
-    vec2 so1 = sideOffset(px, py, side, 0.55 * ssz2);
-    px = so1.x; py = so1.y;
+    // side offset along the stroke's OWN motion perpendicular (mirror seed) —
+    // the path is a stable frame; a per-step theta resample wobbled the line
+    if (side != 0.0) {
+      px = clamp(px + sidem * 0.55 * ssz2 * (-dy), 0.0, float(u_H - 1));
+      py = clamp(py + sidem * 0.55 * ssz2 * ( dx), 0.0, float(u_W - 1));
+    }
     dxp = dx; dyp = dy;
   }
 }")

@@ -159,11 +159,13 @@
     ;; fine edge-shrink — contours are continuous bodied lines, not dashes.
     ;; (853→817) footprint-sensed edges: strokes answer for silhouettes anywhere
     ;; under their body, and fine sharpness follows the local detail density.
-    (is (= 817 (count splats)))
-    (is (approx= 0.5  17609.864  sx) "Σ mean-x")
-    (is (approx= 0.5  23983.002  sy) "Σ mean-y")
-    (is (approx= 1.0  194710.538 sd) "Σ det(cov)")
-    (is (approx= 0.05 950.731    sc) "Σ colour")))
+    ;; (817→841) stroke inertia: damped ridge snap, direction momentum, motion-
+    ;; frame side offset, junction-tolerant coherence gate, canvas re-mix.
+    (is (= 841 (count splats)))
+    (is (approx= 0.5  18099.586  sx) "Σ mean-x")
+    (is (approx= 0.5  24765.089  sy) "Σ mean-y")
+    (is (approx= 1.0  194712.195 sd) "Σ det(cov)")
+    (is (approx= 0.05 1016.886   sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -210,9 +212,12 @@
   (let [img  (gray-img 48 64 (fn [x y] (if (and (> x 16) (< x 32) (> y 20) (< y 44))
                                          0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
         dmap (wavelet/placement-map img (structure/analyze img))
-        base (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 1.0 1.0] 4000 48 64)
-        wide (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [2.0 1.0 0.5] 4000 48 64)
-        down (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [0.5 1.0 1.0] 4000 48 64)
+        ;; size 24 keeps every tier above the 0.7px post-multiplier floor, so the
+        ;; linear-scaling assertions hold (at small sizes the floor clamps instead —
+        ;; a tier dial can make a layer finer but never dust it to sub-pixel).
+        base (seed/layer-params dmap 0.6 24.0 0.5 0.5 2.5 [1.0 1.0 1.0] 4000 48 64)
+        wide (seed/layer-params dmap 0.6 24.0 0.5 0.5 2.5 [2.0 1.0 0.5] 4000 48 64)
+        down (seed/layer-params dmap 0.6 24.0 0.5 0.5 2.5 [0.5 1.0 1.0] 4000 48 64)
         lvl-of (fn [lp lvl] (first (filter #(= lvl (:lvl %)) (:levels lp))))
         ssz-of (fn [lp lvl] (:ssz (lvl-of lp lvl)))]
     (is (approx= 1e-9 (ssz-of base 0) (ssz-of wide 0)) "broad ×2 leaves the subject-nominal base size alone")
