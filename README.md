@@ -86,12 +86,30 @@ joltc -M:pin       # print the golden fixture's actual checksums (for re-pinning
 
 Dev/debug entry points live under `test/`; only the app ships from `src/`.
 
+## Build
+
+A standalone binary (no `joltc` needed to run it) is compiled with `joltc build`:
+
+```sh
+joltc build -m splat-painter.core -o splat-painter --opt
+./splat-painter path/to/image.jpeg
+```
+
+The binary dlopens GTK4, OpenGL, and gdk-pixbuf at runtime, so those must be
+installed on the target — `brew install gtk4 gdk-pixbuf` on macOS,
+`apt install libgtk-4-1 libgdk-pixbuf-2.0-0` on Linux. macOS binaries are unsigned;
+clear quarantine before first run with `xattr -d com.apple.quarantine ./splat-painter`.
+
+Prebuilt binaries for macOS (arm64) and Linux (x86_64) are attached to each
+[tagged release](https://github.com/yogthos/splat-painter/releases); the
+`release` GitHub Actions workflow builds them when a `v*` tag is pushed.
+
 ## Dependencies
 
-glimmer and glimmer-gl are pulled from `../jolt-lang/` via `deps.edn` `:local/root`.
-gdk-pixbuf (image decode) is declared as a `:jolt/native` lib. GTK4/OpenGL/GLib come
-in transitively. macOS OpenGL is 4.1 (no compute shaders); GPU generation uses
-geometry-shader + transform-feedback compaction instead.
+glimmer and glimmer-gl are git deps pinned in `deps.edn`. gdk-pixbuf (image decode)
+is declared as a `:jolt/native` lib. GTK4/OpenGL/GLib come in transitively. macOS
+OpenGL is 4.1 (no compute shaders); GPU generation uses geometry-shader +
+transform-feedback compaction instead.
 
 ## Layout
 

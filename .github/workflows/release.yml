@@ -1,0 +1,91 @@
+name: release
+
+# Build standalone binaries for macOS (arm64) and Linux (x86_64) and attach them
+# to the GitHub Release when a v* tag is pushed. workflow_dispatch builds the same
+# binaries as workflow artifacts without publishing a release (handy for testing).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the release and upload assets
+
+env:
+  JOLT_VERSION: v0.4.15   # pinned joltc used to compile the binary
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-macos
+          - os: ubuntu-latest
+            target: x86_64-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The binary dlopens GTK4/OpenGL/gdk-pixbuf at runtime rather than linking
+      # them, so these are needed to run the headless test suite (image decode)
+      # and by anyone running the released binary — not to compile it.
+      - name: System deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install gtk4 gdk-pixbuf lz4
+
+      - name: System deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-1 libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-common libgl1 liblz4-dev
+
+      - name: Install joltc
+        run: |
+          url="https://github.com/jolt-lang/jolt/releases/download/${JOLT_VERSION}/joltc-${JOLT_VERSION}-${{ matrix.target }}.tar.gz"
+          curl -fsSL -o joltc.tar.gz "$url"
+          mkdir -p "$HOME/.joltc"
+          tar xzf joltc.tar.gz -C "$HOME/.joltc" --strip-components=1
+          echo "$HOME/.joltc" >> "$GITHUB_PATH"
+
+      - name: joltc version
+        run: joltc --version
+
+      - name: Test (headless)
+        run: joltc -M:test
+
+      - name: Build binary
+        run: joltc build -m splat-painter.core -o splat-painter --opt
+
+      - name: Package
+        run: |
+          name="splat-painter-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          [ "${{ github.event_name }}" = "workflow_dispatch" ] && name="splat-painter-${{ matrix.target }}"
+          mkdir -p "$name"
+          cp splat-painter README.md "$name/"
+          tar czf "${name}.tar.gz" "$name"
+          echo "PKG=${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Publish to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "splat-painter ${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --notes "Standalone binaries for macOS (arm64) and Linux (x86_64).
+
+          Runtime deps: GTK4 + gdk-pixbuf (\`brew install gtk4\` / \`apt install libgtk-4-1 libgdk-pixbuf-2.0-0\`).
+          macOS binary is unsigned — clear the quarantine flag before first run:
+          \`xattr -d com.apple.quarantine ./splat-painter\`." \
+            || echo "release already exists, uploading asset"
+          gh release upload "${GITHUB_REF_NAME}" "${PKG}" --clobber
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: splat-painter-${{ matrix.target }}
+          path: splat-painter
