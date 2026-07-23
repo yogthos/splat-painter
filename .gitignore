@@ -5,6 +5,7 @@ DrawingWithGaussians/
 .clj-kondo/
 .cpcache/
 .lsp/
+.nrepl-port
 
 # macOS / tool state
 .DS_Store
