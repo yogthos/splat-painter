@@ -39,6 +39,10 @@
       (throw (ex-info "png: gdk_pixbuf_new_from_data returned NULL" {})))
     (let [pb2     (pixbuf-flip pb 0)  ; vertical flip (horizontal=FALSE=0)
           errslot (ffi/alloc (ffi/sizeof :pointer))
+          ;; GError out-param must start NULL — ffi/alloc doesn't zero, and
+          ;; read-gerror below reads the slot even on success, so leftover garbage
+          ;; would be dereferenced as a GError*. Initialize to NULL.
+          _       (ffi/write errslot :pointer 0 ffi/null)
           ok      (pixbuf-savev pb2 path "png" ffi/null ffi/null errslot)]
       (let [msg (or (read-gerror errslot) "unknown")]
         (png-object-unref pb2)

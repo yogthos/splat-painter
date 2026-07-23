@@ -35,6 +35,11 @@
   ([path] (load-image path nil))
   ([path max-side]
    (let [errslot (ffi/alloc (ffi/sizeof :pointer))
+         ;; GLib's GError out-param must start as NULL: on the error path the loader
+         ;; asserts *error == NULL and then dereferences it. ffi/alloc doesn't zero,
+         ;; so uninitialized garbage (NULL only by luck on macOS, non-NULL on Linux)
+         ;; trips the assertion and crashes. Initialize the slot to NULL.
+         _ (ffi/write errslot :pointer 0 ffi/null)
          ;; With preserve_aspect=1, passing max-side for both axes fits the
          ;; image in a max-side box so the longest edge becomes max-side.
          ;; -1 means 'no constraint' → original size.
