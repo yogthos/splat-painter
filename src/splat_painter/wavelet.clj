@@ -141,7 +141,10 @@
                        (Math/sqrt (/ (max 0.0 g2) sf-gmax))))))
          ;; normalize+fuse one energy band: global g, local-relative l, edge E — the
          ;; blur/smooth radii set how gradual the resulting map is.
-         fuse (fn [^doubles raw blur-r smooth-r]
+         ;; e-sq? squares the edge term: E has the tensor blur's width, so fusing it
+         ;; raw seeds fine strokes in a BAND around each edge — parallel offset 'echo'
+         ;; lines in otherwise-flat surroundings. E² concentrates the band to the core.
+         fuse (fn [^doubles raw blur-r smooth-r e-sq?]
                 (let [^doubles a (structure/box-blur raw sh sw blur-r)
                       dmax    (loop [i 0 m 0.0] (if (< i n) (recur (inc i) (max m (aget a i))) m))
                       wide-r  (max 2 (quot (min sh sw) 8))
@@ -151,14 +154,16 @@
                   (dotimes [i n]
                     (let [g (if (pos? dmax) (/ (aget a i) dmax) 0.0)
                           l (min 1.0 (/ (aget a i) (+ (* 2.0 (aget m-a i)) (* 0.30 mean-a) 1e-12)))
-                          E (aget E-arr i)
+                          E0 (aget E-arr i)
+                          E (if e-sq? (* E0 E0) E0)
                           v (min 1.0 (max g l (* 0.85 E)))]
                       (aset P i v)))
                   (structure/box-blur P sh sw smooth-r)))
          ;; aggregate: smoothed for gradual density transitions (radius /40 blur, /50 final)
-         P  (fuse acc (max 1 (quot (min sh sw) 40)) (max 1 (quot (min sh sw) 50)))
-         ;; sharp: fine bands only, minimal smoothing — text/eye-scale structure survives
-         Ps (fuse acc-fine 1 1)]
+         P  (fuse acc (max 1 (quot (min sh sw) 40)) (max 1 (quot (min sh sw) 50)) false)
+         ;; sharp: fine bands only, minimal smoothing, E² — text/eye-scale structure
+         ;; survives and fine strokes hug the edge cores
+         Ps (fuse acc-fine 1 1 true)]
      {:h sh :w sw :detail P :sharp Ps :dmax 1.0 :src-h H :src-w W})))
 
 (defn detail-at
