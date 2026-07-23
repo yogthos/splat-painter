@@ -306,7 +306,7 @@
         contrast   (double contrast)
         palette-n  (int (or palette 0))
         sfield     (or (:structure image) (structure/analyze image))
-        dmap       (or (:detail image)    (wavelet/detail-map image))
+        dmap       (or (:detail image)    (wavelet/placement-map image sfield))
         ^doubles raw-px  pixels
         ^doubles blur-px (or (:blur image) pixels)
         gmax-sqrt  (Math/sqrt (max (:gmax sfield) 0.0))

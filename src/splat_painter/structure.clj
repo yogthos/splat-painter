@@ -58,8 +58,12 @@
   (let [^doubles L  (luma image)
         H  (:height image)
         W  (:width image)
-        ^doubles gx (double-array (* H W))
-        ^doubles gy (double-array (* H W))]
+        n  (* H W)
+        ;; Gamma 1/2.2 so gradients are ratio-based (perceptually uniform), not
+        ;; absolute luminance — dark regions keep their edge signal.
+        _  (dotimes [i n] (aset L i (Math/pow (aget L i) 0.4545)))
+        ^doubles gx (double-array n)
+        ^doubles gy (double-array n)]
     (dotimes [x H]
       (dotimes [y W]
         (let [idx (+ (* x W) y)

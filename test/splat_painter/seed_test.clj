@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [splat-painter.seed :as seed]
             [splat-painter.wavelet :as wavelet]
+            [splat-painter.structure :as structure]
             [splat-painter.gaussian :as g]))
 
 (defn- approx= [tol a b] (< (Math/abs (- (double a) (double b))) tol))
@@ -139,20 +140,22 @@
         [sx sy sd sc] (reduce (fn [[sx sy sd sc] {[mx my] :mean [c00 c01 _ c11] :cov [cr cg cb] :color}]
                                 [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc cr cg cb)])
                               [0.0 0.0 0.0 0.0] splats)]
-    (is (= 254 (count splats)))
-    (is (approx= 0.05 6438.922   sx) "Σ mean-x")
-    (is (approx= 0.05 8095.514   sy) "Σ mean-y")
-    (is (approx= 0.5  210455.049 sd) "Σ det(cov)")
-    (is (approx= 0.05 308.503    sc) "Σ colour")))
+    ;; old: count=254 sx=6438.922 sy=8095.514 sd=210455.049 sc=308.503
+    (is (= 497 (count splats)))
+    (is (approx= 0.05 12432.697  sx) "Σ mean-x")
+    (is (approx= 0.05 16448.738  sy) "Σ mean-y")
+    (is (approx= 0.5  224608.308 sd) "Σ det(cov)")
+    (is (approx= 0.05 540.778    sc) "Σ colour")))
 
 (deftest layer-params-shared-spec
   ;; layer-params is the per-level placement spec BOTH the CPU loop and the GPU generation
   ;; shader consume, so they enumerate the same cells. Guard its contract: finest-first
   ;; ordering (levels[0] = smallest stdev), cumulative candidate offsets, total = Σ nx·ny,
   ;; and ssz halving per finer level. If any drifts, the GPU field diverges from the CPU golden.
-  (let [img  (gray-img 48 64 (fn [x y] (if (and (> x 16) (< x 32) (> y 20) (< y 44))
-                                         0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
-        dmap (wavelet/detail-map img)
+  (let [img    (gray-img 48 64 (fn [x y] (if (and (> x 16) (< x 32) (> y 20) (< y 44))
+                                            0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
+        sfield (structure/analyze img)
+        dmap   (wavelet/placement-map img sfield)
         {:keys [nlev levels total warp]} (seed/layer-params dmap 0.6 6.0 0.5 0.5 4000 48 64)
         cells (map (fn [l] (* (:nx l) (:ny l))) levels)]
     (is (= 3 nlev) "detail 0.6 -> 1+round(1.8) = 3 levels")
