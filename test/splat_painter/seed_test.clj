@@ -165,10 +165,13 @@
     ;; edges (0.25·Ev) so its paint always reaches the boundary.
     ;; (841→689) brush lift: a chain that exits its colour region (mismatch
     ;; >0.45) emits NOTHING — escaped segments were a dark halo along contours.
+    ;; (sd 221525→219753) both-ends taper: the brush now lifts ON at the head too
+    ;; (a quick width/alpha ramp over the first ~18%) on top of the tail dry-out,
+    ;; so traced strokes taper at BOTH ends — the width envelope shrinks Σdet a touch.
     (is (= 689 (count splats)))
     (is (approx= 0.5  14942.719  sx) "Σ mean-x")
     (is (approx= 0.5  20285.148  sy) "Σ mean-y")
-    (is (approx= 1.0  221524.772 sd) "Σ det(cov)")
+    (is (approx= 1.0  219752.666 sd) "Σ det(cov)")
     (is (approx= 0.05 748.184    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes

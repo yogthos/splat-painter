@@ -506,8 +506,15 @@
                           0.0)
                         (+ 0.4 (* 0.6 (double sgate))))
                 lal2 (+ lal (* (- 0.9 lal) body))
-                sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
-                al  (* lal2 fade (- 1.0 (* 0.65 t t)))           ; taper × glaze × dry-out
+                ;; BOTH-ENDS taper: a quick lift-on at the head (the brush lands thin
+                ;; and light, swells to full over the first ~18%) on top of the existing
+                ;; longer dry-out at the tail — so the mark tapers at BOTH ends like a
+                ;; real brushstroke, not just the tail. smoothstep = the same cubic the
+                ;; GPU's smoothstep() mirrors.
+                hw  (let [u (min 1.0 (/ t 0.18))] (+ 0.55 (* 0.45 u u (- 3.0 (* 2.0 u)))))
+                ha  (let [u (min 1.0 (/ t 0.15))] (+ 0.5  (* 0.5  u u (- 3.0 (* 2.0 u)))))
+                sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))) hw)  ; width tapers at both ends
+                al  (* lal2 fade (- 1.0 (* 0.65 t t)) ha)        ; alpha: lift-on × glaze × dry-out
                 ;; the brush-load RE-MIXES with the canvas as the stroke travels:
                 ;; the colour-sample point slides up to 35% from the head toward
                 ;; the current position, so long strokes grade into their

@@ -438,8 +438,12 @@ void main(){
     float body = ((lvl >= 4) ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0)
                * (0.4 + 0.6 * sgate);
     float lal2 = lal + (0.9 - lal) * body;
-    float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));  // width tapers to the tip
-    float al = lal2 * fade * (1.0 - 0.65 * tt * tt); // taper × glaze × dry-out
+    // BOTH-ENDS taper (mirror seed/stroke-segments): quick lift-on at the head on top
+    // of the existing tail dry-out, so the mark tapers at BOTH ends like a real stroke.
+    float hw = 0.55 + 0.45 * smoothstep(0.0, 0.18, tt);
+    float ha = 0.5  + 0.5  * smoothstep(0.0, 0.15, tt);
+    float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt)) * hw;  // width tapers at both ends
+    float al = lal2 * fade * (1.0 - 0.65 * tt * tt) * ha; // alpha: lift-on × glaze × dry-out
     // the brush-load RE-MIXES with the canvas (mirror seed): the colour-sample
     // point slides up to 35% toward the current position along the stroke
     float wsl = (lvl >= 4) ? 0.35 * tt : 0.0;
