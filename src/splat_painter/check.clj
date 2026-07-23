@@ -90,7 +90,8 @@
     (assert-contains gs-src "uint(a)*73856093u + uint(b)*19349663u + uint(salt)*83492791u" "gen hash01 constants")
     (assert-contains gs-src "float noise2(float x, float y){ return noise3(x, y, 0.0); }" "gen noise2")
     ;; splat-record: elongation, covariance, colour blend
-    (assert-contains gs-src "float e   = 1.0 + u_stroke * coh * (0.25 + 0.75 * D);" "gen elongation")
+    (assert-contains gs-src "float e   = 1.0 + min(u_stroke, 1.5) * coh * (0.25 + 0.75 * D);" "gen capped elongation")
+    (assert-contains gs-src "float L = ssz2 * stepf * (0.4 + 0.24 * u_stroke);" "stroke-length chain step")
     (assert-contains gs-src "float c00 = sx2*c*c + sy2*s*s;" "gen covariance c00")
     (assert-contains gs-src "float t = clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0);" "gen blur-leaning colour blend t")
     (assert-contains gs-src "uniform sampler2D u_blurHTex;" "gen heavy-blur texture")
@@ -100,7 +101,7 @@
     (assert-contains gs-src "o_c = vec4(alpha, 0.0, 0.0, 0.0);" "gen output o_c (stroke-taper alpha)")
     ;; the brush-stroke trace (mirror of seed/stroke-segments)
     (assert-contains gs-src "layout(points, max_vertices = 6) out;" "gen GS emits stroke chains")
-    (assert-contains gs-src "float sz = ssz * (1.0 - 0.45 * tt * sqrt(tt));" "stroke width taper")
+    (assert-contains gs-src "float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));" "stroke width taper (seed-jittered size)")
     (assert-contains gs-src "float al = 1.0 - 0.65 * tt * tt;" "stroke alpha taper")
     (assert-contains gs-src "float bend = u_curv * 0.9 * bendf * (noise2(0.05*px, 0.05*py) - 0.5);" "scale-relative Perlin stroke bend")
     (assert-contains gs-src "float dv = (u_sharp[k] == 1) ? sharpAt(cx, cy) : detailAt(cx, cy);" "scale-matched detail map per level")

@@ -171,13 +171,16 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (
 
 // splat-record (mirror seed/splat-record) + emit one captured record. `alpha` is the
 // stroke taper (1.0 for base fills, fading toward a fine stroke's tail).
-void emitSplat(float px, float py, float csz, float D, float sn, float tn, float alpha, float hb){
+// (hx,hy) = the chain HEAD's position — the colour-sample point for EVERY segment:
+// one stroke = one brush-load of paint (per-segment sampling alternated the two
+// sides' colours along contours into a bead necklace).
+void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb){
   vec2  tc    = fieldsAt(px, py);
   float theta = tc.x, coh0 = tc.y;
-  vec3  blur = (hb > 0.5) ? sampleRGB(u_blurHTex, px, py) : sampleRGB(u_blurTex, px, py);
-  vec3  raw  = sampleRGB(u_rawTex,  px, py);
+  vec3  blur = (hb > 0.5) ? sampleRGB(u_blurHTex, hx, hy) : sampleRGB(u_blurTex, hx, hy);
+  vec3  raw  = sampleRGB(u_rawTex,  hx, hy);
   float coh = MIN_COH + (1.0 - MIN_COH) * coh0;
-  float e   = 1.0 + u_stroke * coh * (0.25 + 0.75 * D);
+  float e   = 1.0 + min(u_stroke, 1.5) * coh * (0.25 + 0.75 * D);
   float se  = sqrt(e);
   float s0  = csz * (1.0 + u_variation * 0.5 * (2.0 * sn));
   float sx  = s0 * se;
@@ -221,9 +224,13 @@ void main(){
   float cx = 0.5 * float(u_H) + u_cphi[k]*uu - u_sphi[k]*vv;
   float cy = 0.5 * float(u_W) + u_sphi[k]*uu + u_cphi[k]*vv;
   if (cx < 0.0 || cx >= float(u_H) || cy < 0.0 || cy >= float(u_W)) return;
-  // each level reads the map matched to ITS scale (mirror of seed/layered-means)
+  // each level reads the map matched to ITS scale (mirror of seed/layered-means).
+  // The cutoff is DITHERED ±25% per seed: a hard threshold on a map that oscillates
+  // around it dashes contours into bead necklaces; dithering turns the knife edge
+  // into a smooth density ramp.
   float dv = (u_sharp[k] == 1) ? sharpAt(cx, cy) : detailAt(cx, cy);
-  if (lvl > 0 && dv < th) return;                 // not detailed enough -> discard
+  float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));
+  if (lvl > 0 && dv < thd) return;                // not detailed enough -> discard
 
   // FULL-CELL jitter (±sp/2) — smaller jitter left cell centres visible as rows
   float jx = sp * (hash01(i*137 + lvl, j, 3) - 0.5);
@@ -236,15 +243,20 @@ void main(){
   x2 = clamp(x2, 0.0, float(u_H - 1));
   y2 = clamp(y2, 0.0, float(u_W - 1));
 
-  // per-seed size/tone jitter is hashed (independent per stroke), mirroring
-  // seed/layered-means.
-  float snoise = hash01(i*31 + lvl, j, 11) - 0.5;
-  float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5) * ((lvl <= 1) ? 0.4 : 1.0);
+  // per-seed jitter is hashed (independent per stroke), mirroring seed/layered-means.
+  // Size jitter applies at SEED level to the whole chain (size AND step) so chains
+  // stay self-overlapping at any Variation; broad levels keep 40% of both jitters.
+  float sn0 = hash01(i*31 + lvl, j, 11) - 0.5;
+  float szf = max(0.75, 1.0 + u_variation * sn0 * ((lvl <= 1) ? 0.4 : 1.0));
+  float ssz2 = ssz * szf;
+  float snoise = 0.0;
+  float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5)
+               * ((lvl <= 1) ? 0.4 : (lvl >= 4) ? 0.3 : 1.0);
 
   // broad strokes (base + level 1) colour from the HEAVY blur — smoothed at their scale
   float hb = (lvl <= 1) ? 1.0 : 0.0;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
-    emitSplat(x2, y2, ssz, D, snoise, tnoise, 1.0, hb);
+    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb);
     return;
   }
 
@@ -259,9 +271,9 @@ void main(){
   for (int q = 0; q < SEGS; q++) {
     if (q >= segs) break;
     float tt = float(q) / float(segs - 1);
-    float sz = ssz * (1.0 - 0.45 * tt * sqrt(tt));   // width tapers to the tip
+    float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));  // width tapers to the tip
     float al = 1.0 - 0.65 * tt * tt;                 // …and the paint thins out
-    emitSplat(px, py, sz, D, snoise, tnoise, al, hb);
+    emitSplat(px, py, x2, y2, sz, D, snoise, tnoise, al, hb);
     vec2  tc  = fieldsAt(px, py);
     float bend = u_curv * 0.9 * bendf * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
@@ -269,7 +281,8 @@ void main(){
     float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);
     float dx1 = sgn*dx0, dy1 = sgn*dy0;
     float dx = cb*dx1 - sb*dy1, dy = sb*dx1 + cb*dy1;
-    float L = ssz * stepf;
+    // the Stroke slider is stroke LENGTH: it scales the chain step (2.5 ≈ 1.0)
+    float L = ssz2 * stepf * (0.4 + 0.24 * u_stroke);
     px = clamp(px + L*dx, 0.0, float(u_H - 1));
     py = clamp(py + L*dy, 0.0, float(u_W - 1));
     dxp = dx; dyp = dy;
@@ -374,13 +387,13 @@ void main(){
   (let [ptr (gl/write-ints xs)] (gl/gl-uniform-1iv loc (count xs) ptr) (ffi/free ptr)))
 
 (defn sig-range
-  "Approximate the field's stdev range (det^0.25 = s0 = ssz·(1±0.5·variation)) from the
-   level ssz values — the GPU path has no CPU-side splats to reduce over, and this only
-   feeds the size→hardness smoothstep easing."
+  "Approximate the field's stdev range from the level ssz values — the GPU path has no
+   CPU-side splats to reduce over, and this only feeds the size→hardness smoothstep
+   easing. The lower bound uses the 0.75 size-jitter shrink clamp."
   [levels variation]
   (let [sszs (map :ssz levels)
         v (double variation)]
-    [(* (reduce min sszs) (max 0.05 (- 1.0 (* 0.5 v))))
+    [(* (reduce min sszs) 0.75)
      (* (reduce max sszs) (+ 1.0 (* 0.5 v)))]))
 
 (defn read-splats
@@ -415,7 +428,7 @@ void main(){
   (let [{:keys [program locs]} gen
         {:keys [count size stroke detail variation curvature contrast]} controls
         H (long height) W (long width)
-        params (seed/layer-params (:dmap fields) detail size variation curvature count H W)
+        params (seed/layer-params (:dmap fields) detail size variation curvature stroke count H W)
         {:keys [nlev warp levels total]} params
         ;; finest-first level arrays, padded to max-levels
         pad (fn [xs d] (vec (take max-levels (concat xs (repeat d)))))
