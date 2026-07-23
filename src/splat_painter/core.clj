@@ -39,6 +39,11 @@
 (defonce fine-atom     (r/atom 1.0))   ; details, each loosened/focused independently
 (defonce hardness-atom (r/atom 1.7))   ; edge crispness of detail strokes; large strokes always
                                        ; soften to a round gaussian (u_hard_soft fixed at 1.0)
+;; paint-texture experiment (render-time, quad shader only): pigment-like variance
+;; WITHIN each stroke. All zero == the clean-gaussian render.
+(defonce tex-streak-atom (r/atom 0.18)) ; bristle tonal streaks along the drag
+(defonce tex-grain-atom  (r/atom 0.10)) ; canvas-tooth brightness+chroma mottle
+(defonce tex-edge-atom   (r/atom 0.25)) ; edge raggedness (contour breaks up)
 (defonce status-atom   (r/atom "no image loaded — click Open Image…"))
 
 ;; --- non-reactive image / GL state -------------------------------------------
@@ -123,6 +128,9 @@
 (defn- cur-broad  [] (or (some-> (System/getenv "GA_PAINTER_BROAD")  Double/parseDouble)      @broad-atom))
 (defn- cur-mid    [] (or (some-> (System/getenv "GA_PAINTER_MID")    Double/parseDouble)      @mid-atom))
 (defn- cur-fine   [] (or (some-> (System/getenv "GA_PAINTER_FINE")   Double/parseDouble)      @fine-atom))
+(defn- cur-tex-streak [] (or (some-> (System/getenv "GA_PAINTER_TEX_STREAK") Double/parseDouble) @tex-streak-atom))
+(defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
+(defn- cur-tex-edge   [] (or (some-> (System/getenv "GA_PAINTER_TEX_EDGE")   Double/parseDouble) @tex-edge-atom))
 
 (defn- field-for-current-controls []
   (when-let [img @image-atom]
@@ -442,6 +450,9 @@
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
+        (gl/gl-uniform-1f (:u_tex_streak locs) (double (cur-tex-streak)))
+        (gl/gl-uniform-1f (:u_tex_grain locs)  (double (cur-tex-grain)))
+        (gl/gl-uniform-1f (:u_tex_edge locs)   (double (cur-tex-edge)))
         (gl/gl-enable gl/GL-BLEND)
         (gl/gl-blend-func gl/GL-ONE-FACTOR gl/GL-ONE-MINUS-SRC-ALPHA)
         (gl/gl-enable gl/GL-SCISSOR-TEST)
@@ -664,7 +675,11 @@
    [slider "Curvature" 0.0  1.0   0.02  curvature-atom]
    [slider "Stroke"    1.0  4.0   0.05  stroke-atom]   ; <1 degenerates chains to bead dots
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
-   [slider "Hardness"  1.0  4.0   0.05  hardness-atom]])   ; detail-stroke crispness (big strokes stay round)
+   [slider "Hardness"  1.0  4.0   0.05  hardness-atom]   ; detail-stroke crispness (big strokes stay round)
+   [:separator {}]
+   [slider "Streak"    0.0  0.6   0.02  tex-streak-atom]  ; bristle tonal grooves along the drag
+   [slider "Grain"     0.0  0.5   0.02  tex-grain-atom]   ; canvas-tooth brightness/colour mottle
+   [slider "EdgeTex"   0.0  0.7   0.02  tex-edge-atom]])  ; edge raggedness (contour breaks up)
 
 (defn app []
   [:hbox {:spacing 0}

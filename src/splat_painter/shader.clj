@@ -185,11 +185,15 @@ uniform float u_hard_sharp;
 uniform float u_hard_soft;
 uniform float u_sig_min;
 uniform float u_sig_max;
+uniform float u_tex_edge;        // paint-texture: edge-raggedness amount (0 = clean ellipse)
 flat out vec3  v_color;
 flat out vec3  v_prec;           // p00, p11, cross
 flat out float v_hard;
 flat out float v_alpha;          // per-splat paint alpha (stroke taper)
+flat out vec2  v_major;          // stroke long-axis unit dir (rows, cols) — bristle frame
+flat out vec2  v_mean;           // splat mean — per-stroke noise seed
 out vec2 v_d;                    // image-space offset from the mean (rows, cols)
+out vec2 v_ip;                   // image-space fragment position — canvas-grain sample
 
 void main(){
   int splat  = (u_count - 1) - (gl_VertexID / 6);   // back-to-front paint order
@@ -201,6 +205,12 @@ void main(){
   float det = max(c00 * c11 - c01 * c01, 1e-8);
   v_prec  = vec3(c11 / det, c00 / det, -2.0 * c01 / det);
   v_color = t1.yzw;
+  v_mean  = t0.xy;
+  // stroke long axis = eigenvector of the LARGER eigenvalue of [[c00,c01],[c01,c11]].
+  // Bristle streaks run along this; the ragged edge and tonal grooves are keyed to it.
+  float disc = sqrt(max(0.25 * (c00 - c11) * (c00 - c11) + c01 * c01, 0.0));
+  float l1   = 0.5 * (c00 + c11) + disc;             // major eigenvalue
+  v_major = disc < 1e-6 ? vec2(1.0, 0.0) : normalize(vec2(l1 - c11, c01));
   float sig = sqrt(sqrt(det));
   float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
   ts = ts * ts * (3.0 - 2.0 * ts);
@@ -211,9 +221,12 @@ void main(){
   int cid = corner == 0 ? 0 : (corner == 1 || corner == 4) ? 1
           : (corner == 2 || corner == 3) ? 2 : 3;
   vec2 s  = vec2((cid & 1) == 0 ? -1.0 : 1.0, (cid & 2) == 0 ? -1.0 : 1.0);
-  vec2 he = 3.5 * sqrt(vec2(c00, c11));   // marginal stdevs = exact AABB of the ellipse
+  // marginal stdevs = exact AABB of the ellipse; grow it when edge raggedness can
+  // push the contour OUTWARD, so a dilated bristle can't clip against the quad.
+  vec2 he = (3.5 + 2.0 * u_tex_edge) * sqrt(vec2(c00, c11));
   v_d = s * he;
   vec2 ip = t0.xy + v_d;                  // image position (x=row top-down, y=col)
+  v_ip = ip;
   // image px -> pane px (contain fit, centered; inverse of the loop shader's mapping)
   float scale = min(u_viewport.x / u_image.x, u_viewport.y / u_image.y);
   vec2 org = 0.5 * (u_viewport - u_image * scale);
@@ -227,13 +240,59 @@ flat in vec3  v_color;
 flat in vec3  v_prec;
 flat in float v_hard;
 flat in float v_alpha;
+flat in vec2  v_major;
+flat in vec2  v_mean;
 in vec2 v_d;
+in vec2 v_ip;
 uniform float u_opacity;
+uniform float u_tex_streak;      // bristle tonal-streak amount (0 = off)
+uniform float u_tex_grain;       // canvas-grain brightness+chroma amount (0 = off)
+uniform float u_tex_edge;        // edge-raggedness amount (0 = clean ellipse)
 out vec4 frag;
+
+// hash-without-sine (Dave Hoskins) + bilinear value noise — no trig, no loops, no
+// uniform-array indexing, so it steers clear of the Apple GL 4.1 driver quirks.
+float hash21(vec2 p){
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash21(i),               b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0,1.0)), d = hash21(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 void main(){
-  float pdf = 0.5 * (v_prec.x * v_d.x * v_d.x + v_prec.z * v_d.x * v_d.y + v_prec.y * v_d.y * v_d.y);
+  float pdf0 = 0.5 * (v_prec.x * v_d.x * v_d.x + v_prec.z * v_d.x * v_d.y + v_prec.y * v_d.y * v_d.y);
+
+  // stroke-local frame: `across` = perpendicular to the drag, `along` = down it.
+  float across = dot(v_d, vec2(-v_major.y, v_major.x));
+  float along  = dot(v_d, v_major);
+  float seed   = hash21(v_mean) * 137.0;                  // per-stroke phase
+
+  // BRISTLE STREAKS: fine bands ACROSS the stroke, slowly varying ALONG it — the
+  // grooves a loaded brush drags. One field drives both the tonal streak and the
+  // ragged edge (bristles fall short / overshoot the clean ellipse).
+  float streak = vnoise(vec2(across * 0.7, along * 0.06) + seed) - 0.5;
+
+  // CANVAS GRAIN: image-space mottle shared by every stroke (pigment settling into
+  // the tooth). Three offset taps give a subtle chroma break, not pure luminance.
+  float g0 = vnoise(v_ip * 0.15 + 11.3);
+  float g1 = vnoise(v_ip * 0.15 + 41.7);
+  float g2 = vnoise(v_ip * 0.15 + 71.9);
+
+  // ragged edge: only ever scales pdf, so it's invisible at the core (pdf≈0) and
+  // grows toward the shoulder where the contour actually reads.
+  float pdf = max(pdf0 * (1.0 + u_tex_edge * 2.0 * streak), 0.0);
   float a = v_alpha * u_opacity * exp(-pow(pdf, v_hard));
-  frag = vec4(v_color * a, a);   // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
+
+  float bright = 1.0 + u_tex_streak * streak + u_tex_grain * (g0 - 0.5);
+  vec3  chroma = u_tex_grain * 0.35 * (vec3(g0, g1, g2) - 0.5);
+  vec3  col = clamp(v_color * bright + chroma, 0.0, 1.0);
+  frag = vec4(col * a, a);        // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
 }")
 
 (defn build-program-quad
@@ -252,7 +311,10 @@ void main(){
             :u_hard_sharp (gl/gl-get-uniform-location prog "u_hard_sharp")
             :u_hard_soft  (gl/gl-get-uniform-location prog "u_hard_soft")
             :u_sig_min    (gl/gl-get-uniform-location prog "u_sig_min")
-            :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")}}))
+            :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")
+            :u_tex_streak (gl/gl-get-uniform-location prog "u_tex_streak")
+            :u_tex_grain  (gl/gl-get-uniform-location prog "u_tex_grain")
+            :u_tex_edge   (gl/gl-get-uniform-location prog "u_tex_edge")}}))
 
 (defn- render-uniform-locs [prog]
   {:u_splats   (gl/gl-get-uniform-location prog "u_splats")
