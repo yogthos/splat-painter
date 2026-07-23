@@ -322,22 +322,31 @@
                               ;; hardness ramp and render as isolated hard pearls along
                               ;; edges — variety comes from growing, not vanishing.
                               szf (max 0.75 (+ 1.0 (* variation sn0 (if (<= (long lvl) 1) 0.4 1.0))))
+                              ;; near a strong edge the mid fill levels don't paint (their
+                              ;; boundary-band chains ribbon mixed colour along silhouettes
+                              ;; as a ghost veil) and base daubs SHRINK so their soft tails
+                              ;; can't reach across the silhouette.
+                              Ev (wavelet/edge-at dmap cx cy)
                               ;; tone jitter is scale-relative: broad fills keep 40% (full
                               ;; jitter banded smooth walls) and the FINEST marks keep 30%
                               ;; (alternating-tone hard dabs bead edges into pearls) — the
                               ;; visible mid-scale brushwork carries the painterly variety.
                               tn (* (let [l (long lvl)]
-                                      (cond (<= l 1) 0.4 (>= l 4) 0.3 :else 1.0))
+                                      (cond (<= l 1) 0.25 (>= l 4) 0.3 :else 1.0))
                                     (- (hash01 (+ (* i 37) lvl) j 13) 0.5))
                               ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
                               ;; keep centres in-bounds so no budget is wasted off-screen
                               ;; (edges stay covered by the splats' tails).
-                              emitted (stroke-segments nf lvl
-                                                       (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
-                                                       (* ssz szf) D 0.0 tn ds curvature stroke hd wd
-                                                       segs stepf bendf
-                                                       (if (<= (long lvl) 1) 1.0 0.0)
-                                                       blur-px iw ih)]
+                              emitted (if (and (or (== (long lvl) 1) (== (long lvl) 2))
+                                               (> Ev 0.45))
+                                        []
+                                        (stroke-segments nf lvl
+                                                         (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
+                                                         (* ssz szf (- 1.0 (* 0.45 Ev)))
+                                                         D 0.0 tn ds curvature stroke hd wd
+                                                         segs stepf bendf
+                                                         (if (<= (long lvl) 1) 1.0 0.0)
+                                                         blur-px iw ih))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         levels))))

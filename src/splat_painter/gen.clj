@@ -145,6 +145,10 @@ float sharpAt(float x, float y){
   vec4 t = texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0);
   return u_dmax > 0.0 ? min(1.0, t.g / u_dmax) : 0.0;
 }
+// raw edge strength (texel .b) — the band where broad fill strokes must not tread
+float edgeAt(float x, float y){
+  return texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0).b;
+}
 
 // BILINEAR orientation-field sample (mirrors seed/sample-fields exactly: same
 // continuous coord fx = x·dim/src, same floor/clamp). The texture stores cos2θ /
@@ -248,10 +252,16 @@ void main(){
   // stay self-overlapping at any Variation; broad levels keep 40% of both jitters.
   float sn0 = hash01(i*31 + lvl, j, 11) - 0.5;
   float szf = max(0.75, 1.0 + u_variation * sn0 * ((lvl <= 1) ? 0.4 : 1.0));
-  float ssz2 = ssz * szf;
+  // near a strong edge: the mid fill levels don't paint at all (their boundary-band
+  // chains ribbon mixed colour along silhouettes as a ghost veil — the edge belongs
+  // to base coverage below and fine strokes above), and base daubs SHRINK so their
+  // soft tails can't reach across the silhouette.
+  float Ev = edgeAt(cx, cy);
+  if ((lvl == 1 || lvl == 2) && Ev > 0.45) return;
+  float ssz2 = ssz * szf * (1.0 - 0.45 * Ev);
   float snoise = 0.0;
   float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5)
-               * ((lvl <= 1) ? 0.4 : (lvl >= 4) ? 0.3 : 1.0);
+               * ((lvl <= 1) ? 0.25 : (lvl >= 4) ? 0.3 : 1.0);
 
   // broad strokes (base + level 1) colour from the HEAVY blur — smoothed at their scale
   float hb = (lvl <= 1) ? 1.0 : 0.0;
@@ -361,12 +371,13 @@ void main(){
         Hd (long (:h dmap)) Wd (long (:w dmap))
         ^doubles dd (:detail dmap)
         ^doubles ds (or (:sharp dmap) dd)
+        ^doubles de (or (:edge dmap) (double-array (alength dd)))
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
         ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
         detail-t (new-tex) noise-t (new-tex) blur-t (new-tex) blurh-t (new-tex) raw-t (new-tex)]
-    ;; .r = aggregate placement map, .g = sharp fine-band map (finest levels read it)
-    (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) (aget ds i) 0.0 1.0])))
+    ;; .r = aggregate placement map, .g = sharp fine-band map, .b = raw edge strength
+    (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) (aget ds i) (aget de i) 1.0])))
     ;; orientation as double-angle components (cos2θ, sin2θ) + coherence — the GS
     ;; bilinearly blends the components (fieldsAt), never the raw angle.
     (upload-rgba! noise-t  Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget c2 i) (aget s2 i) (aget co i) 0.0])))
