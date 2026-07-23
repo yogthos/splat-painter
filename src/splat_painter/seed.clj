@@ -841,7 +841,15 @@
                 (+ (* bb (- 1.0 t)) (* rb t))]
         color-ac (if (== contrast 1.0) color0 (apply-contrast contrast color0))
         tone (+ 1.0 (* variation 0.15 (* 2.0 tnoise)))
-        color (mapv (fn [c] (max 0.0 (min 1.0 (* c tone)))) color-ac)]
+        ;; per-stroke TEMPERATURE: each brush-load leans a touch warm (R up, B down)
+        ;; or cool — reloaded paint is never mixed identically. snoise is the seed's
+        ;; per-stroke noise (constant along the whole stroke), sampled identically on
+        ;; the GPU, so this stays exact CPU/GPU parity without a new hash.
+        temp (* variation 0.10 (* 2.0 snoise))
+        [r g b] color-ac
+        color [(max 0.0 (min 1.0 (* r tone (+ 1.0 temp))))
+               (max 0.0 (min 1.0 (* g tone)))
+               (max 0.0 (min 1.0 (* b tone (- 1.0 temp))))]]
     {:mean  [x y]
      :cov   (gauss/covariance sx sy theta)
      :color color}))
