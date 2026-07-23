@@ -294,7 +294,8 @@ void main(){
   // to base coverage below and fine strokes above), and base daubs SHRINK so their
   // soft tails can't reach across the silhouette.
   float Ev = edgeAt(cx, cy);
-  if ((lvl == 1 || lvl == 2) && Ev > 0.45) return;
+  if ((lvl == 1 || lvl == 2) && Ev > 0.45
+      && hash01(i*53 + lvl, j, 37) < 0.75) return;  // dithered — some mids fill the band
   float ssz2 = ssz * szf * (1.0 - 0.45 * Ev);
   float snoise = 0.0;
   float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5)
@@ -318,6 +319,9 @@ void main(){
   float stepf = u_stepf[k];                      // broad levels stroke long and curl,
   float bendf = u_bendf[k];                      // fine levels make short precise marks
   bool snapE = (lvl >= 2);                       // fine strokes glue to the edge ridge
+  // colour samples the PRE-snap position (one side of the edge); geometry snaps.
+  // On-ridge colour is the sides' mix and paints silhouettes as drawn outlines.
+  float cpx = x2, cpy = y2;
   if (snapE) { vec2 sp2 = edgeSnap(x2, y2); x2 = sp2.x; y2 = sp2.y; }
   float px = x2, py = y2, dxp = 0.0, dyp = 0.0;
   vec3 headBlur = sampleRGB(u_blurTex, x2, y2);
@@ -333,7 +337,7 @@ void main(){
     float tt = float(q) / float(segs - 1);
     float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));  // width tapers to the tip
     float al = 1.0 - 0.65 * tt * tt;                 // …and the paint thins out
-    emitSplat(px, py, x2, y2, sz, D, snoise, tnoise, al, hb, traw);
+    emitSplat(px, py, cpx, cpy, sz, D, snoise, tnoise, al, hb, traw);
     vec2  tc  = fieldsAt(px, py);
     // bend gated by coherence: straight strongly-oriented edges trace straight
     float bend = u_curv * 0.9 * bendf * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);
