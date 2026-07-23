@@ -303,6 +303,12 @@
           ;; (predictor: tangent step; corrector: ridge snap) — the stroke GLUES to
           ;; the line it is painting instead of braiding beside it.
           snap? (>= (long lvl) 2)
+          ;; the GEOMETRY snaps to the ridge, but the COLOUR samples the pre-snap
+          ;; position: on-ridge colour is the two sides' mix — darker than either —
+          ;; and painted along a silhouette it reads as a drawn OUTLINE. Pre-snap
+          ;; seeds land on one side or the other, so contour strokes interleave the
+          ;; two sides' actual colours and the edge blends like meeting paint.
+          cx0 x cy0 y
           [x y] (if snap? (edge-snap dmap nf x y 1.75 hd wd) [x y])
           [hr hg hb0] (sample-arr blur-px iw ih x y)]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 acc []]
@@ -319,7 +325,7 @@
                 t   (/ (double k) (double kmax))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
                 al  (- 1.0 (* 0.65 t t))                         ; …and the paint thins out
-                acc (conj acc [px py sz D sn tn al th coh hb x y traw])
+                acc (conj acc [px py sz D sn tn al th coh hb cx0 cy0 traw])
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
                 ;; broad strokes curl freely, fine marks stay faithful to the edge.
@@ -432,7 +438,12 @@
                               ;; keep centres in-bounds so no budget is wasted off-screen
                               ;; (edges stay covered by the splats' tails).
                               emitted (if (and (or (== (long lvl) 1) (== (long lvl) 2))
-                                               (> Ev 0.45))
+                                               (> Ev 0.45)
+                                               ;; dithered: ~75% suppressed — a few mid
+                                               ;; strokes still fill the edge band, so
+                                               ;; fine contour strokes sit IN paint
+                                               ;; instead of standing alone as outlines
+                                               (< (hash01 (+ (* i 53) lvl) j 37) 0.75))
                                         []
                                         (stroke-segments nf dmap lvl
                                                          (max 0.0 (min hd x2)) (max 0.0 (min wd y2))

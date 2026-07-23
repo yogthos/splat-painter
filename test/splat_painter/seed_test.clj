@@ -150,13 +150,13 @@
     ;; threshold + head-colour sampling); 553 (colour-guarded traces). Now: the edge
     ;; band belongs to base+fine only (mid fills suppressed at E>0.45), and every
     ;; stroke shrinks near edges so soft tails can't cross silhouettes.
-    ;; latest: 7-level pyramid (finest = size/64 pixel marks; detail 0.6 → 5
-    ;; levels), 200k budget ceiling.
-    (is (= 740 (count splats)))
-    (is (approx= 0.5  16495.236  sx) "Σ mean-x")
-    (is (approx= 0.5  21165.382  sy) "Σ mean-y")
-    (is (approx= 1.0  234527.332 sd) "Σ det(cov)")
-    (is (approx= 0.05 896.011    sc) "Σ colour")))
+    ;; latest: contour strokes paint their own SIDE's colour (geometry snaps, colour
+    ;; pre-snap) + dithered 75% mid-level edge suppression.
+    (is (= 744 (count splats)))
+    (is (approx= 0.5  16608.848  sx) "Σ mean-x")
+    (is (approx= 0.5  21335.830  sy) "Σ mean-y")
+    (is (approx= 1.0  234530.089 sd) "Σ det(cov)")
+    (is (approx= 0.05 827.028    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
