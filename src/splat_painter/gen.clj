@@ -145,6 +145,13 @@ float sharpAt(float x, float y){
   vec4 t = texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0);
   return u_dmax > 0.0 ? min(1.0, t.g / u_dmax) : 0.0;
 }
+// scale-matched map select (mirror of seed/level-map-kind): 0 = aggregate (.r),
+// 1 = MID band (.a — face-feature frequencies), 2 = sharp fine-band (.g)
+float mapAt(int sel, float x, float y){
+  vec4 t = texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0);
+  float v = (sel == 2) ? t.g : (sel == 1) ? max(t.a, t.g) : t.r;  // mid = union with sharp
+  return u_dmax > 0.0 ? min(1.0, v / u_dmax) : 0.0;
+}
 // raw edge strength (texel .b) — the band where broad fill strokes must not tread
 float edgeAt(float x, float y){
   return texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0).b;
@@ -178,7 +185,7 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (
 // (hx,hy) = the chain HEAD's position — the colour-sample point for EVERY segment:
 // one stroke = one brush-load of paint (per-segment sampling alternated the two
 // sides' colours along contours into a bead necklace).
-void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb){
+void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw){
   vec2  tc    = fieldsAt(px, py);
   float theta = tc.x, coh0 = tc.y;
   vec3  blur = (hb > 0.5) ? sampleRGB(u_blurHTex, hx, hy) : sampleRGB(u_blurTex, hx, hy);
@@ -194,7 +201,7 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   float c00 = sx2*c*c + sy2*s*s;
   float c01 = (sx2 - sy2)*c*s;
   float c11 = sx2*s*s + sy2*c*c;
-  float t = clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0);
+  float t = max(traw, clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0));
   vec3 color0 = mix(blur, raw, t);
   vec3 colorAc = (u_contrast == 1.0) ? color0 : clamp((color0 - 0.5)*u_contrast + 0.5, 0.0, 1.0);
   float tone = 1.0 + u_variation * 0.15 * (2.0 * tn);
@@ -232,14 +239,15 @@ void main(){
   // The cutoff is DITHERED ±25% per seed: a hard threshold on a map that oscillates
   // around it dashes contours into bead necklaces; dithering turns the knife edge
   // into a smooth density ramp.
-  float dv = (u_sharp[k] == 1) ? sharpAt(cx, cy) : detailAt(cx, cy);
+  float dv = mapAt(u_sharp[k], cx, cy);
   float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));
   if (lvl > 0 && dv < thd) return;                // not detailed enough -> discard
   // SUBDIVISION (mirror of seed/layered-means): a cell claimed by the next-finer
   // level (slot k-1 — slots are finest-first) is not painted by this coarser level.
+  // The claim is DITHERED like the threshold: the scale handoff interleaves.
   if (lvl > 0 && k > 0) {
-    float fdv = (u_sharp[k-1] == 1) ? sharpAt(cx, cy) : detailAt(cx, cy);
-    if (fdv >= u_th[k-1]) return;
+    float fdv = mapAt(u_sharp[k-1], cx, cy);
+    if (fdv >= u_th[k-1] * (0.75 + 0.5 * hash01(i*47 + lvl, j, 23))) return;
   }
 
   // FULL-CELL jitter (±sp/2) — smaller jitter left cell centres visible as rows
@@ -271,8 +279,11 @@ void main(){
 
   // broad strokes (base + level 1) colour from the HEAVY blur — smoothed at their scale
   float hb = (lvl <= 1) ? 1.0 : 0.0;
+  // colour-rawness floor rises with fineness (seed/raw-floor): small strokes paint
+  // faithful colour — a half-blur blend at feature scale softens the feature away
+  float traw = (lvl <= 1) ? 0.0 : (lvl <= 3) ? 0.45 : 0.7;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
-    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb);
+    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw);
     return;
   }
 
@@ -297,7 +308,7 @@ void main(){
     float tt = float(q) / float(segs - 1);
     float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));  // width tapers to the tip
     float al = 1.0 - 0.65 * tt * tt;                 // …and the paint thins out
-    emitSplat(px, py, x2, y2, sz, D, snoise, tnoise, al, hb);
+    emitSplat(px, py, x2, y2, sz, D, snoise, tnoise, al, hb, traw);
     vec2  tc  = fieldsAt(px, py);
     float bend = u_curv * 0.9 * bendf * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
@@ -378,12 +389,13 @@ void main(){
         ^doubles dd (:detail dmap)
         ^doubles ds (or (:sharp dmap) dd)
         ^doubles de (or (:edge dmap) (double-array (alength dd)))
+        ^doubles dm2 (or (:mid dmap) dd)
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
         ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
         detail-t (new-tex) noise-t (new-tex) blur-t (new-tex) blurh-t (new-tex) raw-t (new-tex)]
-    ;; .r = aggregate placement map, .g = sharp fine-band map, .b = raw edge strength
-    (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) (aget ds i) (aget de i) 1.0])))
+    ;; .r = aggregate map, .g = sharp fine-band, .b = raw edge strength, .a = MID band
+    (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) (aget ds i) (aget de i) (aget dm2 i)])))
     ;; orientation as double-angle components (cos2θ, sin2θ) + coherence — the GS
     ;; bilinearly blends the components (fieldsAt), never the raw angle.
     (upload-rgba! noise-t  Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget c2 i) (aget s2 i) (aget co i) 0.0])))
@@ -467,7 +479,7 @@ void main(){
         sgs (pad (map :segs levels) 1)
         stf (pad (map :stepf levels) 1.0)
         bnf (pad (map :bendf levels) 1.0)
-        shp (pad (map (fn [l] (if (:sharp? l) 1 0)) levels) 0)
+        shp (pad (map (fn [l] (case (:map-kind l) :sharp 2 :mid 1 0)) levels) 0)
         cph (pad (map :cphi levels) 1.0)
         sph (pad (map :sphi levels) 0.0)
         [sig-min sig-max] (sig-range levels variation)]
