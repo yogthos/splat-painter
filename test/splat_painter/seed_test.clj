@@ -121,7 +121,7 @@
   ;; comes from the segment chain, not the ellipse); s0=5 (snoise 0);
   ;; t=0.15+0.85·0.5=0.575 (blur-leaning); contrast 1, tone 1 (tnoise 0).
   (let [{:keys [mean cov color]}
-        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0)
+        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0 1.0)
         [c00 c01 _ c11] cov
         [cr cg cb] color]
     (is (= [10.0 20.0] mean))
@@ -161,10 +161,12 @@
     ;; under their body, and fine sharpness follows the local detail density.
     ;; (817→841) stroke inertia: damped ridge snap, direction momentum, motion-
     ;; frame side offset, junction-tolerant coherence gate, canvas re-mix.
+    ;; (sd 194712→221537) sealed base coverage: the base shrinks gently near
+    ;; edges (0.25·Ev) so its paint always reaches the boundary.
     (is (= 841 (count splats)))
     (is (approx= 0.5  18099.586  sx) "Σ mean-x")
     (is (approx= 0.5  24765.089  sy) "Σ mean-y")
-    (is (approx= 1.0  194712.195 sd) "Σ det(cov)")
+    (is (approx= 1.0  221537.436 sd) "Σ det(cov)")
     (is (approx= 0.05 1016.886   sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
