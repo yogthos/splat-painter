@@ -3,7 +3,9 @@
  :deps {jolt-lang/glimmer-gl {:git/url "https://github.com/jolt-lang/glimmer-gl.git"
                               :git/tag "v0.0.3"
                               :git/sha "3e8445428b73eb74d1902e3a9e10055d1193df18"}
-        jolt-lang/glimmer    {:local/root "../jolt-lang/glimmer"}}
+        jolt-lang/glimmer    {:git/url "https://github.com/jolt-lang/glimmer.git"
+                              :git/tag "v0.0.3"
+                              :git/sha "be8890dc3461ed1be81dc53a2e0ed67fed82e9ef"}}
 
  ;; gdk-pixbuf decodes the input image (JPEG/PNG/...) into an in-memory pixel
  ;; buffer. OpenGL comes in transitively via glimmer-gl; GTK4/GLib via glimmer.
