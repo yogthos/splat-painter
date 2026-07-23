@@ -72,10 +72,11 @@
 (def ^:private splat-budget 48000)
 
 (defn- detail-fraction
-  "Fraction of the wavelet detail map at/above the normalized threshold t∈[0,1]. Used to
-   estimate how many splats each fine level will place (so the budget can scale them)."
-  [dmap t]
-  (let [^doubles d (:detail dmap)
+  "Fraction of the map array under `key` (:detail aggregate or :sharp fine-band)
+   at/above the normalized threshold t∈[0,1]. Used to estimate how many splats each
+   fine level will place (so the budget can scale them)."
+  [dmap key t]
+  (let [^doubles d (or (get dmap key) (:detail dmap))
         dmax (double (max 1e-9 (:dmax dmap)))
         n    (alength d)
         thr  (* (double t) dmax)]
@@ -87,9 +88,20 @@
           (recur (inc i) (if (>= (aget d i) thr) (inc c) c)))))))
 
 ;; Fine-level seeds don't place one dab — they trace a BRUSH STROKE: a chain of
-;; `stroke-segs` gaussian segments stepped along the orientation field. The budget
-;; and the GPU generation shader both hardcode this count.
-(def ^:private stroke-segs 6)
+;; gaussian segments stepped along the orientation field. Stroke behaviour is
+;; SCALE-RELATIVE (the coarse-to-fine pass adjusts its parameters to the scale it
+;; is painting at): the broadest detail level lays long, freely-curving strokes;
+;; each finer level makes shorter, straighter, more precise marks — and the two
+;; finest levels read the SHARP fine-band detail map (wavelet/sharp-at), so they
+;; land on (and preserve) text/eye-scale structure the smoothed aggregate blurs.
+(defn- seg-count "segments per stroke at placement level" [lvl]
+  (let [l (long lvl)] (cond (zero? l) 1 (== l 1) 6 (== l 2) 4 :else 3)))
+(defn- step-frac "step length as a fraction of the level stdev" [lvl]
+  (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 :else 0.75)))
+(defn- bend-frac "how much of the Curvature bend this level keeps" [lvl]
+  (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 :else 0.3)))
+(defn- sharp-level? "finest levels threshold against the fine-band :sharp map" [lvl]
+  (>= (long lvl) 2))
 
 (defn layer-params
   "Pure per-level placement parameters — THE SHARED SPEC for the CPU loop
@@ -112,26 +124,31 @@
         ;; base layer overlaps heavily (spacing 0.72×stdev ⇒ full coverage); finer layers are
         ;; sparser accents (the base fills behind them, so gaps between fine strokes don't
         ;; matter). Overlap is FIXED, so coverage never depends on the budget. Fine seeds are
-        ;; √segs sparser than the old dabs: each seed now traces a stroke-segs-segment stroke
-        ;; that COVERS the along-edge span, so the total segment count (and thus the budget
-        ;; scale — the stroke WIDTH) stays what single dabs cost. Without this the ×segs
-        ;; budget term would fatten every stroke and smear the detail the chains exist for.
-        overlap (fn [lvl] (if (zero? (long lvl)) 0.72 (* 1.25 (Math/sqrt (double stroke-segs)))))
+        ;; √segs(lvl) sparser than dabs: each seed traces a segs(lvl)-segment stroke that
+        ;; COVERS the along-edge span, so the total segment count (and thus the budget scale —
+        ;; the stroke WIDTH) stays what single dabs cost. Without this the ×segs budget term
+        ;; would fatten every stroke and smear the detail the chains exist for.
+        overlap (fn [lvl] (if (zero? (long lvl)) 0.72 (* 1.25 (Math/sqrt (double (seg-count lvl))))))
         sp-of   (fn [lvl scale] (* (overlap lvl) scale (/ smax (Math/pow 2.0 (double lvl)))))
         ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working
-        ;; budget. Fine-level seeds emit stroke-segs SEGMENTS each (a traced brush
-        ;; stroke), so their term is multiplied accordingly — the budget counts splats,
-        ;; not seeds.
+        ;; budget. Fine-level seeds emit segs(lvl) SEGMENTS each (a traced brush stroke),
+        ;; so their term is multiplied accordingly — the budget counts splats, not seeds.
+        ;; Each fine level estimates its survivor fraction on ITS OWN map (aggregate vs
+        ;; sharp fine-band — the same map it thresholds against when placing).
         K (loop [lvl 0 acc 0.0]
             (if (>= lvl nlev)
               acc
-              (let [f  (if (zero? lvl) 1.0 (detail-fraction dmap (thresh lvl)))
+              (let [f  (if (zero? lvl)
+                         1.0
+                         (detail-fraction dmap (if (sharp-level? lvl) :sharp :detail) (thresh lvl)))
                     sp (sp-of lvl 1.0)
-                    m  (if (zero? lvl) 1.0 (double stroke-segs))]
+                    m  (double (seg-count lvl))]
                 (recur (inc lvl) (+ acc (/ (* m f area) (* sp sp)))))))
         scale (max 1.0 (Math/sqrt (/ K budget)))
         ;; build FINEST level first (lvl nlev-1 → 0), assigning cumulative candidate offsets
         ;; in that same order, so GPU gl_VertexID order == CPU emission order == paint order.
+        ;; Each level carries its SCALE-RELATIVE stroke behaviour: segment count, step
+        ;; length, curvature share, and which detail map it reads.
         levels (loop [lvl (dec nlev) off 0 out []]
                  (if (< lvl 0)
                    out
@@ -141,7 +158,9 @@
                          ny  (long (Math/ceil (/ (double W) sp)))]
                      (recur (dec lvl) (+ off (* nx ny))
                             (conj out {:lvl lvl :ssz ssz :sp sp :th (thresh lvl)
-                                       :nx nx :ny ny :offset off})))))]
+                                       :nx nx :ny ny :offset off
+                                       :segs (seg-count lvl) :stepf (step-frac lvl)
+                                       :bendf (bend-frac lvl) :sharp? (sharp-level? lvl)})))))]
     {:nlev nlev :warp warp :scale scale :levels levels
      :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))}))
 
@@ -157,11 +176,11 @@
    line that fades out at the end, layered over the underpainting. `dirsign` picks
    which way along the tangent the stroke pulls (per-seed hash, so strokes alternate).
    Returns [[x y size D sn tn alpha theta coherence]…]."
-  [nf lvl x y ssz D sn tn dirsign curvature hd wd]
+  [nf lvl x y ssz D sn tn dirsign curvature hd wd segs stepf bendf]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
       [[x y ssz D sn tn 1.0 th coh]])
-    (let [kmax (dec stroke-segs)]
+    (let [kmax (dec (long segs))]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 acc []]
         (if (> k kmax)
           acc
@@ -170,9 +189,11 @@
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
                 al  (- 1.0 (* 0.65 t t))                         ; …and the paint thins out
                 acc (conj acc [px py sz D sn tn al th coh])
-                ;; step: along the local tangent, sign-continuous with the previous
-                ;; step, bent by low-frequency Perlin — smooth curl along the edge.
-                bend (* (double curvature) 0.9 (- (noise/noise2 (* 0.05 px) (* 0.05 py)) 0.5))
+                ;; step: along the local tangent, sign-continuous with the previous step,
+                ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
+                ;; broad strokes curl freely, fine marks stay faithful to the edge.
+                bend (* (double curvature) 0.9 (double bendf)
+                        (- (noise/noise2 (* 0.05 px) (* 0.05 py)) 0.5))
                 cb (Math/cos bend) sb (Math/sin bend)
                 dx0 (Math/cos th) dy0 (Math/sin th)
                 sgn (if (zero? k)
@@ -180,7 +201,7 @@
                       (if (neg? (+ (* dx0 dxp) (* dy0 dyp))) -1.0 1.0))
                 dx1 (* sgn dx0) dy1 (* sgn dy0)
                 dx (- (* cb dx1) (* sb dy1)) dy (+ (* sb dx1) (* cb dy1))
-                L  (* ssz 1.1)]
+                L  (* ssz (double stepf))]
             (recur (inc k)
                    (max 0.0 (min hd (+ px (* L dx))))
                    (max 0.0 (min wd (+ py (* L dy))))
@@ -205,7 +226,7 @@
         {:keys [warp levels]} (layer-params dmap detail size variation curvature count H W)]
     (persistent!
       (reduce
-        (fn [acc {:keys [lvl ssz sp th nx ny]}]
+        (fn [acc {:keys [lvl ssz sp th nx ny segs stepf bendf sharp?]}]
           (loop [i 0 acc acc]
             (if (>= i nx)
               acc
@@ -215,7 +236,12 @@
                     acc
                     (let [cx (* (+ (double i) 0.5) sp)
                           cy (* (+ (double j) 0.5) sp)
-                          dv (wavelet/detail-at dmap cx cy)]
+                          ;; each level reads the map matched to ITS scale: the finest
+                          ;; levels use the sharp fine-band map so they land on (and
+                          ;; preserve) small structure the smoothed aggregate blurs away.
+                          dv (if sharp?
+                               (wavelet/sharp-at dmap cx cy)
+                               (wavelet/detail-at dmap cx cy))]
                       (if (and (pos? (long lvl)) (< dv th))
                         (recur (inc j) acc)          ; not detailed enough for this fine level
                         (let [jx (* sp 0.45 (- (hash01 (+ (* i 137) lvl) j 3) 0.5))
@@ -234,10 +260,11 @@
                               ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
                               ;; keep centres in-bounds so no budget is wasted off-screen
                               ;; (edges stay covered by the splats' tails).
-                              segs (stroke-segments nf lvl
-                                                    (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
-                                                    ssz D sn tn ds curvature hd wd)]
-                          (recur (inc j) (reduce conj! acc segs)))))))))))
+                              emitted (stroke-segments nf lvl
+                                                       (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
+                                                       ssz D sn tn ds curvature hd wd
+                                                       segs stepf bendf)]
+                          (recur (inc j) (reduce conj! acc emitted)))))))))))
         (transient [])
         levels))))
 

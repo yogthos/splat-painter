@@ -99,7 +99,9 @@
     (assert-contains gs-src "layout(points, max_vertices = 6) out;" "gen GS emits stroke chains")
     (assert-contains gs-src "float sz = ssz * (1.0 - 0.45 * tt * sqrt(tt));" "stroke width taper")
     (assert-contains gs-src "float al = 1.0 - 0.65 * tt * tt;" "stroke alpha taper")
-    (assert-contains gs-src "float bend = u_curv * 0.9 * (noise2(0.05*px, 0.05*py) - 0.5);" "Perlin stroke bend")
+    (assert-contains gs-src "float bend = u_curv * 0.9 * bendf * (noise2(0.05*px, 0.05*py) - 0.5);" "scale-relative Perlin stroke bend")
+    (assert-contains gs-src "float dv = (u_sharp[k] == 1) ? sharpAt(cx, cy) : detailAt(cx, cy);" "scale-matched detail map per level")
+    (assert-contains gs-src "int   segs  = u_segs[k];" "per-level segment count")
     (assert-contains gs-src "float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);" "sign-continuous tangent"))
 
   (println "pack-splats:")
