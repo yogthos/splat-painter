@@ -13,7 +13,7 @@
         out  (or out "/tmp/ga_preview.png")
         img0 (image/load-image path 1000)
         sfield (structure/analyze img0)
-        img  (assoc img0 :structure sfield :detail (wavelet/detail-map img0)
+        img  (assoc img0 :structure sfield :detail (wavelet/placement-map img0 sfield)
                     :blur (structure/blur-image img0 2)
                     :noise-fields (seed/prep-noise sfield))
         size (if szs (Double/parseDouble szs) (max 4.0 (/ (double (:height img)) 50.0)))
@@ -30,8 +30,9 @@
         b0 (double (nth background 0)) b1 (double (nth background 1)) b2 (double (nth background 2))]
     (dotimes [i (* H W)] (aset T i 1.0))
     (println (format "%dx%d  %d splats  size %.1f  sig %.1f..%.1f" W H (count splats) size sig-min sig-max))
-    (doseq [{:keys [mean cov color]} splats]
+    (doseq [{:keys [mean cov color alpha]} splats]
       (let [mx (double (nth mean 0)) my (double (nth mean 1))
+            A  (double (or alpha 1.0))
             c00 (double (nth cov 0)) c01 (double (nth cov 1)) c11 (double (nth cov 3))
             det (max (- (* c00 c11) (* c01 c01)) 1e-8)
             p00 (/ c11 det) p11 (/ c00 det) cross (/ (* -2.0 c01) det)
@@ -50,7 +51,7 @@
                 (when (<= y y1)
                   (let [dy (- (double y) my)
                         pdf (* 0.5 (+ (* p00 dx dx) (* cross dx dy) (* p11 dy dy)))
-                        a (* opacity (Math/exp (- (Math/pow pdf hard))))
+                        a (* A opacity (Math/exp (- (Math/pow pdf hard))))
                         i (+ (* x W) y)
                         t (aget T i)
                         wa (* t a)

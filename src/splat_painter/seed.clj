@@ -86,6 +86,11 @@
           (/ (double c) (double n))
           (recur (inc i) (if (>= (aget d i) thr) (inc c) c)))))))
 
+;; Fine-level seeds don't place one dab — they trace a BRUSH STROKE: a chain of
+;; `stroke-segs` gaussian segments stepped along the orientation field. The budget
+;; and the GPU generation shader both hardcode this count.
+(def ^:private stroke-segs 6)
+
 (defn layer-params
   "Pure per-level placement parameters — THE SHARED SPEC for the CPU loop
    (layered-means) and the GPU generation pass, so both enumerate the same cells.
@@ -106,16 +111,24 @@
         thresh  (fn [lvl] (if (zero? (long lvl)) -1.0 (min 0.9 (* 0.26 (double lvl)))))
         ;; base layer overlaps heavily (spacing 0.72×stdev ⇒ full coverage); finer layers are
         ;; sparser accents (the base fills behind them, so gaps between fine strokes don't
-        ;; matter). Overlap is FIXED, so coverage never depends on the budget.
-        overlap (fn [lvl] (if (zero? (long lvl)) 0.72 1.25))
+        ;; matter). Overlap is FIXED, so coverage never depends on the budget. Fine seeds are
+        ;; √segs sparser than the old dabs: each seed now traces a stroke-segs-segment stroke
+        ;; that COVERS the along-edge span, so the total segment count (and thus the budget
+        ;; scale — the stroke WIDTH) stays what single dabs cost. Without this the ×segs
+        ;; budget term would fatten every stroke and smear the detail the chains exist for.
+        overlap (fn [lvl] (if (zero? (long lvl)) 0.72 (* 1.25 (Math/sqrt (double stroke-segs)))))
         sp-of   (fn [lvl scale] (* (overlap lvl) scale (/ smax (Math/pow 2.0 (double lvl)))))
-        ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working budget.
+        ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working
+        ;; budget. Fine-level seeds emit stroke-segs SEGMENTS each (a traced brush
+        ;; stroke), so their term is multiplied accordingly — the budget counts splats,
+        ;; not seeds.
         K (loop [lvl 0 acc 0.0]
             (if (>= lvl nlev)
               acc
               (let [f  (if (zero? lvl) 1.0 (detail-fraction dmap (thresh lvl)))
-                    sp (sp-of lvl 1.0)]
-                (recur (inc lvl) (+ acc (/ (* f area) (* sp sp)))))))
+                    sp (sp-of lvl 1.0)
+                    m  (if (zero? lvl) 1.0 (double stroke-segs))]
+                (recur (inc lvl) (+ acc (/ (* m f area) (* sp sp)))))))
         scale (max 1.0 (Math/sqrt (/ K budget)))
         ;; build FINEST level first (lvl nlev-1 → 0), assigning cumulative candidate offsets
         ;; in that same order, so GPU gl_VertexID order == CPU emission order == paint order.
@@ -132,6 +145,47 @@
     {:nlev nlev :warp warp :scale scale :levels levels
      :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))}))
 
+(declare sample-fields)
+
+(defn- stroke-segments
+  "Emit one seed's splat segments — THE SHARED BRUSH-STROKE SPEC the GPU generation
+   shader mirrors. A base seed (lvl 0) is a single full-alpha fill splat. A fine seed
+   TRACES A BRUSH STROKE: `stroke-segs` segments stepped along the orientation field
+   (the edge tangent — structure/tensor-eigen's minor eigenvector), each step
+   direction kept sign-continuous (the field is undirected) and bent by smooth Perlin
+   noise scaled by `curvature`, with size AND alpha tapering toward the tail — a brush
+   line that fades out at the end, layered over the underpainting. `dirsign` picks
+   which way along the tangent the stroke pulls (per-seed hash, so strokes alternate).
+   Returns [[x y size D sn tn alpha theta coherence]…]."
+  [nf lvl x y ssz D sn tn dirsign curvature hd wd]
+  (if (zero? (long lvl))
+    (let [[th coh] (sample-fields nf x y)]
+      [[x y ssz D sn tn 1.0 th coh]])
+    (let [kmax (dec stroke-segs)]
+      (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 acc []]
+        (if (> k kmax)
+          acc
+          (let [[th coh] (sample-fields nf px py)
+                t   (/ (double k) (double kmax))
+                sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
+                al  (- 1.0 (* 0.65 t t))                         ; …and the paint thins out
+                acc (conj acc [px py sz D sn tn al th coh])
+                ;; step: along the local tangent, sign-continuous with the previous
+                ;; step, bent by low-frequency Perlin — smooth curl along the edge.
+                bend (* (double curvature) 0.9 (- (noise/noise2 (* 0.05 px) (* 0.05 py)) 0.5))
+                cb (Math/cos bend) sb (Math/sin bend)
+                dx0 (Math/cos th) dy0 (Math/sin th)
+                sgn (if (zero? k)
+                      (double dirsign)
+                      (if (neg? (+ (* dx0 dxp) (* dy0 dyp))) -1.0 1.0))
+                dx1 (* sgn dx0) dy1 (* sgn dy0)
+                dx (- (* cb dx1) (* sb dy1)) dy (+ (* sb dx1) (* cb dy1))
+                L  (* ssz 1.1)]
+            (recur (inc k)
+                   (max 0.0 (min hd (+ px (* L dx))))
+                   (max 0.0 (min wd (+ py (* L dy))))
+                   dx dy acc)))))))
+
 (defn- layered-means
   "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
    spacing < stdev ⇒ heavy overlap, so the (black) background can never show through — then
@@ -142,10 +196,10 @@
    Per-level geometry (ssz/sp/th/nx/ny, budget scale, finest-first order) comes from
    `layer-params` — the same spec the GPU generation pass consumes, so the two paths place
    identical cells. Here we walk it on the CPU: threshold-test each cell, jitter + Perlin-warp
-   the survivors, and emit [x y stdev D sn tn] (D = effective detail 0..1; sn/tn = the seed's
-   size/tone jitters in [-0.5,0.5], per-seed hash so no two strokes match). `variation`/
-   `curvature` feed the warp; detail strokes (D≈1) stay put → faithful edges."
-  [dmap detail size variation curvature count H W]
+   the surviving seed, then hand it to `stroke-segments` (base fill vs traced brush stroke).
+   Emits [x y size D sn tn alpha theta coherence] per SEGMENT (D = effective detail 0..1;
+   sn/tn = per-seed size/tone jitter hashes in [-0.5,0.5])."
+  [dmap nf detail size variation curvature count H W]
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
         deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
         {:keys [warp levels]} (layer-params dmap detail size variation curvature count H W)]
@@ -174,13 +228,16 @@
                               x2 (if (< aw 0.2) x
                                    (+ x (* aw (noise/noise2 (* 0.06 x) (* 0.06 y)))))
                               y2 (if (< aw 0.2) y
-                                   (+ y (* aw (noise/noise2 (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))]
-                          ;; keep centres in-bounds so no budget is wasted off-screen
-                          ;; (edges stay covered by the splats' tails).
-                          (recur (inc j)
-                            (conj! acc [(max 0.0 (min hd x2)) (max 0.0 (min wd y2)) ssz D
-                                        (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
-                                        (- (hash01 (+ (* i 37) lvl) j 13) 0.5)])))))))))))
+                                   (+ y (* aw (noise/noise2 (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))
+                              sn (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
+                              tn (- (hash01 (+ (* i 37) lvl) j 13) 0.5)
+                              ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
+                              ;; keep centres in-bounds so no budget is wasted off-screen
+                              ;; (edges stay covered by the splats' tails).
+                              segs (stroke-segments nf lvl
+                                                    (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
+                                                    ssz D sn tn ds curvature hd wd)]
+                          (recur (inc j) (reduce conj! acc segs)))))))))))
         (transient [])
         levels))))
 
@@ -321,16 +378,16 @@
         ^doubles raw-px  pixels
         ^doubles blur-px (or (:blur image) pixels)
         nf         (or (:noise-fields image) (prep-noise sfield))
-        means      (layered-means dmap detail size variation curvature n height width)
-        ;; sample the per-position fields (CPU array lookups; the GPU path fetches the same
-        ;; from field textures) then hand off to the pure `splat-record` math shared with GPU.
+        segments   (layered-means dmap nf detail size variation curvature n height width)
+        ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
+        ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
-                     (for [[x y csz dlev sn tn] means
-                           :let [[theta coherence] (sample-fields nf x y)
-                                 blur-rgb (sample-arr blur-px width height x y)
+                     (for [[x y csz dlev sn tn alpha theta coherence] segments
+                           :let [blur-rgb (sample-arr blur-px width height x y)
                                  raw-rgb  (sample-arr raw-px width height x y)]]
-                       (splat-record x y csz dlev theta coherence sn tn
-                                     blur-rgb raw-rgb stroke variation contrast)))
+                       (assoc (splat-record x y csz dlev theta coherence sn tn
+                                            blur-rgb raw-rgb stroke variation contrast)
+                              :alpha (double alpha))))
         ;; PAINT ORDER needs NO sort: `layered-means` emits finest level first, so the field is
         ;; already small→large. The shader composites front-to-back (index 0 = topmost), so the
         ;; small crisp detail strokes sit at the front over the big soft underpainting. Dropping
