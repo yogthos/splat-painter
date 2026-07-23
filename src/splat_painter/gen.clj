@@ -74,6 +74,7 @@ uniform float u_variation;
 uniform float u_contrast;
 uniform float u_detail;   // the Detail slider (deff scale)
 uniform float u_curv;     // Curvature raw 0..1 — Perlin bend of the stroke trace
+uniform float u_broad;    // Broad slider — bokeh-adaptive broad-tier multiplier
 
 // fields
 uniform sampler2D u_detailTex;
@@ -166,6 +167,17 @@ float mapAt(int sel, float x, float y){
 // raw edge strength (texel .b) — the band where broad fill strokes must not tread
 float edgeAt(float x, float y){
   return texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0).b;
+}
+// wavelet SUBJECTNESS (mirror seed/subject-at): smoothed aggregate detail (centre
+// + 4 diagonal taps) finds the detailed subjects; the raw centre term keeps thin
+// isolated features (wires) alive. 0 = flat bokeh, 1 = detailed subject.
+float subjectAt(float x, float y){
+  float r  = float(u_H) / 24.0;
+  float p0 = detailAt(x, y);
+  float ps = 0.2 * (p0 + detailAt(x + r, y + r) + detailAt(x - r, y - r)
+                       + detailAt(x + r, y - r) + detailAt(x - r, y + r));
+  float s  = clamp((ps - 0.05) / 0.30, 0.0, 1.0);
+  return max(s, clamp((p0 - 0.10) / 0.35, 0.0, 1.0));
 }
 
 // BILINEAR orientation-field sample (mirrors seed/sample-fields exactly: same
@@ -271,19 +283,35 @@ void main(){
   // aperiodic — any lattice's row frequency reads as parallel stripes.
   float cx = float(u_H) * poshash(i, lvl, 29);
   float cy = float(u_W) * poshash(i, lvl, 31);
+  // wavelet subjectness (mirror of seed/layered-means): drives the bokeh-adaptive
+  // broad tier and gates mid/fine placement — splat size follows detail density.
+  float sgate = subjectAt(cx, cy);
+  float mloc  = 1.0 + (u_broad - 1.0) * (1.0 - sgate);
+  // broad tier: flat regions thin candidates by (bmin/m)² as the kept seeds grow
+  // ×m — few LARGE daubs = smooth bokeh; at full subjectness m=1 and the Broad
+  // dial has no effect on the detailed subjects.
+  if (lvl <= 1) {
+    float bminp = min(1.0, u_broad) / mloc;
+    if (hash01(i*61 + lvl, j, 43) >= bminp*bminp) return;
+    ssz *= mloc;
+  }
+  // mid/fine strokes belong where the wavelets see detail: flat bokeh keeps only
+  // the big smooth daubs.
+  float gain = (lvl >= 2) ? (0.25 + 0.75 * sgate) : 1.0;
   // each level reads the map matched to ITS scale (mirror of seed/layered-means).
   // The cutoff is DITHERED ±25% per seed: a hard threshold on a map that oscillates
   // around it dashes contours into bead necklaces; dithering turns the knife edge
   // into a smooth density ramp.
   float dv = mapAt(u_sharp[k], cx, cy);
   float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));
-  if (lvl > 0 && dv < thd) return;                // not detailed enough -> discard
+  if (lvl > 0 && dv * gain < thd) return;         // not detailed enough -> discard
   // SUBDIVISION (mirror of seed/layered-means), broad/mid tiers only: a cell claimed
   // by the next-finer level (slot k-1 — slots are finest-first) is not painted by
   // this coarser level; dithered so the handoff interleaves. From level 3 up there
-  // is NO claim — the fine glazes overlap the mid strokes and mix.
+  // is NO claim — the fine glazes overlap the mid strokes and mix. The finer level
+  // is always >= 2 here, so its claim carries the same subject gate.
   if (lvl > 0 && lvl <= 2 && k > 0) {
-    float fdv = mapAt(u_sharp[k-1], cx, cy);
+    float fdv = mapAt(u_sharp[k-1], cx, cy) * (0.25 + 0.75 * sgate);
     if (fdv >= u_th[k-1] * (0.75 + 0.5 * hash01(i*47 + lvl, j, 23))) return;
   }
 
@@ -397,7 +425,7 @@ void main(){
 }")
 
 (def ^:private gen-uniform-names
-  ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv"
+  ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv" "u_broad"
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
    "u_segs" "u_stepf" "u_bendf" "u_sharp"
    "u_detailTex" "u_dmax" "u_detailDim" "u_detailSrc"
@@ -498,12 +526,13 @@ void main(){
 (defn sig-range
   "Approximate the field's stdev range from the level ssz values — the GPU path has no
    CPU-side splats to reduce over, and this only feeds the size→hardness smoothstep
-   easing. The lower bound uses the 0.75 size-jitter shrink clamp."
-  [levels variation]
+   easing. The lower bound uses the 0.75 size-jitter shrink clamp; the upper includes
+   the bokeh-adaptive Broad growth (flat-region daubs reach ×broad the nominal)."
+  [levels variation broad]
   (let [sszs (map :ssz levels)
         v (double variation)]
     [(* (reduce min sszs) 0.75)
-     (* (reduce max sszs) (+ 1.0 (* 0.5 v)))]))
+     (* (reduce max sszs) (max 1.0 (double broad)) (+ 1.0 (* 0.5 v)))]))
 
 (defn read-splats
   "Read `n` generated splats back from the transform-feedback buffer as a vector of
@@ -556,7 +585,7 @@ void main(){
         stf (pad (map :stepf levels) 1.0)
         bnf (pad (map :bendf levels) 1.0)
         shp (pad (map (fn [l] (case (:map-kind l) :sharp 2 :mid 1 0)) levels) 0)
-        [sig-min sig-max] (sig-range levels variation)]
+        [sig-min sig-max] (sig-range levels variation (or size-broad 1.0))]
     (gl/gl-use-program program)
     ;; per-level + controls
     (gl/gl-uniform-1i (:u_nlev locs) (int nlev))
@@ -568,6 +597,7 @@ void main(){
     (gl/gl-uniform-1f (:u_contrast locs) (double contrast))
     (gl/gl-uniform-1f (:u_detail locs) (double detail))
     (gl/gl-uniform-1f (:u_curv locs) (double curvature))
+    (gl/gl-uniform-1f (:u_broad locs) (double (or size-broad 1.0)))
     (set-1fv! (:u_ssz locs) ssz)
     (set-1fv! (:u_sp locs) sp)
     (set-1fv! (:u_th locs) th)

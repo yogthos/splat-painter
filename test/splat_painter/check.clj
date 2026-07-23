@@ -83,7 +83,9 @@
     (assert-contains gs-src "out vec4 o_b;" "gen TF varying o_b")
     ;; placement (layered-means): threshold discard + jitter + Perlin warp gate
     (assert-contains gs-src "float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));" "dithered placement threshold")
-    (assert-contains gs-src "if (lvl > 0 && dv < thd) return;" "gen threshold discard")
+    (assert-contains gs-src "if (lvl > 0 && dv * gain < thd) return;" "subject-gated threshold discard")
+    (assert-contains gs-src "float sgate = subjectAt(cx, cy);" "wavelet subjectness gate")
+    (assert-contains gs-src "if (hash01(i*61 + lvl, j, 43) >= bminp*bminp) return;" "bokeh-adaptive broad thinning")
     (assert-contains gs-src "if (max(dcl.r, max(dcl.g, dcl.b)) > ((lvl >= 4) ? 0.3 : 0.22)) fade *= 0.4;" "stroke fades at colour-region boundary")
     (assert-contains gs-src "float al = lal2 * fade * (1.0 - 0.65 * tt * tt);" "taper × glaze × dry-out alpha")
     (assert-contains gs-src "float body = (lvl >= 4) ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0;" "impasto body on strong edges")
