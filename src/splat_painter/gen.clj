@@ -267,10 +267,11 @@ void main(){
   float dv = mapAt(u_sharp[k], cx, cy);
   float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));
   if (lvl > 0 && dv < thd) return;                // not detailed enough -> discard
-  // SUBDIVISION (mirror of seed/layered-means): a cell claimed by the next-finer
-  // level (slot k-1 — slots are finest-first) is not painted by this coarser level.
-  // The claim is DITHERED like the threshold: the scale handoff interleaves.
-  if (lvl > 0 && k > 0) {
+  // SUBDIVISION (mirror of seed/layered-means), broad/mid tiers only: a cell claimed
+  // by the next-finer level (slot k-1 — slots are finest-first) is not painted by
+  // this coarser level; dithered so the handoff interleaves. From level 3 up there
+  // is NO claim — the fine glazes overlap the mid strokes and mix.
+  if (lvl > 0 && lvl <= 2 && k > 0) {
     float fdv = mapAt(u_sharp[k-1], cx, cy);
     if (fdv >= u_th[k-1] * (0.75 + 0.5 * hash01(i*47 + lvl, j, 23))) return;
   }
@@ -305,7 +306,7 @@ void main(){
   float hb = (lvl <= 1) ? 1.0 : 0.0;
   // colour-rawness floor rises with fineness (seed/raw-floor): small strokes paint
   // faithful colour — a half-blur blend at feature scale softens the feature away
-  float traw = (lvl <= 1) ? 0.0 : (lvl <= 3) ? 0.45 : 0.7;
+  float traw = (lvl <= 1) ? 0.0 : (lvl <= 3) ? 0.45 : (lvl <= 5) ? 0.7 : 0.85;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
     emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw);
     return;
@@ -325,8 +326,9 @@ void main(){
   if (snapE) { vec2 sp2 = edgeSnap(x2, y2); x2 = sp2.x; y2 = sp2.y; }
   float px = x2, py = y2, dxp = 0.0, dyp = 0.0;
   // progressive refinement: finer layers GLAZE (translucent touches over the
-  // accumulated underpainting) instead of overwriting it
-  float lal = (lvl <= 1) ? 1.0 : (lvl <= 3) ? 0.9 : 0.75;
+  // accumulated underpainting) instead of overwriting it; the overlapping fine
+  // tier glazes lightest so stacked strokes MIX (mirror seed/level-alpha)
+  float lal = (lvl <= 1) ? 1.0 : (lvl <= 3) ? 0.85 : (lvl <= 5) ? 0.65 : 0.55;
   float fade = 1.0;
   vec3 headBlur = sampleRGB(u_blurTex, x2, y2);
   for (int q = 0; q < SEGS; q++) {

@@ -151,12 +151,14 @@
     ;; band belongs to base+fine only (mid fills suppressed at E>0.45), and every
     ;; stroke shrinks near edges so soft tails can't cross silhouettes.
     ;; latest: per-level glaze alpha (finer layers translucent) + strokes FADE at
-    ;; colour boundaries (dry-out) instead of breaking into gapped dashes.
-    (is (= 827 (count splats)))
-    (is (approx= 0.5  18497.858  sx) "Σ mean-x")
-    (is (approx= 0.5  23886.346  sy) "Σ mean-y")
-    (is (approx= 1.0  234533.154 sd) "Σ det(cov)")
-    (is (approx= 0.05 969.229    sc) "Σ colour")))
+    ;; colour boundaries (dry-out) instead of breaking into gapped dashes; then
+    ;; (827→757) the mid→fine OVERLAP: no subdivision claim from level 3 up, fine
+    ;; tier packs tighter with a ~pixel size floor and lighter glazes.
+    (is (= 757 (count splats)))
+    (is (approx= 0.5  16845.079  sx) "Σ mean-x")
+    (is (approx= 0.5  22257.805  sy) "Σ mean-y")
+    (is (approx= 1.0  234540.082 sd) "Σ det(cov)")
+    (is (approx= 0.05 830.524    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments

@@ -27,7 +27,7 @@
             [jolt.ffi       :as ffi]))
 
 ;; --- reactive controls (the panel re-renders on change) ----------------------
-(defonce count-atom    (r/atom 24000))  ; splat budget (max strokes) — higher = more detail, slower
+(defonce count-atom    (r/atom 72000))  ; splat budget (max strokes) — higher = more detail, slower
 (defonce size-atom     (r/atom 16.0))   ; base (coarsest) splat stdev; finer levels halve it
 (defonce stroke-atom   (r/atom 2.5))
 (defonce detail-atom   (r/atom 0.6))    ; how many fine detail levels are added
@@ -639,7 +639,7 @@
    [:label {:label @status-atom :xalign 0.0 :halign :start
             :max-width-chars 22 :ellipsize :end}]
    [:separator {}]
-   [slider "Splats"    1000 200000 1000 count-atom]     ; budget: higher = more detail, slower
+   [slider "Splats"    1000 600000 1000 count-atom]     ; budget: higher = more detail, slower
    [slider "Size"      6    50    0.5   size-atom]
    [slider "Broad"     0.4  2.5   0.05  broad-atom]    ; background/large-feature looseness
    [slider "Mid"       0.4  2.5   0.05  mid-atom]      ; mid-structure size

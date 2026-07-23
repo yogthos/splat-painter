@@ -23,7 +23,9 @@
            :check {:extra-paths ["test"] :main-opts ["-m" "splat-painter.check"]}
            :prof  {:extra-paths ["test"] :main-opts ["-m" "splat-painter.prof"]}
            :preview {:extra-paths ["test"] :main-opts ["-m" "splat-painter.preview"]}
-           :test  {:extra-paths ["test"] :main-opts ["-m" "splat-painter.test-runner"]}}
+           :test  {:extra-paths ["test"] :main-opts ["-m" "splat-painter.test-runner"]}
+           ;; print the actual golden-fixture checksums, for re-pinning seed-test
+           :pin   {:extra-paths ["test"] :main-opts ["-m" "splat-painter.pin"]}}
 
  :tasks {run   "joltc -M:run"
          check "joltc -M:check"

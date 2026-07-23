@@ -94,7 +94,7 @@
 ;; hard ceiling = the shader's MAX_SPLATS. The Splats control sets the working budget up to
 ;; this; more splats = smaller strokes = more preserved detail (a detailed oil painting) at a
 ;; higher render cost, fewer = larger strokes = looser/abstract and faster.
-(def ^:private splat-budget 200000)
+(def ^:private splat-budget 600000)
 
 (defn- detail-fraction
   "Fraction of the map array under `key` (:detail aggregate or :sharp fine-band)
@@ -136,9 +136,12 @@
 (defn- level-alpha
   "Paint translucency per level — PROGRESSIVE REFINEMENT: broad layers are opaque
    (coverage), each finer layer glazes more, letting the accumulated layers show
-   through so detail builds on the underpainting instead of scratching over it."
+   through so detail builds on the underpainting instead of scratching over it.
+   From level 3 up the layers OVERLAP (no subdivision handoff), so the fine tier
+   glazes light and the many stacked strokes MIX into a smooth mid→fine gradient
+   instead of one stroke owning each spot."
   [lvl]
-  (let [l (long lvl)] (cond (<= l 1) 1.0 (<= l 3) 0.9 :else 0.75)))
+  (let [l (long lvl)] (cond (<= l 1) 1.0 (<= l 3) 0.85 (<= l 5) 0.65 :else 0.55)))
 
 (defn- level-map-kind
   "Which placement map a level reads — matched to the scale it paints: broad levels
@@ -189,22 +192,35 @@
         ;; At the default Stroke (2.5) the factor is exactly 1.
         ;; base overlap 0.65 (was 0.72): hash-random placement has gap variance a
         ;; lattice doesn't; slightly tighter spacing keeps coverage airtight.
-        overlap (fn [lvl] (if (zero? (long lvl))
-                            0.65
-                            (* 1.25 (Math/sqrt (* (double (seg-count lvl)) slen)))))
+        ;; the fine tier (lvl≥4) packs TIGHTER (1.0 vs 1.25): its levels overlap each
+        ;; other AND the mid tier, so detailed areas get many light strokes mixing
+        ;; into one surface instead of a sparse handoff between scales.
+        overlap (fn [lvl] (let [l (long lvl)]
+                            (cond (zero? l) 0.65
+                                  (<= l 3)  (* 1.25 (Math/sqrt (* (double (seg-count lvl)) slen)))
+                                  :else     (Math/sqrt (* (double (seg-count lvl)) slen)))))
+        ;; level size ladder: halves per level down to level 4, then decays gently
+        ;; (×0.7 per level) with a ~pixel floor — the finest detail lands at a
+        ;; couple-of-pixels footprint, never sub-pixel dust the AA clamp fades away.
+        lsize   (fn [lvl] (let [l (double (long lvl))]
+                            (max 0.7
+                                 (if (<= l 4.0)
+                                   (/ smax (Math/pow 2.0 l))
+                                   (* (/ smax 16.0) (Math/pow 0.7 (- l 4.0)))))))
         ;; tier multipliers scale size AND spacing together (constant overlap), so
         ;; each tier's density rebalances through the budget automatically.
-        sp-of   (fn [lvl scale] (* (overlap lvl) scale (tier-mul tier-muls lvl)
-                                   (/ smax (Math/pow 2.0 (double lvl)))))
+        sp-of   (fn [lvl scale] (* (overlap lvl) scale (tier-mul tier-muls lvl) (lsize lvl)))
         ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working
         ;; budget. Fine-level seeds emit segs(lvl) SEGMENTS each (a traced brush stroke),
         ;; so their term is multiplied accordingly — the budget counts splats, not seeds.
         ;; Each fine level estimates its survivor fraction on ITS OWN map (aggregate vs
         ;; sharp fine-band — the same map it thresholds against when placing).
         lvl-frac (fn [lvl] (detail-fraction dmap (level-map-kind lvl) (thresh lvl)))
-        ;; SUBDIVISION: a cell claimed by a finer level is NOT painted by coarser
-        ;; detail levels (base always paints — coverage); the per-level costs below
-        ;; use the exclusive fractions.
+        ;; SUBDIVISION within the broad/mid tiers only: levels 1-2 hand cells off to
+        ;; the next-finer level (exclusive fractions). From level 3 up the finer
+        ;; levels OVERLAP instead of claiming — mid keeps painting under the fine
+        ;; glazes, so the mid→fine transition is a mixed gradient, not a seam — and
+        ;; each overlapping level pays its FULL fraction in the budget.
         ;; TWO-TIER budget: the levels that exist at moderate Detail (0-3) get the
         ;; scale THEY need; the added ultra-fine levels (4-5) fit their own scale into
         ;; the REMAINING budget. A single uniform scale let the finest levels' huge
@@ -214,7 +230,8 @@
         k-of (fn [lvl]
                (let [f (cond
                          (zero? (long lvl))        1.0
-                         (< (long lvl) (dec nlev)) (max 0.0 (- (lvl-frac lvl) (lvl-frac (inc (long lvl)))))
+                         (and (<= (long lvl) 2) (< (long lvl) (dec nlev)))
+                                                   (max 0.0 (- (lvl-frac lvl) (lvl-frac (inc (long lvl)))))
                          :else                     (lvl-frac lvl))
                      sp (sp-of lvl 1.0)]
                  (/ (* (double (seg-count lvl)) f area) (* sp sp))))
@@ -240,7 +257,7 @@
                  (if (< lvl 0)
                    out
                    (let [lsc (scale-of lvl)
-                         ssz (* lsc (tier-mul tier-muls lvl) (/ smax (Math/pow 2.0 (double lvl))))
+                         ssz (* lsc (tier-mul tier-muls lvl) (lsize lvl))
                          sp  (sp-of lvl lsc)
                          nx  (long (Math/ceil (/ area (* sp sp))))
                          ny  1]
@@ -400,11 +417,13 @@
                               ;; a map oscillating around it dashes contours into beads.
                               dv (map-at dmap map-kind cx cy)
                               thd (* th (+ 0.75 (* 0.5 (hash01 (+ (* i 43) lvl) j 19))))
-                              ;; SUBDIVISION: skip if the next-finer level (previous
-                              ;; entry — levels are finest-first) claims this cell. The
-                              ;; claim is DITHERED like the threshold so the handoff
-                              ;; between scales is a gradual interleave, not a seam.
-                              claimed? (and (pos? (long lvl)) (pos? (long idx))
+                              ;; SUBDIVISION (broad/mid tiers only): skip if the next-finer
+                              ;; level (previous entry — levels are finest-first) claims
+                              ;; this cell, dithered like the threshold so the handoff
+                              ;; interleaves. From level 3 up there is NO claim — the fine
+                              ;; glazes overlap the mid strokes and mix instead of
+                              ;; replacing them.
+                              claimed? (and (pos? (long lvl)) (<= (long lvl) 2) (pos? (long idx))
                                             (let [fl (nth levels (dec (long idx)))
                                                   fdv (map-at dmap (:map-kind fl) cx cy)]
                                               (>= fdv (* (:th fl)
