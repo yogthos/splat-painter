@@ -64,10 +64,6 @@ uniform int   u_segs[ML];
 uniform float u_stepf[ML];
 uniform float u_bendf[ML];
 uniform int   u_sharp[ML];
-// per-level grid rotation (cos/sin, CPU-computed) — axis-aligned grids read as a
-// corduroy ripple of stroke rows; each level gets its own angle (seed/grid-phi)
-uniform float u_cphi[ML];
-uniform float u_sphi[ML];
 uniform float u_warp;
 uniform int   u_H;
 uniform int   u_W;
@@ -121,6 +117,20 @@ float noise3(float x, float y, float z){
   return (1.0 + n) / 2.0;
 }
 float noise2(float x, float y){ return noise3(x, y, 0.0); }
+
+// Wang avalanche hash (mirror of seed/wang32): position generation needs real bit
+// mixing — a linear mix lays the candidate points on Marsaglia lines.
+uint wang32(uint v){
+  v = (v ^ 61u) ^ (v >> 16);
+  v = v * 9u;
+  v = v ^ (v >> 4);
+  v = v * 668265261u;
+  v = v ^ (v >> 15);
+  return v;
+}
+float poshash(int n, int lvl, int salt){
+  return float(wang32(wang32(uint(n)*2u + uint(lvl)) ^ (uint(salt) * 2654435769u))) / 4294967296.0;
+}
 
 float hash01(int a, int b, int salt){
   uint h = uint(a)*73856093u + uint(b)*19349663u + uint(salt)*83492791u; // wraps mod 2^32
@@ -228,13 +238,10 @@ void main(){
   int j = local - i * u_ny[k];
   int lvl = u_lvl[k];
   float sp = u_sp[k], ssz = u_ssz[k], th = u_th[k];
-  // rotated grid coords -> image coords about the image centre (mirror of
-  // seed/layered-means); cells landing outside the image are discarded.
-  float uu = (float(i) + 0.5) * sp - 0.5 * float(u_nx[k]) * sp;
-  float vv = (float(j) + 0.5) * sp - 0.5 * float(u_ny[k]) * sp;
-  float cx = 0.5 * float(u_H) + u_cphi[k]*uu - u_sphi[k]*vv;
-  float cy = 0.5 * float(u_W) + u_sphi[k]*uu + u_cphi[k]*vv;
-  if (cx < 0.0 || cx >= float(u_H) || cy < 0.0 || cy >= float(u_W)) return;
+  // white-noise candidate position (mirror of seed/layered-means): hashed,
+  // aperiodic — any lattice's row frequency reads as parallel stripes.
+  float cx = float(u_H) * poshash(i, lvl, 29);
+  float cy = float(u_W) * poshash(i, lvl, 31);
   // each level reads the map matched to ITS scale (mirror of seed/layered-means).
   // The cutoff is DITHERED ±25% per seed: a hard threshold on a map that oscillates
   // around it dashes contours into bead necklaces; dithering turns the knife edge
@@ -250,10 +257,8 @@ void main(){
     if (fdv >= u_th[k-1] * (0.75 + 0.5 * hash01(i*47 + lvl, j, 23))) return;
   }
 
-  // FULL-CELL jitter (±sp/2) — smaller jitter left cell centres visible as rows
-  float jx = sp * (hash01(i*137 + lvl, j, 3) - 0.5);
-  float jy = sp * (hash01(i*149 + lvl, j, 7) - 0.5);
-  float x = cx + jx, y = cy + jy;
+  // hashed positions need no jitter — they ARE the noise
+  float x = cx, y = cy;
   float D = min(1.0, u_detail * dv * 2.2);
   float aw = u_warp * (1.0 - D) * ssz;
   float x2 = (aw < 0.2) ? x : x + aw * noise2(0.06*x, 0.06*y);
@@ -327,7 +332,7 @@ void main(){
 (def ^:private gen-uniform-names
   ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv"
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
-   "u_segs" "u_stepf" "u_bendf" "u_sharp" "u_cphi" "u_sphi"
+   "u_segs" "u_stepf" "u_bendf" "u_sharp"
    "u_detailTex" "u_dmax" "u_detailDim" "u_detailSrc"
    "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurHTex" "u_rawTex" "u_permTex"])
 
@@ -480,8 +485,6 @@ void main(){
         stf (pad (map :stepf levels) 1.0)
         bnf (pad (map :bendf levels) 1.0)
         shp (pad (map (fn [l] (case (:map-kind l) :sharp 2 :mid 1 0)) levels) 0)
-        cph (pad (map :cphi levels) 1.0)
-        sph (pad (map :sphi levels) 0.0)
         [sig-min sig-max] (sig-range levels variation)]
     (gl/gl-use-program program)
     ;; per-level + controls
@@ -505,8 +508,6 @@ void main(){
     (set-1fv! (:u_stepf locs) stf)
     (set-1fv! (:u_bendf locs) bnf)
     (set-1iv! (:u_sharp locs) shp)
-    (set-1fv! (:u_cphi locs) cph)
-    (set-1fv! (:u_sphi locs) sph)
     ;; field textures on units 1..5 (unit 0 is the render splat buffer)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 1)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:detail fields)) (gl/gl-uniform-1i (:u_detailTex locs) 1)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 2)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:noise fields))  (gl/gl-uniform-1i (:u_noiseTex locs) 2)

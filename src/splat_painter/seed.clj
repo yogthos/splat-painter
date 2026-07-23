@@ -51,6 +51,26 @@
                 4294967296)]
     (/ (double h) 4294967296.0)))
 
+(defn- wang32
+  "Wang avalanche hash over 32-bit values (exact mod-2^32 arithmetic — the GPU
+   mirrors it in uint32). hash01's LINEAR mix is fine for jitter but as a POSITION
+   generator frac(i·A) is a rank-1 lattice: the points fall on straight lines
+   (Marsaglia hyperplanes) — worse stripes than any grid."
+  [v]
+  (let [v (mod (bit-xor (bit-xor (long v) 61) (bit-shift-right (long v) 16)) 4294967296)
+        v (mod (* v 9) 4294967296)
+        v (bit-xor v (bit-shift-right v 4))
+        v (mod (* v 668265261) 4294967296)
+        v (bit-xor v (bit-shift-right v 15))]
+    (mod v 4294967296)))
+
+(defn- poshash
+  "Avalanche-hashed position component in [0,1) from candidate index + level + salt."
+  [n lvl salt]
+  (/ (double (wang32 (bit-xor (wang32 (+ (* (long n) 2) (long lvl)))
+                              (mod (* (long salt) 2654435769) 4294967296))))
+     4294967296.0))
+
 (defn- blend-angle
   "Undirected-orientation blend between t1 and t2 weighted by w.
    0 = all t1, 1 = all t2. Works in the double-angle representation (2θ)
@@ -116,13 +136,6 @@
   [stroke]
   (+ 0.4 (* 0.24 (double stroke))))
 
-(defn- grid-phi
-  "Each level's candidate grid is ROTATED by its own angle: axis-aligned grids put
-   strokes in horizontal/vertical rows whose periodic overlap reads as a fine
-   corduroy ripple across flat regions — and stacked levels moiré. Distinct
-   rotations per level break both."
-  [lvl]
-  (mod (* 0.55 (inc (long lvl))) Math/PI))
 
 (defn layer-params
   "Pure per-level placement parameters — THE SHARED SPEC for the CPU loop
@@ -154,8 +167,10 @@
         ;; chain spans ~segs·step of edge — short strokes (low Stroke) must pack
         ;; denser or they render as sparse isolated pearls; long strokes space out.
         ;; At the default Stroke (2.5) the factor is exactly 1.
+        ;; base overlap 0.65 (was 0.72): hash-random placement has gap variance a
+        ;; lattice doesn't; slightly tighter spacing keeps coverage airtight.
         overlap (fn [lvl] (if (zero? (long lvl))
-                            0.72
+                            0.65
                             (* 1.25 (Math/sqrt (* (double (seg-count lvl)) slen)))))
         sp-of   (fn [lvl scale] (* (overlap lvl) scale (/ smax (Math/pow 2.0 (double lvl)))))
         ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working
@@ -193,24 +208,22 @@
         ;; in that same order, so GPU gl_VertexID order == CPU emission order == paint order.
         ;; Each level carries its SCALE-RELATIVE stroke behaviour: segment count, step
         ;; length, curvature share, and which detail map it reads.
+        ;; HASH-RANDOM placement: candidates are hashed positions, not a grid. Any
+        ;; lattice — axis-aligned OR rotated — keeps a spectral peak at its row
+        ;; frequency that reads as parallel stripes across smooth regions (worst
+        ;; with Variation at 0, when no size/tone diversity masks it). White-noise
+        ;; positions have no periodicity to show. nx = candidate count, ny = 1.
         levels (loop [lvl (dec nlev) off 0 out []]
                  (if (< lvl 0)
                    out
                    (let [lsc (scale-of lvl)
                          ssz (* lsc (/ smax (Math/pow 2.0 (double lvl))))
                          sp  (sp-of lvl lsc)
-                         phi (grid-phi lvl)
-                         cph (Math/cos phi) sph (Math/sin phi)
-                         ;; the rotated grid must cover the image rectangle in grid
-                         ;; coords: extents = the rect's projections onto the grid axes.
-                         nx  (long (inc (Math/ceil (/ (+ (* (double H) (Math/abs cph))
-                                                         (* (double W) (Math/abs sph))) sp))))
-                         ny  (long (inc (Math/ceil (/ (+ (* (double H) (Math/abs sph))
-                                                         (* (double W) (Math/abs cph))) sp))))]
+                         nx  (long (Math/ceil (/ area (* sp sp))))
+                         ny  1]
                      (recur (dec lvl) (+ off (* nx ny))
                             (conj out {:lvl lvl :ssz ssz :sp sp :th (thresh lvl)
                                        :nx nx :ny ny :offset off
-                                       :cphi cph :sphi sph
                                        :segs (seg-count lvl) :stepf (step-frac lvl)
                                        :bendf (bend-frac lvl) :map-kind (level-map-kind lvl)
                                        :traw (raw-floor lvl)})))))]
@@ -305,7 +318,7 @@
         {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke count H W)]
     (persistent!
       (reduce
-        (fn [acc [idx {:keys [lvl ssz sp th nx ny cphi sphi segs stepf bendf map-kind traw]}]]
+        (fn [acc [idx {:keys [lvl ssz sp th nx ny segs stepf bendf map-kind traw]}]]
           (loop [i 0 acc acc]
             (if (>= i nx)
               acc
@@ -313,14 +326,11 @@
                 (loop [j 0 acc acc]
                   (if (>= j ny)
                     acc
-                    (let [;; rotated grid coords -> image coords about the image centre;
-                          ;; cells that land outside the image are discarded (the grid's
-                          ;; bounding box over-covers so the whole rect is still tiled).
-                          uu (- (* (+ (double i) 0.5) sp) (* 0.5 (double nx) sp))
-                          vv (- (* (+ (double j) 0.5) sp) (* 0.5 (double ny) sp))
-                          cx (+ (* 0.5 (double H)) (- (* (double cphi) uu) (* (double sphi) vv)))
-                          cy (+ (* 0.5 (double W)) (+ (* (double sphi) uu) (* (double cphi) vv)))]
-                      (if (or (< cx 0.0) (>= cx (double H)) (< cy 0.0) (>= cy (double W)))
+                    (let [;; white-noise candidate position — AVALANCHE-hashed (a linear
+                          ;; hash here lays the points on Marsaglia lines), in-bounds
+                          cx (* (double H) (poshash i lvl 29))
+                          cy (* (double W) (poshash i lvl 31))]
+                      (if false
                         (recur (inc j) acc)
                         (let [;; each level reads the map matched to ITS scale: the finest
                               ;; levels use the sharp fine-band map so they land on (and
@@ -340,11 +350,8 @@
                                                          (+ 0.75 (* 0.5 (hash01 (+ (* i 47) lvl) j 23)))))))]
                           (if (and (pos? (long lvl)) (or claimed? (< dv thd)))
                             (recur (inc j) acc)      ; not detailed enough for this fine level
-                            (let [;; FULL-CELL jitter (±sp/2): the ±22% of the old 0.45 factor
-                                  ;; left cell centres visible as residual rows.
-                                  jx (* sp (- (hash01 (+ (* i 137) lvl) j 3) 0.5))
-                                  jy (* sp (- (hash01 (+ (* i 149) lvl) j 7) 0.5))
-                              x  (+ cx jx) y (+ cy jy)
+                            (let [;; hashed positions need no jitter — they ARE the noise
+                              x  cx y cy
                               D  (deff dv)
                               ;; flat-region Perlin warp breaks any residual level lattice;
                               ;; detail strokes (D≈1) stay put → faithful edges.
