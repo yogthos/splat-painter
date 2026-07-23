@@ -64,6 +64,15 @@
     (assert-contains fs-src-buf "texelFetch(u_splats, 2 * i + 1);" "flat texelFetch texel1")
     (assert-contains fs-src-buf "float hardness = mix(u_hard_sharp, u_hard_soft, ts);" "size-scaled hardness"))
 
+  ;; the per-splat quad renderer (no pixels×splats loop — the 48k-hang fix)
+  (let [{:keys [vs-src-quad fs-src-quad]} (shader/sources)]
+    (println "render (per-splat quad variant):")
+    (assert-contains vs-src-quad "int splat  = (u_count - 1) - (gl_VertexID / 6);" "quad back-to-front order")
+    (assert-contains vs-src-quad "vec2 he = 3.5 * sqrt(vec2(c00, c11));" "quad 3.5σ marginal-stdev extents")
+    (assert-contains vs-src-quad "float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);" "quad size→hardness")
+    (assert-contains fs-src-quad "float a = u_opacity * exp(-pow(pdf, v_hard));" "quad alpha formula")
+    (assert-contains fs-src-quad "frag = vec4(v_color * a, a);" "quad premultiplied output"))
+
   ;; the GPU generation shader must MIRROR seed/splat-record + layered-means + noise
   (let [{:keys [vs-src gs-src]} (gen/sources)]
     (println "generation (vertex + geometry, transform feedback):")
