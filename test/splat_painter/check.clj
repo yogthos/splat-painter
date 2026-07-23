@@ -70,7 +70,7 @@
   (let [{:keys [vs-src-quad fs-src-quad]} (shader/sources)]
     (println "render (per-splat quad variant):")
     (assert-contains vs-src-quad "int splat  = (u_count - 1) - (gl_VertexID / 6);" "quad back-to-front order")
-    (assert-contains vs-src-quad "vec2 he = (3.5 + 2.0 * u_tex_edge) * sqrt(vec2(c00, c11));" "quad marginal-stdev extents (edge-tex dilated)")
+    (assert-contains vs-src-quad "vec2 he = (3.5 + 5.0 * edgeAmt) * sqrt(vec2(c00, c11));" "quad marginal-stdev extents (edge-tex dilated)")
     (assert-contains vs-src-quad "float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);" "quad size→hardness")
     (assert-contains fs-src-quad "float a = v_alpha * u_opacity * exp(-pow(pdf, v_hard));" "quad per-splat alpha formula")
     (assert-contains fs-src-quad "vec3  base = mix(vec3(lum), v_color, sat);" "quad grain inherits stroke hue")
