@@ -96,10 +96,10 @@
   [:pointer :string] :void)
 
 ;; --- render requests ---------------------------------------------------------
-;; glimmer.ratom atoms aren't IRef-watchable, so we don't add-watch. Control
-;; sliders only reset their atoms; the Render button (or loading an image) calls
-;; request-render!, and on-render rebuilds the field from the current atoms — so
-;; you tune the sliders, then hit Render to see the result.
+;; glimmer.ratom atoms aren't IRef-watchable, so we don't add-watch. Each slider's
+;; :on-value resets its atom and calls request-render!, so the image updates live
+;; as you drag; loading an image does the same. on-render rebuilds the field from
+;; the current atoms. (GTK coalesces queued renders to one per frame-clock tick.)
 ;; test/headless overrides so a fixed count/size can be forced without the sliders
 (defn- cur-count  [] (or (some-> (System/getenv "GA_PAINTER_COUNT")  Double/parseDouble long) @count-atom))
 (defn- cur-size   [] (or (some-> (System/getenv "GA_PAINTER_SIZE")   Double/parseDouble)      @size-atom))
@@ -633,7 +633,6 @@
   [:vbox {:spacing 6 :margin 8 :width-request 180}
    [:hbox {:spacing 6}
     [:button {:label "Open Image…" :on-click open-image-dialog!}]
-    [:button {:label "Render"      :on-click request-render!}]
     [:button {:label "Save PNG…"   :on-click save-image-dialog!}]]
    ;; cap the path so the label can't widen the sidebar; ellipsize the tail
    [:label {:label @status-atom :xalign 0.0 :halign :start
