@@ -12,12 +12,14 @@
   attribute locations are cached once at build time.
 
   Splat texture layout (RGBA32F). Splats are TILED into a 2D texture so the count can exceed
-  GL_MAX_TEXTURE_SIZE (16384 on Apple Silicon — a flat 2×N would cap N there). Each splat uses
-  two adjacent texels; TILE_W splats per texture row, so the texture is (2·TILE_W)×ceil(N/TILE_W):
+  GL_MAX_TEXTURE_SIZE (16384 on Apple Silicon). Each splat uses THREE adjacent texels;
+  TILE_W splats per texture row, so the texture is (3·TILE_W)×ceil(N/TILE_W):
     col = i % TILE_W, row = i / TILE_W
-    texelFetch(u_splats, ivec2(2·col,   row),0) = (mean_x, mean_y, c00, c01)
-    texelFetch(u_splats, ivec2(2·col+1, row),0) = (c11,     color_r, color_g, color_b)
-  where the covariance is symmetric [c00 c01; c01 c11] in (row, col) space."
+    texelFetch(u_splats, ivec2(3·col,   row),0) = (mean_x, mean_y, c00, c01)
+    texelFetch(u_splats, ivec2(3·col+1, row),0) = (c11,     color_r, color_g, color_b)
+    texelFetch(u_splats, ivec2(3·col+2, row),0) = (alpha,   0, 0, 0)
+  where the covariance is symmetric [c00 c01; c01 c11] in (row, col) space and alpha is the
+  per-splat paint alpha (brush strokes taper it toward the stroke tail)."
   (:require [glimmer-gl.gl :as gl]))
 
 (def max-splats "shader splat ceiling + transform-feedback buffer capacity" 49152)
@@ -67,8 +69,9 @@ void main(){
   for (int i = 0; i < MAX_SPLATS; i++) {
     if (i >= u_count) break;
     int col = i % TILE_W, row = i / TILE_W;
-    vec4 t0 = texelFetch(u_splats, ivec2(2 * col,     row), 0);
-    vec4 t1 = texelFetch(u_splats, ivec2(2 * col + 1, row), 0);
+    vec4 t0 = texelFetch(u_splats, ivec2(3 * col,     row), 0);
+    vec4 t1 = texelFetch(u_splats, ivec2(3 * col + 1, row), 0);
+    vec4 t2 = texelFetch(u_splats, ivec2(3 * col + 2, row), 0);
     float dx = x - t0.x, dy = y - t0.y;
     float c00 = t0.z, c01 = t0.w, c11 = t1.x;
     float det = max(c00 * c11 - c01 * c01, 1e-8);
@@ -81,7 +84,7 @@ void main(){
     float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
     ts = ts * ts * (3.0 - 2.0 * ts);
     float hardness = mix(u_hard_sharp, u_hard_soft, ts);
-    float a = u_opacity * exp(-pow(pdf, hardness));  // peak alpha*opacity; hardness>1 = flat core, hard edge (discrete brush marks)
+    float a = t2.x * u_opacity * exp(-pow(pdf, hardness));  // t2.x = per-splat paint alpha (stroke taper)
     float wa = T * a;
     acc += wa * t1.yzw;
     T *= (1.0 - a);
@@ -128,8 +131,9 @@ void main(){
   vec3 acc = vec3(0.0);
   for (int i = 0; i < MAX_SPLATS; i++) {
     if (i >= u_count) break;
-    vec4 t0 = texelFetch(u_splats, 2 * i);
-    vec4 t1 = texelFetch(u_splats, 2 * i + 1);
+    vec4 t0 = texelFetch(u_splats, 3 * i);
+    vec4 t1 = texelFetch(u_splats, 3 * i + 1);
+    vec4 t2 = texelFetch(u_splats, 3 * i + 2);
     float dx = x - t0.x, dy = y - t0.y;
     float c00 = t0.z, c01 = t0.w, c11 = t1.x;
     float det = max(c00 * c11 - c01 * c01, 1e-8);
@@ -139,7 +143,7 @@ void main(){
     float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
     ts = ts * ts * (3.0 - 2.0 * ts);
     float hardness = mix(u_hard_sharp, u_hard_soft, ts);
-    float a = u_opacity * exp(-pow(pdf, hardness));
+    float a = t2.x * u_opacity * exp(-pow(pdf, hardness));
     float wa = T * a;
     acc += wa * t1.yzw;
     T *= (1.0 - a);
@@ -178,13 +182,15 @@ uniform float u_sig_max;
 flat out vec3  v_color;
 flat out vec3  v_prec;           // p00, p11, cross
 flat out float v_hard;
+flat out float v_alpha;          // per-splat paint alpha (stroke taper)
 out vec2 v_d;                    // image-space offset from the mean (rows, cols)
 
 void main(){
   int splat  = (u_count - 1) - (gl_VertexID / 6);   // back-to-front paint order
   int corner = gl_VertexID - 6 * (gl_VertexID / 6);
-  vec4 t0 = texelFetch(u_splats, 2 * splat);
-  vec4 t1 = texelFetch(u_splats, 2 * splat + 1);
+  vec4 t0 = texelFetch(u_splats, 3 * splat);
+  vec4 t1 = texelFetch(u_splats, 3 * splat + 1);
+  v_alpha = texelFetch(u_splats, 3 * splat + 2).x;
   float c00 = t0.z, c01 = t0.w, c11 = t1.x;
   float det = max(c00 * c11 - c01 * c01, 1e-8);
   v_prec  = vec3(c11 / det, c00 / det, -2.0 * c01 / det);
@@ -212,12 +218,13 @@ void main(){
 flat in vec3  v_color;
 flat in vec3  v_prec;
 flat in float v_hard;
+flat in float v_alpha;
 in vec2 v_d;
 uniform float u_opacity;
 out vec4 frag;
 void main(){
   float pdf = 0.5 * (v_prec.x * v_d.x * v_d.x + v_prec.z * v_d.x * v_d.y + v_prec.y * v_d.y * v_d.y);
-  float a = u_opacity * exp(-pow(pdf, v_hard));
+  float a = v_alpha * u_opacity * exp(-pow(pdf, v_hard));
   frag = vec4(v_color * a, a);   // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
 }")
 
@@ -269,17 +276,18 @@ void main(){
    :vs-src-quad vs-src-quad :fs-src-quad fs-src-quad})
 
 (defn pack-splats
-  "Flatten a seq of splats into the RGBA32F texture payload (length 2*N*4): row i
-  is [mean_x mean_y c00 c01  c11 r g b]. Pure, no GL."
+  "Flatten a seq of splats into the RGBA32F texture payload (length 3*N*4): splat i
+  is [mean_x mean_y c00 c01  c11 r g b  alpha 0 0 0]. Pure, no GL."
   [splats]
   (loop [out (transient [])
          s   splats]
     (if-not s
       (persistent! out)
-      (let [{[mx my] :mean [c00 c01 _ c11] :cov [r g b] :color} (first s)]
+      (let [{[mx my] :mean [c00 c01 _ c11] :cov [r g b] :color a :alpha} (first s)]
         (recur (-> out
                    (conj! mx) (conj! my) (conj! c00) (conj! c01)
-                   (conj! c11) (conj! r) (conj! g) (conj! b))
+                   (conj! c11) (conj! r) (conj! g) (conj! b)
+                   (conj! (or a 1.0)) (conj! 0.0) (conj! 0.0) (conj! 0.0))
                (next s))))))
 
 (defn build-program

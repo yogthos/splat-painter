@@ -36,16 +36,18 @@ void main(){ v_id = gl_VertexID; }")
 (def ^:private gs-src
   "#version 330 core
 layout(points) in;
-layout(points, max_vertices = 1) out;
+layout(points, max_vertices = 6) out;
 flat in int v_id[];
 
-// captured by transform feedback: 8 floats = 2 RGBA texels per splat, matching the
-// render shader's t0=(mean_x,mean_y,c00,c01) t1=(c11,r,g,b).
+// captured by transform feedback: 12 floats = 3 RGBA texels per splat, matching the
+// render shaders' t0=(mean_x,mean_y,c00,c01) t1=(c11,r,g,b) t2=(alpha,0,0,0).
 out vec4 o_a;
 out vec4 o_b;
+out vec4 o_c;
 
 const int   ML      = 4;
 const float MIN_COH = 0.28;
+const int   SEGS    = 6;      // segments per fine-level brush stroke (seed/stroke-segs)
 
 // per-level placement (finest-first slots), from seed/layer-params
 uniform int   u_nlev;
@@ -65,6 +67,7 @@ uniform float u_stroke;
 uniform float u_variation;
 uniform float u_contrast;
 uniform float u_detail;   // the Detail slider (deff scale)
+uniform float u_curv;     // Curvature raw 0..1 — Perlin bend of the stroke trace
 
 // fields
 uniform sampler2D u_detailTex;
@@ -150,6 +153,36 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (
   return texelFetch(tex, ivec2(yi, xi), 0).rgb;
 }
 
+// splat-record (mirror seed/splat-record) + emit one captured record. `alpha` is the
+// stroke taper (1.0 for base fills, fading toward a fine stroke's tail).
+void emitSplat(float px, float py, float csz, float D, float sn, float tn, float alpha){
+  vec2  tc    = fieldsAt(px, py);
+  float theta = tc.x, coh0 = tc.y;
+  vec3  blur = sampleRGB(u_blurTex, px, py);
+  vec3  raw  = sampleRGB(u_rawTex,  px, py);
+  float coh = MIN_COH + (1.0 - MIN_COH) * coh0;
+  float e   = 1.0 + u_stroke * coh * (0.25 + 0.75 * D);
+  float se  = sqrt(e);
+  float s0  = csz * (1.0 + u_variation * 0.5 * (2.0 * sn));
+  float sx  = s0 * se;
+  float sy  = s0 / se;
+  float sx2 = sx*sx, sy2 = sy*sy;
+  float c = cos(theta), s = sin(theta);
+  float c00 = sx2*c*c + sy2*s*s;
+  float c01 = (sx2 - sy2)*c*s;
+  float c11 = sx2*s*s + sy2*c*c;
+  float t = clamp(0.55 + 0.45 * max(coh0, D), 0.0, 1.0);
+  vec3 color0 = mix(blur, raw, t);
+  vec3 colorAc = (u_contrast == 1.0) ? color0 : clamp((color0 - 0.5)*u_contrast + 0.5, 0.0, 1.0);
+  float tone = 1.0 + u_variation * 0.15 * (2.0 * tn);
+  vec3 color = clamp(colorAc * tone, 0.0, 1.0);
+  o_a = vec4(px, py, c00, c01);
+  o_b = vec4(c11, color.r, color.g, color.b);
+  o_c = vec4(alpha, 0.0, 0.0, 0.0);
+  EmitVertex();
+  EndPrimitive();
+}
+
 void main(){
   int v = v_id[0];
   // decode candidate index -> finest-first level slot k
@@ -177,41 +210,42 @@ void main(){
   x2 = clamp(x2, 0.0, float(u_H - 1));
   y2 = clamp(y2, 0.0, float(u_W - 1));
 
-  // sample the orientation field (bilinear) at the final centre; per-seed size/tone
-  // jitter is hashed (independent per stroke), mirroring seed/layered-means.
-  vec2  tc    = fieldsAt(x2, y2);
-  float theta = tc.x, coh0 = tc.y;
+  // per-seed size/tone jitter is hashed (independent per stroke), mirroring
+  // seed/layered-means.
   float snoise = hash01(i*31 + lvl, j, 11) - 0.5;
   float tnoise = hash01(i*37 + lvl, j, 13) - 0.5;
-  vec3  blur = sampleRGB(u_blurTex, x2, y2);
-  vec3  raw  = sampleRGB(u_rawTex,  x2, y2);
 
-  // splat-record (mirror seed/splat-record) ---------------------------------
-  float coh = MIN_COH + (1.0 - MIN_COH) * coh0;
-  float e   = 1.0 + u_stroke * coh * (0.25 + 0.75 * D);
-  float se  = sqrt(e);
-  float s0  = ssz * (1.0 + u_variation * 0.5 * (2.0 * snoise));
-  float sx  = s0 * se;
-  float sy  = s0 / se;
-  float sx2 = sx*sx, sy2 = sy*sy;
-  float c = cos(theta), s = sin(theta);
-  float c00 = sx2*c*c + sy2*s*s;
-  float c01 = (sx2 - sy2)*c*s;
-  float c11 = sx2*s*s + sy2*c*c;
-  float t = clamp(0.55 + 0.45 * max(coh0, D), 0.0, 1.0);
-  vec3 color0 = mix(blur, raw, t);
-  vec3 colorAc = (u_contrast == 1.0) ? color0 : clamp((color0 - 0.5)*u_contrast + 0.5, 0.0, 1.0);
-  float tone = 1.0 + u_variation * 0.15 * (2.0 * tnoise);
-  vec3 color = clamp(colorAc * tone, 0.0, 1.0);
+  if (lvl == 0) {                                 // base fill: one full-alpha splat
+    emitSplat(x2, y2, ssz, D, snoise, tnoise, 1.0);
+    return;
+  }
 
-  o_a = vec4(x2, y2, c00, c01);
-  o_b = vec4(c11, color.r, color.g, color.b);
-  EmitVertex();
-  EndPrimitive();
+  // fine level: TRACE A BRUSH STROKE (mirror seed/stroke-segments) — SEGS segments
+  // stepped along the orientation field (the edge tangent), sign-continuous, bent by
+  // smooth Perlin noise scaled by Curvature, size+alpha tapering toward the tail.
+  float dirsign = hash01(i*41 + lvl, j, 17) < 0.5 ? 1.0 : -1.0;
+  float px = x2, py = y2, dxp = 0.0, dyp = 0.0;
+  for (int q = 0; q < SEGS; q++) {
+    float tt = float(q) / float(SEGS - 1);
+    float sz = ssz * (1.0 - 0.45 * tt * sqrt(tt));   // width tapers to the tip
+    float al = 1.0 - 0.65 * tt * tt;                 // …and the paint thins out
+    emitSplat(px, py, sz, D, snoise, tnoise, al);
+    vec2  tc  = fieldsAt(px, py);
+    float bend = u_curv * 0.9 * (noise2(0.05*px, 0.05*py) - 0.5);
+    float cb = cos(bend), sb = sin(bend);
+    float dx0 = cos(tc.x), dy0 = sin(tc.x);
+    float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);
+    float dx1 = sgn*dx0, dy1 = sgn*dy0;
+    float dx = cb*dx1 - sb*dy1, dy = sb*dx1 + cb*dy1;
+    float L = ssz * 1.1;
+    px = clamp(px + L*dx, 0.0, float(u_H - 1));
+    py = clamp(py + L*dy, 0.0, float(u_W - 1));
+    dxp = dx; dyp = dy;
+  }
 }")
 
 (def ^:private gen-uniform-names
-  ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail"
+  ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv"
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
    "u_detailTex" "u_dmax" "u_detailDim" "u_detailSrc"
    "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_rawTex" "u_permTex"])
@@ -225,7 +259,7 @@ void main(){
   "Compile + link the VS+GS transform-feedback generation program, capturing
    o_a,o_b interleaved (8 floats/splat). Returns {:program :locs} or nil."
   []
-  (when-let [prog (gl/make-tf-program vs-src gs-src ["o_a" "o_b"])]
+  (when-let [prog (gl/make-tf-program vs-src gs-src ["o_a" "o_b" "o_c"])]
     {:program prog
      :locs (into {} (map (fn [n] [(keyword n) (gl/gl-get-uniform-location prog n)]))
                  gen-uniform-names)}))
@@ -314,11 +348,11 @@ void main(){
 
 (defn read-splats
   "Read `n` generated splats back from the transform-feedback buffer as a vector of
-   {:mean [x y] :cov [c00 c01 c01 c11] :color [r g b]} — the same shape as the CPU
+   {:mean [x y] :cov [c00 c01 c01 c11] :color [r g b] :alpha a} — the same shape as the CPU
    splat-field, for numerical verification against the golden reference. `tf-buf` must
    be bound to GL_TRANSFORM_FEEDBACK_BUFFER."
   [tf-buf n]
-  (let [nf  (* n 8)
+  (let [nf  (* n 12)
         ptr (ffi/alloc (* nf (ffi/sizeof :float)))]
     (gl/gl-bind-buffer gl/GL-TRANSFORM-FEEDBACK-BUFFER tf-buf)
     (gl/gl-get-buffer-sub-data gl/GL-TRANSFORM-FEEDBACK-BUFFER 0
@@ -326,11 +360,12 @@ void main(){
     (let [fl (gl/read-floats ptr nf)]
       (ffi/free ptr)
       (mapv (fn [i]
-              (let [b (* i 8)
+              (let [b (* i 12)
                     mx (nth fl b) my (nth fl (+ b 1))
                     c00 (nth fl (+ b 2)) c01 (nth fl (+ b 3)) c11 (nth fl (+ b 4))]
                 {:mean [mx my] :cov [c00 c01 c01 c11]
-                 :color [(nth fl (+ b 5)) (nth fl (+ b 6)) (nth fl (+ b 7))]}))
+                 :color [(nth fl (+ b 5)) (nth fl (+ b 6)) (nth fl (+ b 7))]
+                 :alpha (nth fl (+ b 8))}))
             (range n)))))
 
 (defn generate!
@@ -365,6 +400,7 @@ void main(){
     (gl/gl-uniform-1f (:u_variation locs) (double variation))
     (gl/gl-uniform-1f (:u_contrast locs) (double contrast))
     (gl/gl-uniform-1f (:u_detail locs) (double detail))
+    (gl/gl-uniform-1f (:u_curv locs) (double curvature))
     (set-1fv! (:u_ssz locs) ssz)
     (set-1fv! (:u_sp locs) sp)
     (set-1fv! (:u_th locs) th)

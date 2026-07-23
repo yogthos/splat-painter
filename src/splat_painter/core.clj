@@ -254,15 +254,15 @@
   (let [n      (count splats)
         tw     shader/tile-w
         rows   (max 1 (long (Math/ceil (/ (double n) (double tw)))))
-        floats (shader/pack-splats splats)          ; n*8 floats, splat-major
-        need   (* rows tw 8)
+        floats (shader/pack-splats splats)          ; n*12 floats, splat-major
+        need   (* rows tw 12)
         padded (if (< (count floats) need)
                  (into floats (repeat (- need (count floats)) 0.0))
                  floats)
         ptr    (gl/write-floats padded)]
     (gl/gl-active-texture gl/GL-TEXTURE0)
     (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
-    (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 gl/GL-RGBA32F (* 2 tw) rows 0
+    (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 gl/GL-RGBA32F (* 3 tw) rows 0
                         gl/GL-RGBA gl/GL-FLOAT ptr)
     (ffi/free ptr)
     n))
@@ -289,7 +289,7 @@
               (let [tf-buf (gl/gen-one gl/gl-gen-buffers)]
                 (gl/gl-bind-buffer gl/GL-TRANSFORM-FEEDBACK-BUFFER tf-buf)
                 (gl/gl-buffer-data gl/GL-TRANSFORM-FEEDBACK-BUFFER
-                                   (* shader/max-splats 8 (ffi/sizeof :float)) ffi/null gl/GL-DYNAMIC-COPY)
+                                   (* shader/max-splats 12 (ffi/sizeof :float)) ffi/null gl/GL-DYNAMIC-COPY)
                 {:gen     (gen/build-gen-program)
                  :render  (shader/build-program-buf)
                  :quad    (shader/build-program-quad)
@@ -372,9 +372,10 @@
     {:count count :total total :n n}))
 
 (defn- splat-stats [splats]
-  (reduce (fn [[sx sy sd sc] {[mx my] :mean [c00 c01 _ c11] :cov [r g b] :color}]
-            [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc r g b)])
-          [0.0 0.0 0.0 0.0] splats))
+  (reduce (fn [[sx sy sd sc sa] {[mx my] :mean [c00 c01 _ c11] :cov [r g b] :color a :alpha}]
+            [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc r g b)
+             (+ sa (double (or a 1.0)))])
+          [0.0 0.0 0.0 0.0 0.0] splats))
 
 (defn- gpu-verify! [area tf-buf n]
   ;; numerical m11 check: compare the GPU-generated field to the CPU golden reference
@@ -382,14 +383,15 @@
   ;; across double↔float + Perlin/hash, so we report both for a closeness read).
   (let [gpu (gen/read-splats tf-buf n)
         cpu (:splats (field-for-current-controls))
-        [gx gy gd gc] (splat-stats gpu)
-        [cx cy cd cc] (splat-stats cpu)]
+        [gx gy gd gc ga] (splat-stats gpu)
+        [cx cy cd cc ca] (splat-stats cpu)]
     (println (format "gpu-verify: count GPU %d / CPU %d  (%.1f%%)" n (count cpu)
                      (* 100.0 (/ (double n) (max 1 (count cpu))))))
     (println (format "  Σmean-x  GPU %.1f  CPU %.1f" gx cx))
     (println (format "  Σmean-y  GPU %.1f  CPU %.1f" gy cy))
     (println (format "  Σdet     GPU %.1f  CPU %.1f" gd cd))
-    (println (format "  Σcolour  GPU %.2f  CPU %.2f" gc cc))))
+    (println (format "  Σcolour  GPU %.2f  CPU %.2f" gc cc))
+    (println (format "  Σalpha   GPU %.2f  CPU %.2f" ga ca))))
 
 (defn- save-rgba-jolt! [buf iw ih path]
   ;; buf = iw*ih*4 RGBA bytes, bottom-up (glReadPixels); write top-down via the native

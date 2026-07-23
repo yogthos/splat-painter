@@ -140,13 +140,26 @@
         [sx sy sd sc] (reduce (fn [[sx sy sd sc] {[mx my] :mean [c00 c01 _ c11] :cov [cr cg cb] :color}]
                                 [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc cr cg cb)])
                               [0.0 0.0 0.0 0.0] splats)]
-    ;; older: count=254 sx=6438.922 sy=8095.514 sd=210455.049 sc=308.503 (pre placement-map)
-    ;; old:   count=497 sd=224608.308 sc=540.778 (nearest theta + Perlin size/tone fields)
-    (is (= 497 (count splats)))
-    (is (approx= 0.05 12432.697  sx) "Σ mean-x")
-    (is (approx= 0.05 16448.738  sy) "Σ mean-y")
-    (is (approx= 0.5  285693.820 sd) "Σ det(cov)")
-    (is (approx= 0.05 536.450    sc) "Σ colour")))
+    ;; older: count=254 (pre placement-map); count=497 (dabs, nearest theta / Perlin jitter
+    ;; fields; then bilinear c2/s2). Now fine seeds — √segs sparser — trace 6-segment
+    ;; brush strokes at the old dabs' stroke width.
+    (is (= 516 (count splats)))
+    (is (approx= 0.5  13630.289  sx) "Σ mean-x")
+    (is (approx= 0.5  16416.601  sy) "Σ mean-y")
+    (is (approx= 1.0  278889.108 sd) "Σ det(cov)")
+    (is (approx= 0.05 544.818    sc) "Σ colour")))
+
+(deftest fine-seeds-trace-tapered-brush-strokes
+  ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
+  ;; carry tapered alpha — full paint (1.0) at stroke heads and base fills, thinning
+  ;; toward stroke tails (min alpha = 1 − 0.65 = 0.35) — never outside (0,1].
+  (let [img (gray-img 48 48 (fn [x y] (if (odd? (+ (int (quot x 4)) (int (quot y 4)))) 0.15 0.85)))
+        {:keys [splats]} (seed/splat-field img {:count 3000 :size 6.0 :detail 0.8})
+        alphas (map #(double (or (:alpha %) 1.0)) splats)]
+    (is (every? #(and (> % 0.0) (<= % 1.0)) alphas))
+    (is (some #(= 1.0 %) alphas) "stroke heads + base fills carry full paint")
+    (is (some #(< % 0.5) alphas) "stroke tails taper below half paint")
+    (is (approx= 1e-6 0.35 (reduce min alphas)) "the tail taper floor is 1−0.65")))
 
 (deftest layer-params-shared-spec
   ;; layer-params is the per-level placement spec BOTH the CPU loop and the GPU generation

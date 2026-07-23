@@ -41,8 +41,9 @@
     (assert-contains fs-src "uniform vec2 u_viewport;"       "u_viewport")
     (assert-contains fs-src "uniform vec2 u_image;"          "u_image")
     (assert-contains fs-src "uniform vec3 u_bg;"             "u_bg")
-    (assert-contains fs-src "texelFetch(u_splats, ivec2(2 * col,     row), 0);" "texelFetch texel0")
-    (assert-contains fs-src "texelFetch(u_splats, ivec2(2 * col + 1, row), 0);" "texelFetch texel1")
+    (assert-contains fs-src "texelFetch(u_splats, ivec2(3 * col,     row), 0);" "texelFetch texel0")
+    (assert-contains fs-src "texelFetch(u_splats, ivec2(3 * col + 1, row), 0);" "texelFetch texel1")
+    (assert-contains fs-src "texelFetch(u_splats, ivec2(3 * col + 2, row), 0);" "texelFetch texel2 (alpha)")
     (assert-contains fs-src "float det = max(c00 * c11 - c01 * c01, 1e-8);" "det floor")
     (assert-contains fs-src "float p00 = c11 / det, p11 = c00 / det, cross = -2.0 * c01 / det;"
                     "precision (2x2 inverse)")
@@ -50,7 +51,7 @@
     (assert-contains fs-src "uniform float u_hard_sharp;"       "u_hard_sharp")
     (assert-contains fs-src "uniform float u_hard_soft;"        "u_hard_soft")
     (assert-contains fs-src "float hardness = mix(u_hard_sharp, u_hard_soft, ts);" "size-scaled hardness")
-    (assert-contains fs-src "float a = u_opacity * exp(-pow(pdf, hardness));" "opacity-scaled, size-hardness alpha")
+    (assert-contains fs-src "float a = t2.x * u_opacity * exp(-pow(pdf, hardness));" "per-splat alpha × opacity × size-hardness")
     (assert-contains fs-src "acc += wa * t1.yzw;"             "over-composite color accumulation")
     (assert-contains fs-src "T *= (1.0 - a);"                 "transmittance update")
     (assert-contains fs-src "frag = vec4(acc + T * u_bg, 1.0);" "background weighted by T")
@@ -60,8 +61,9 @@
   (let [{:keys [fs-src-buf]} (shader/sources)]
     (println "render (texture-buffer variant):")
     (assert-contains fs-src-buf "uniform samplerBuffer u_splats;" "samplerBuffer u_splats")
-    (assert-contains fs-src-buf "texelFetch(u_splats, 2 * i);"     "flat texelFetch texel0")
-    (assert-contains fs-src-buf "texelFetch(u_splats, 2 * i + 1);" "flat texelFetch texel1")
+    (assert-contains fs-src-buf "texelFetch(u_splats, 3 * i);"     "flat texelFetch texel0")
+    (assert-contains fs-src-buf "texelFetch(u_splats, 3 * i + 1);" "flat texelFetch texel1")
+    (assert-contains fs-src-buf "texelFetch(u_splats, 3 * i + 2);" "flat texelFetch texel2 (alpha)")
     (assert-contains fs-src-buf "float hardness = mix(u_hard_sharp, u_hard_soft, ts);" "size-scaled hardness"))
 
   ;; the per-splat quad renderer (no pixels×splats loop — the 48k-hang fix)
@@ -70,14 +72,13 @@
     (assert-contains vs-src-quad "int splat  = (u_count - 1) - (gl_VertexID / 6);" "quad back-to-front order")
     (assert-contains vs-src-quad "vec2 he = 3.5 * sqrt(vec2(c00, c11));" "quad 3.5σ marginal-stdev extents")
     (assert-contains vs-src-quad "float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);" "quad size→hardness")
-    (assert-contains fs-src-quad "float a = u_opacity * exp(-pow(pdf, v_hard));" "quad alpha formula")
+    (assert-contains fs-src-quad "float a = v_alpha * u_opacity * exp(-pow(pdf, v_hard));" "quad per-splat alpha formula")
     (assert-contains fs-src-quad "frag = vec4(v_color * a, a);" "quad premultiplied output"))
 
   ;; the GPU generation shader must MIRROR seed/splat-record + layered-means + noise
   (let [{:keys [vs-src gs-src]} (gen/sources)]
     (println "generation (vertex + geometry, transform feedback):")
     (assert-contains vs-src "v_id = gl_VertexID;" "gen VS passes vertex id")
-    (assert-contains gs-src "layout(points, max_vertices = 1) out;" "gen GS emits points")
     (assert-contains gs-src "out vec4 o_a;" "gen TF varying o_a")
     (assert-contains gs-src "out vec4 o_b;" "gen TF varying o_b")
     ;; placement (layered-means): threshold discard + jitter + Perlin warp gate
@@ -91,16 +92,23 @@
     (assert-contains gs-src "float e   = 1.0 + u_stroke * coh * (0.25 + 0.75 * D);" "gen elongation")
     (assert-contains gs-src "float c00 = sx2*c*c + sy2*s*s;" "gen covariance c00")
     (assert-contains gs-src "float t = clamp(0.55 + 0.45 * max(coh0, D), 0.0, 1.0);" "gen colour blend t")
-    (assert-contains gs-src "o_a = vec4(x2, y2, c00, c01);" "gen output o_a layout")
-    (assert-contains gs-src "o_b = vec4(c11, color.r, color.g, color.b);" "gen output o_b layout"))
+    (assert-contains gs-src "o_a = vec4(px, py, c00, c01);" "gen output o_a layout")
+    (assert-contains gs-src "o_b = vec4(c11, color.r, color.g, color.b);" "gen output o_b layout")
+    (assert-contains gs-src "o_c = vec4(alpha, 0.0, 0.0, 0.0);" "gen output o_c (stroke-taper alpha)")
+    ;; the brush-stroke trace (mirror of seed/stroke-segments)
+    (assert-contains gs-src "layout(points, max_vertices = 6) out;" "gen GS emits stroke chains")
+    (assert-contains gs-src "float sz = ssz * (1.0 - 0.45 * tt * sqrt(tt));" "stroke width taper")
+    (assert-contains gs-src "float al = 1.0 - 0.65 * tt * tt;" "stroke alpha taper")
+    (assert-contains gs-src "float bend = u_curv * 0.9 * (noise2(0.05*px, 0.05*py) - 0.5);" "Perlin stroke bend")
+    (assert-contains gs-src "float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);" "sign-continuous tangent"))
 
   (println "pack-splats:")
-  (let [splats [{:mean [1.0 2.0] :cov [4.0 0.5 0.5 9.0] :color [0.1 0.2 0.3]}]
+  (let [splats [{:mean [1.0 2.0] :cov [4.0 0.5 0.5 9.0] :color [0.1 0.2 0.3] :alpha 0.7}]
         packed (shader/pack-splats splats)]
-    (println "  1 splat ->" (count packed) "floats (want 8)")
-    (assert (= 8 (count packed)))
-    (assert (= [1.0 2.0 4.0 0.5 9.0 0.1 0.2 0.3] packed))
-    (println "  layout [mean_x mean_y c00 c01  c11 r g b]: OK"))
+    (println "  1 splat ->" (count packed) "floats (want 12)")
+    (assert (= 12 (count packed)))
+    (assert (= [1.0 2.0 4.0 0.5 9.0 0.1 0.2 0.3 0.7 0.0 0.0 0.0] packed))
+    (println "  layout [mean_x mean_y c00 c01  c11 r g b  alpha 0 0 0]: OK"))
 
   (println "pipeline (load eye.jpeg -> seed -> pack):")
   (let [img   (image/load-image "test/splat_painter/fixtures/eye.jpeg" 64)
@@ -110,7 +118,7 @@
     (println (format "  image %dx%d -> %d splats -> %d texture floats"
                      (:width img) (:height img) n (count packed)))
     (assert (pos? n))
-    (assert (= (* 2 n 4) (count packed)))))
+    (assert (= (* 3 n 4) (count packed)))))
 
   (println "widgets registered:"
            (every? #(contains? @w/specs %) [:gl-area :scale]))
