@@ -84,7 +84,8 @@
     ;; placement (layered-means): threshold discard + jitter + Perlin warp gate
     (assert-contains gs-src "float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));" "dithered placement threshold")
     (assert-contains gs-src "if (lvl > 0 && dv < thd) return;" "gen threshold discard")
-    (assert-contains gs-src "if (max(dcl.r, max(dcl.g, dcl.b)) > 0.22) break;" "stroke ends at colour-region boundary")
+    (assert-contains gs-src "if (max(dcl.r, max(dcl.g, dcl.b)) > 0.22) fade *= 0.4;" "stroke fades at colour-region boundary")
+    (assert-contains gs-src "float al = lal * fade * (1.0 - 0.65 * tt * tt);" "taper × glaze × dry-out alpha")
     (assert-contains gs-src "float cy = float(u_W) * poshash(i, lvl, 31);" "avalanche-hashed candidate y")
     (assert-contains gs-src "float cx = float(u_H) * poshash(i, lvl, 29);" "avalanche-hashed candidate positions")
     (assert-contains gs-src "uint wang32(uint v){" "Wang avalanche hash")
@@ -107,7 +108,7 @@
     ;; the brush-stroke trace (mirror of seed/stroke-segments)
     (assert-contains gs-src "layout(points, max_vertices = 6) out;" "gen GS emits stroke chains")
     (assert-contains gs-src "float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));" "stroke width taper (seed-jittered size)")
-    (assert-contains gs-src "float al = 1.0 - 0.65 * tt * tt;" "stroke alpha taper")
+    (assert-contains gs-src "float lal = (lvl <= 1) ? 1.0 : (lvl <= 3) ? 0.9 : 0.75;" "per-level glaze alpha")
     (assert-contains gs-src "float bend = u_curv * 0.9 * bendf * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);" "coherence-gated Perlin stroke bend")
     (assert-contains gs-src "vec2 edgeSnap(float x, float y){" "edge-ridge snap")
     (assert-contains gs-src "if (snapE) { vec2 sp3 = edgeSnap(px, py); px = sp3.x; py = sp3.y; }" "per-step ridge correction")

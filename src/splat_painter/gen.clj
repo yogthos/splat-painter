@@ -324,19 +324,23 @@ void main(){
   float cpx = x2, cpy = y2;
   if (snapE) { vec2 sp2 = edgeSnap(x2, y2); x2 = sp2.x; y2 = sp2.y; }
   float px = x2, py = y2, dxp = 0.0, dyp = 0.0;
+  // progressive refinement: finer layers GLAZE (translucent touches over the
+  // accumulated underpainting) instead of overwriting it
+  float lal = (lvl <= 1) ? 1.0 : (lvl <= 3) ? 0.9 : 0.75;
+  float fade = 1.0;
   vec3 headBlur = sampleRGB(u_blurTex, x2, y2);
   for (int q = 0; q < SEGS; q++) {
-    if (q >= segs) break;
+    if (q >= segs || fade < 0.15) break;
     if (q > 0) {
-      // the stroke ends when the canvas stops matching its brush-load — an
-      // overshooting trace would drag the head colour across the silhouette
+      // the stroke FADES when the canvas stops matching its brush-load — a brush
+      // running dry — instead of breaking dead into gapped dashes
       vec3 cb = sampleRGB(u_blurTex, px, py);
       vec3 dcl = abs(cb - headBlur);
-      if (max(dcl.r, max(dcl.g, dcl.b)) > 0.22) break;
+      if (max(dcl.r, max(dcl.g, dcl.b)) > 0.22) fade *= 0.4;
     }
     float tt = float(q) / float(segs - 1);
     float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));  // width tapers to the tip
-    float al = 1.0 - 0.65 * tt * tt;                 // …and the paint thins out
+    float al = lal * fade * (1.0 - 0.65 * tt * tt);  // taper × glaze × dry-out
     emitSplat(px, py, cpx, cpy, sz, D, snoise, tnoise, al, hb, traw);
     vec2  tc  = fieldsAt(px, py);
     // bend gated by coherence: straight strongly-oriented edges trace straight
