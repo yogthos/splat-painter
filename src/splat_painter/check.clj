@@ -82,7 +82,9 @@
     (assert-contains gs-src "out vec4 o_a;" "gen TF varying o_a")
     (assert-contains gs-src "out vec4 o_b;" "gen TF varying o_b")
     ;; placement (layered-means): threshold discard + jitter + Perlin warp gate
-    (assert-contains gs-src "if (lvl > 0 && dv < th) return;" "gen threshold discard")
+    (assert-contains gs-src "float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));" "dithered placement threshold")
+    (assert-contains gs-src "if (lvl > 0 && dv < thd) return;" "gen threshold discard")
+    (assert-contains gs-src "if (max(dcl.r, max(dcl.g, dcl.b)) > 0.22) break;" "stroke ends at colour-region boundary")
     (assert-contains gs-src "hash01(i*137 + lvl, j, 3)" "gen jitter x hash")
     (assert-contains gs-src "float cx = 0.5 * float(u_H) + u_cphi[k]*uu - u_sphi[k]*vv;" "rotated level grid")
     (assert-contains gs-src "float aw = u_warp * (1.0 - D) * ssz;" "gen warp amplitude")
