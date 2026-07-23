@@ -184,6 +184,15 @@
    half-blur blend at feature scale just softens the feature it exists to keep."
   [lvl]
   (let [l (long lvl)] (cond (<= l 1) 0.0 (<= l 3) 0.45 (<= l 5) 0.7 :else 0.85)))
+(defn- spec-cap
+  "Ceiling on colour SPECIFICITY (the blur→raw blend t) per level — PROGRESSIVE
+   COLOUR refinement: the coherence-driven t formula would let a base daub on a
+   strong edge paint one raw pixel's colour across its whole σ (a blotch). Broad
+   layers stay AVERAGED, mid layers go halfway, and full specificity arrives only
+   with the fine detail levels — turning detail down degrades to a soft averaged
+   underpainting, never to misplaced specific colour."
+  [lvl]
+  (let [l (long lvl)] (cond (<= l 1) 0.35 (<= l 3) 0.7 :else 1.0)))
 (defn- stroke-len-frac
   "The Stroke slider as stroke LENGTH: scales the chain step. 2.5 (default) = 1.0."
   [stroke]
@@ -411,7 +420,7 @@
   [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
-      [[x y ssz D sn tn 1.0 th coh hb x y traw]])
+      [[x y ssz D sn tn 1.0 th coh hb x y traw (spec-cap lvl)]])
     (let [kmax (dec (long segs))
           lal  (level-alpha lvl)
           ;; fine strokes snap onto the edge ridge at the seed and after every step
@@ -500,7 +509,8 @@
                 ;; surroundings instead of carrying one colour to a hard break.
                 wsl (if (>= (long lvl) 4) (* 0.35 t) 0.0)
                 acc (conj acc [px py sz D sn tn al th coh hb
-                               (+ cx0 (* wsl (- px cx0))) (+ cy0 (* wsl (- py cy0))) traw])
+                               (+ cx0 (* wsl (- px cx0))) (+ cy0 (* wsl (- py cy0)))
+                               traw (spec-cap lvl)])
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
                 ;; broad strokes curl freely, fine marks stay faithful to the edge.
@@ -675,8 +685,16 @@
                                                          ;; fat strokes shrink near edges so soft
                                                          ;; tails can't cross the silhouette; the
                                                          ;; fine liner strokes ARE the edge's own
-                                                         ;; paint and keep their size.
-                                                         (* ssz szf (- 1.0 (* (if (<= (long lvl) 3) 0.45 0.1) Ev)))
+                                                         ;; paint and keep their size. The BASE is
+                                                         ;; the COVERAGE layer: it shrinks gently
+                                                         ;; (≥0.75×, spacing still seals) so paint
+                                                         ;; always reaches the boundary — turning
+                                                         ;; detail down falls back to soft averaged
+                                                         ;; edges, never to an unpainted moat.
+                                                         (* ssz szf (- 1.0 (* (cond (zero? (long lvl)) 0.25
+                                                                                    (<= (long lvl) 3) 0.45
+                                                                                    :else 0.1)
+                                                                              Ev)))
                                                          D 0.0 tn ds curvature stroke hd wd
                                                          segs stepf bendf
                                                          (if (<= (long lvl) 1) 1.0 0.0)
@@ -792,15 +810,19 @@
                  blur in flat regions (seamless gradients, no stroke banding), raw at
                  edges/detail;
                  contrast about 0.5; tone = 1 + variation·0.3·tnoise."
-  [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast traw]
+  [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast traw tcap]
   (let [coh (+ min-coh (* (- 1.0 min-coh) coherence))
         e   (+ 1.0 (* (min (double stroke) 1.5) coh (+ 0.25 (* 0.75 (double dlev)))))
         se  (Math/sqrt e)
         s0  (* csz (+ 1.0 (* variation 0.5 (* 2.0 snoise))))
         sx  (* s0 se)                 ; long axis along θ
         sy  (/ s0 se)                 ; short axis across the stroke
-        t   (max (double traw)
-                 (min 1.0 (max 0.0 (+ 0.15 (* 0.85 (max coherence (double dlev)))))))
+        ;; t is FLOORED by the level's rawness (traw) and CEILINGED by its
+        ;; specificity cap (tcap) — the progressive colour ladder: broad layers
+        ;; averaged, fine layers specific, whatever coherence says.
+        t   (min (double tcap)
+                 (max (double traw)
+                      (min 1.0 (max 0.0 (+ 0.15 (* 0.85 (max coherence (double dlev))))))))
         [br bg bb] blur-rgb [rr rg rb] raw-rgb
         color0 [(+ (* br (- 1.0 t)) (* rr t))
                 (+ (* bg (- 1.0 t)) (* rg t))
@@ -842,13 +864,13 @@
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
-                     (for [[x y csz dlev sn tn alpha theta coherence hb hx hy traw] segments
+                     (for [[x y csz dlev sn tn alpha theta coherence hb hx hy traw tcap] segments
                            :let [blur-rgb (sample-arr (if (and hb (pos? (double hb))) blurh-px blur-px)
                                                       width height hx hy)
                                  raw-rgb  (sample-arr raw-px width height hx hy)]]
                        (assoc (splat-record x y csz dlev theta coherence sn tn
                                             blur-rgb raw-rgb stroke variation contrast
-                                            (or traw 0.0))
+                                            (or traw 0.0) (or tcap 1.0))
                               :alpha (double alpha))))
         ;; PAINT ORDER needs NO sort: `layered-means` emits finest level first, so the field is
         ;; already small→large. The shader composites front-to-back (index 0 = topmost), so the

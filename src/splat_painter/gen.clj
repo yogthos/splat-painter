@@ -249,7 +249,7 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (
 // (hx,hy) = the chain HEAD's position — the colour-sample point for EVERY segment:
 // one stroke = one brush-load of paint (per-segment sampling alternated the two
 // sides' colours along contours into a bead necklace).
-void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw){
+void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap){
   vec2  tc    = fieldsAt(px, py);
   float theta = tc.x, coh0 = tc.y;
   vec3  blur = (hb > 0.5) ? sampleRGB(u_blurHTex, hx, hy) : sampleRGB(u_blurTex, hx, hy);
@@ -265,7 +265,9 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   float c00 = sx2*c*c + sy2*s*s;
   float c01 = (sx2 - sy2)*c*s;
   float c11 = sx2*s*s + sy2*c*c;
-  float t = max(traw, clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0));
+  // floored by the level's rawness (traw), ceilinged by its specificity cap
+  // (tcap) — progressive colour: broad averaged, fine specific (mirror seed)
+  float t = min(tcap, max(traw, clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0)));
   vec3 color0 = mix(blur, raw, t);
   vec3 colorAc = (u_contrast == 1.0) ? color0 : clamp((color0 - 0.5)*u_contrast + 0.5, 0.0, 1.0);
   float tone = 1.0 + u_variation * 0.15 * (2.0 * tn);
@@ -352,8 +354,10 @@ void main(){
   if ((lvl == 1 || lvl == 2) && Ev > 0.45
       && hash01(i*53 + lvl, j, 37) < ((lvl == 1) ? 0.9 : 0.75)) return;
   // fat strokes shrink near edges so soft tails can't cross the silhouette; the
-  // fine liner strokes (lvl>=4) ARE the edge's own paint and keep their size
-  float ssz2 = ssz * szf * (1.0 - ((lvl <= 3) ? 0.45 : 0.1) * Ev);
+  // fine liner strokes (lvl>=4) ARE the edge's own paint and keep their size.
+  // The BASE is the COVERAGE layer: it shrinks gently (>=0.75x, spacing still
+  // seals) so paint always reaches the boundary — no unpainted moat.
+  float ssz2 = ssz * szf * (1.0 - ((lvl == 0) ? 0.25 : (lvl <= 3) ? 0.45 : 0.1) * Ev);
   float snoise = 0.0;
   float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5)
                * ((lvl <= 1) ? 0.25 : (lvl >= 4) ? 0.15 : 1.0);
@@ -366,8 +370,11 @@ void main(){
   // fine colour rawness follows the local detail density (mirror seed): a crisp
   // raw-colour mark never pops at full contrast on soft ground
   if (lvl >= 4) traw *= 0.6 + 0.4 * sgate;
+  // colour-specificity ceiling per level (mirror seed/spec-cap): broad layers
+  // paint AVERAGED colour, mids halfway, fine layers fully specific
+  float tcap = (lvl <= 1) ? 0.35 : (lvl <= 3) ? 0.7 : 1.0;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
-    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw);
+    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap);
     return;
   }
 
@@ -432,7 +439,7 @@ void main(){
     // the brush-load RE-MIXES with the canvas (mirror seed): the colour-sample
     // point slides up to 35% toward the current position along the stroke
     float wsl = (lvl >= 4) ? 0.35 * tt : 0.0;
-    emitSplat(px, py, cpx + wsl*(px - cpx), cpy + wsl*(py - cpy), sz, D, snoise, tnoise, al, hb, traw);
+    emitSplat(px, py, cpx + wsl*(px - cpx), cpy + wsl*(py - cpy), sz, D, snoise, tnoise, al, hb, traw, tcap);
     // bend gated by coherence: straight strongly-oriented edges trace straight
     float bend = u_curv * 0.9 * bendf * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
