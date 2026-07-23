@@ -185,6 +185,23 @@ vec2 fieldsAt(float x, float y){
   vec3 b = mix(mix(v00, v01, wy), mix(v10, v11, wy), wx);
   return vec2(0.5 * atan(b.y, b.x), clamp(b.z, 0.0, 1.0));
 }
+// mirror of seed/edge-snap: move a fine-stroke position onto the local edge ridge
+// (parabolic peak of edge strength sampled across the tangent). Without it, seeds
+// scattered across a thin line braid parallel wobbly strands beside it.
+vec2 edgeSnap(float x, float y){
+  vec2 tc = fieldsAt(x, y);
+  float nx = -sin(tc.x), ny = cos(tc.x);
+  float h = 1.75;
+  float e0 = edgeAt(x, y);
+  float ep = edgeAt(x + nx*h, y + ny*h);
+  float em = edgeAt(x - nx*h, y - ny*h);
+  if (max(e0, max(ep, em)) < 0.12) return vec2(x, y);
+  float den = (em + ep) - 2.0*e0;
+  float d = (abs(den) < 1e-9) ? 0.0 : clamp((em - ep) / (2.0*den), -1.0, 1.0);
+  return vec2(clamp(x + nx*h*d, 0.0, float(u_H - 1)),
+              clamp(y + ny*h*d, 0.0, float(u_W - 1)));
+}
+
 vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (int trunc)
   int xi = clamp(int(x), 0, u_H - 1);
   int yi = clamp(int(y), 0, u_W - 1);
@@ -300,6 +317,8 @@ void main(){
   int   segs  = u_segs[k];                       // scale-relative stroke behaviour:
   float stepf = u_stepf[k];                      // broad levels stroke long and curl,
   float bendf = u_bendf[k];                      // fine levels make short precise marks
+  bool snapE = (lvl >= 2);                       // fine strokes glue to the edge ridge
+  if (snapE) { vec2 sp2 = edgeSnap(x2, y2); x2 = sp2.x; y2 = sp2.y; }
   float px = x2, py = y2, dxp = 0.0, dyp = 0.0;
   vec3 headBlur = sampleRGB(u_blurTex, x2, y2);
   for (int q = 0; q < SEGS; q++) {
@@ -316,7 +335,8 @@ void main(){
     float al = 1.0 - 0.65 * tt * tt;                 // …and the paint thins out
     emitSplat(px, py, x2, y2, sz, D, snoise, tnoise, al, hb, traw);
     vec2  tc  = fieldsAt(px, py);
-    float bend = u_curv * 0.9 * bendf * (noise2(0.05*px, 0.05*py) - 0.5);
+    // bend gated by coherence: straight strongly-oriented edges trace straight
+    float bend = u_curv * 0.9 * bendf * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
     float dx0 = cos(tc.x), dy0 = sin(tc.x);
     float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);
@@ -326,6 +346,7 @@ void main(){
     float L = ssz2 * stepf * (0.4 + 0.24 * u_stroke);
     px = clamp(px + L*dx, 0.0, float(u_H - 1));
     py = clamp(py + L*dy, 0.0, float(u_W - 1));
+    if (snapE) { vec2 sp3 = edgeSnap(px, py); px = sp3.x; py = sp3.y; }
     dxp = dx; dyp = dy;
   }
 }")

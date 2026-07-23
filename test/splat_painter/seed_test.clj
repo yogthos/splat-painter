@@ -150,13 +150,13 @@
     ;; threshold + head-colour sampling); 553 (colour-guarded traces). Now: the edge
     ;; band belongs to base+fine only (mid fills suppressed at E>0.45), and every
     ;; stroke shrinks near edges so soft tails can't cross silhouettes.
-    ;; latest: 23-bit exact poshash, 768px analysis (tensor + placement maps),
-    ;; locally-normalized E in the map fusion.
-    (is (= 613 (count splats)))
-    (is (approx= 0.5  13701.274  sx) "Σ mean-x")
-    (is (approx= 0.5  18322.049  sy) "Σ mean-y")
-    (is (approx= 1.0  234533.053 sd) "Σ det(cov)")
-    (is (approx= 0.05 608.394    sc) "Σ colour")))
+    ;; latest: edge-ridge snapped traces (predictor/corrector — fine strokes glue
+    ;; to the line they paint) + coherence-gated Perlin bend.
+    (is (= 568 (count splats)))
+    (is (approx= 0.5  12757.314  sx) "Σ mean-x")
+    (is (approx= 0.5  16858.556  sy) "Σ mean-y")
+    (is (approx= 1.0  234529.957 sd) "Σ det(cov)")
+    (is (approx= 0.05 596.693    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
