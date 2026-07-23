@@ -40,7 +40,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-1 libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-common libgl1 liblz4-dev
+            libgtk-4-1 libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-bin libjpeg-turbo8 libgl1 liblz4-dev
+          # The runner's prebaked gdk-pixbuf loaders.cache doesn't list the JPEG
+          # loader, so image decode fails. Rebuild it from the installed modules.
+          sudo gdk-pixbuf-query-loaders --update-cache
 
       - name: Install joltc
         run: |
