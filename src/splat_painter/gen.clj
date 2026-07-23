@@ -271,7 +271,10 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   vec3 color0 = mix(blur, raw, t);
   vec3 colorAc = (u_contrast == 1.0) ? color0 : clamp((color0 - 0.5)*u_contrast + 0.5, 0.0, 1.0);
   float tone = 1.0 + u_variation * 0.15 * (2.0 * tn);
-  vec3 color = clamp(colorAc * tone, 0.0, 1.0);
+  // per-stroke TEMPERATURE (mirror seed/splat-record): each brush-load leans warm
+  // (R up, B down) or cool. sn is the per-stroke seed noise, so this is exact parity.
+  float temp = u_variation * 0.10 * (2.0 * sn);
+  vec3 color = clamp(colorAc * tone * vec3(1.0 + temp, 1.0, 1.0 - temp), 0.0, 1.0);
   o_a = vec4(px, py, c00, c01);
   o_b = vec4(c11, color.r, color.g, color.b);
   o_c = vec4(alpha, 0.0, 0.0, 0.0);
