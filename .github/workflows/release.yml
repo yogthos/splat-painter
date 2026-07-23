@@ -41,9 +41,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-1 libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-bin libjpeg-turbo8 libgl1 liblz4-dev
-          # The runner's prebaked gdk-pixbuf loaders.cache doesn't list the JPEG
-          # loader, so image decode fails. Rebuild it from the installed modules.
-          sudo gdk-pixbuf-query-loaders --update-cache
+          # The runner's prebaked gdk-pixbuf loaders.cache lists no JPEG loader, so
+          # image decode crashes. Rebuild the cache from the installed modules and
+          # point the app at it. query-loaders lives in the multiarch lib dir, not
+          # on PATH.
+          ql=$(find /usr/lib /usr/libexec -name gdk-pixbuf-query-loaders 2>/dev/null | head -1)
+          sudo "$ql" --update-cache
+          cache=$(find /usr/lib -path '*gdk-pixbuf*' -name loaders.cache 2>/dev/null | head -1)
+          echo "GDK_PIXBUF_MODULE_FILE=$cache" >> "$GITHUB_ENV"
 
       - name: Install joltc
         run: |
