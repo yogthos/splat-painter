@@ -25,11 +25,14 @@ Analysis (once per image load, CPU):
 Generation (per render, GPU): a vertex+geometry transform-feedback pass turns
 candidate positions into splats — up to seven coarse-to-fine levels. The base level
 fully covers the image (no gaps by construction); each finer level places only where
-its scale-matched detail map says so, subdividing rather than stacking. Fine seeds
-trace **brush strokes**: chains of tapered gaussian segments stepped along the edge
-tangent (ridge-snapped, colour from the stroke's own side of the edge, fading out
-like a drying brush), each finer level shorter, straighter, more translucent — a
-glaze over the accumulated layers.
+its scale-matched detail map says so — the broad/mid tiers subdivide, while from
+level 3 up the layers overlap and mix. Fine seeds trace **brush strokes**: chains of
+tapered gaussian segments stepped along the edge tangent (ridge-snapped, colour from
+the stroke's own side of the edge, fading out like a drying brush). Mid levels make
+short translucent glazes; the finest levels are **impasto liner strokes** — long thin
+lines at a couple-of-pixels width that follow contours while the orientation field
+stays coherent, carry nearly opaque paint on strong edges, and keep to their own side
+of the ridge so the two sides' colours meet at the edge instead of crossing it.
 
 Rendering (GPU): one blended quad per splat (premultiplied over, back-to-front —
 the buffer is already in paint order), so cost scales with painted area, not

@@ -154,11 +154,14 @@
     ;; colour boundaries (dry-out) instead of breaking into gapped dashes; then
     ;; (827→757) the mid→fine OVERLAP: no subdivision claim from level 3 up, fine
     ;; tier packs tighter with a ~pixel size floor and lighter glazes.
-    (is (= 757 (count splats)))
-    (is (approx= 0.5  16845.079  sx) "Σ mean-x")
-    (is (approx= 0.5  22257.805  sy) "Σ mean-y")
-    (is (approx= 1.0  234540.082 sd) "Σ det(cov)")
-    (is (approx= 0.05 830.524    sc) "Σ colour")))
+    ;; (757→841) IMPASTO edges: fine levels trace 8-seg liner lines packed dense
+    ;; enough to hand off through dry-outs, with edge-driven body alpha and no
+    ;; fine edge-shrink — contours are continuous bodied lines, not dashes.
+    (is (= 853 (count splats)))
+    (is (approx= 0.5  18696.790  sx) "Σ mean-x")
+    (is (approx= 0.5  24993.365  sy) "Σ mean-y")
+    (is (approx= 1.0  234569.090 sd) "Σ det(cov)")
+    (is (approx= 0.05 998.610    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
