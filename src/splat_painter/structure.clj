@@ -173,6 +173,28 @@
   [arr H W radius]
   (box-blur-2d arr H W radius))
 
+(defn edge-preserving-blur
+  "Blend the HEAVY blur back toward the LIGHT blur where it deviates from the raw
+   pixel. A box blur bleeds colour straight across strong boundaries, so broad
+   strokes near a silhouette paint halo colours (the average of both sides); where
+   |heavy − raw| is large — an edge — the smooth field must follow the image side
+   it is on. w ramps over max-channel |Δ| ∈ [0.06, 0.16]. Flat regions keep the
+   full heavy smoothing (seamless gradients)."
+  [image ^doubles light ^doubles heavy]
+  (let [n (* (long (:height image)) (long (:width image)))
+        ^doubles raw (:pixels image)
+        out (double-array (* n 3))]
+    (dotimes [i n]
+      (let [b (* 3 i)
+            d (max (Math/abs (- (aget heavy b)       (aget raw b)))
+                   (Math/abs (- (aget heavy (+ b 1)) (aget raw (+ b 1))))
+                   (Math/abs (- (aget heavy (+ b 2)) (aget raw (+ b 2)))))
+            w (min 1.0 (max 0.0 (/ (- d 0.06) 0.10)))]
+        (aset out b       (+ (* (- 1.0 w) (aget heavy b))       (* w (aget light b))))
+        (aset out (+ b 1) (+ (* (- 1.0 w) (aget heavy (+ b 1))) (* w (aget light (+ b 1)))))
+        (aset out (+ b 2) (+ (* (- 1.0 w) (aget heavy (+ b 2))) (* w (aget light (+ b 2)))))))
+    out))
+
 (defn blur-image
   "Box-blur an RGB image's pixels (flat H*W*3 doubles) with `radius`, returning a
    new flat H*W*3 double-array. Computed once per image load so the seed can read

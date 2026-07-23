@@ -229,7 +229,7 @@ void main(){
   // per-seed size/tone jitter is hashed (independent per stroke), mirroring
   // seed/layered-means.
   float snoise = hash01(i*31 + lvl, j, 11) - 0.5;
-  float tnoise = hash01(i*37 + lvl, j, 13) - 0.5;
+  float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5) * ((lvl <= 1) ? 0.4 : 1.0);
 
   // broad strokes (base + level 1) colour from the HEAVY blur — smoothed at their scale
   float hb = (lvl <= 1) ? 1.0 : 0.0;

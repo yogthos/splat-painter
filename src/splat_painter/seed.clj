@@ -259,7 +259,10 @@
                               y2 (if (< aw 0.2) y
                                    (+ y (* aw (noise/noise2 (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))
                               sn (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
-                              tn (- (hash01 (+ (* i 37) lvl) j 13) 0.5)
+                              ;; broad flat-area strokes keep only 40% of the tone jitter —
+                              ;; full jitter on big smooth fills reads as streaks/banding.
+                              tn (* (if (<= (long lvl) 1) 0.4 1.0)
+                                    (- (hash01 (+ (* i 37) lvl) j 13) 0.5))
                               ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
                               ;; keep centres in-bounds so no budget is wasted off-screen
                               ;; (edges stay covered by the splats' tails).

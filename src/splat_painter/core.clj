@@ -101,10 +101,13 @@
           ;; the Perlin flow fields. Placement is coarse-to-fine layers (splat-painter.seed),
           ;; no deforming grid.
           sfield (structure/analyze img0)
+          light  (structure/blur-image img0 2)
+          heavy  (structure/blur-image img0 (max 6 (quot (:height img0) 80)))
           img    (assoc img0 :structure sfield
-                             :blur   (structure/blur-image img0 2)
-                             ;; heavy blur = the smooth colour field broad strokes paint with
-                             :blur-heavy (structure/blur-image img0 (max 6 (quot (:height img0) 80)))
+                             :blur   light
+                             ;; heavy blur = the smooth colour field broad strokes paint with;
+                             ;; edge-preserving so silhouettes don't halo
+                             :blur-heavy (structure/edge-preserving-blur img0 light heavy)
                              :detail (wavelet/placement-map img0 sfield)
                              :noise-fields (seed/prep-noise sfield))]
       (reset! image-atom img)

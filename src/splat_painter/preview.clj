@@ -15,7 +15,9 @@
         sfield (structure/analyze img0)
         img  (assoc img0 :structure sfield :detail (wavelet/placement-map img0 sfield)
                     :blur (structure/blur-image img0 2)
-                    :blur-heavy (structure/blur-image img0 (max 6 (quot (:height img0) 80)))
+                    :blur-heavy (let [l (structure/blur-image img0 2)
+                                      h (structure/blur-image img0 (max 6 (quot (:height img0) 80)))]
+                                  (structure/edge-preserving-blur img0 l h))
                     :noise-fields (seed/prep-noise sfield))
         size (if szs (Double/parseDouble szs) (max 4.0 (/ (double (:height img)) 50.0)))
         count* (if counts (long (Double/parseDouble counts)) 14000)
