@@ -99,7 +99,7 @@
    gradual stroke-density transitions, which blurs away exactly the text-scale
    structure the smallest strokes exist to preserve. Scale-matched maps = the
    coarse-to-fine pass paints, at each scale, what exists AT that scale."
-  ([image sfield] (placement-map image sfield 512 4))
+  ([image sfield] (placement-map image sfield 768 4))
   ([image sfield max-side levels]
    (let [H (:height image) W (:width image)
          scale (min 1.0 (/ (double max-side) (double (max H W))))
@@ -148,6 +148,19 @@
                      g2    (aget sf-grad2 sfidx)]
                  (aset E-arr (+ (* ri sw) ci)
                        (Math/sqrt (/ (max 0.0 g2) sf-gmax))))))
+         ;; the E used for FUSION is locally normalized (like the luma-relative
+         ;; detail): an eyelid crease has low ABSOLUTE gradient next to hard
+         ;; background edges — local prominence is the signal. Raw E stays in
+         ;; :edge for the mid-suppression/shrink logic.
+         ^doubles E-fuse
+         (let [^doubles mE (structure/box-blur E-arr sh sw (max 2 (quot (min sh sw) 8)))
+               meanE (/ (loop [i 0 acc 0.0] (if (< i n) (recur (inc i) (+ acc (aget E-arr i))) acc)) n)
+               out (double-array n)]
+           (dotimes [i n]
+             (let [e (aget E-arr i)
+                   ln (min 1.0 (/ (* 0.85 e) (+ (* 2.0 (aget mE i)) (* 0.30 meanE) 1e-12)))]
+               (aset out i (max e ln))))
+           out)
          ;; normalize+fuse one energy band: global g, local-relative l, edge E — the
          ;; blur/smooth radii set how gradual the resulting map is.
          ;; e-sq? squares the edge term: E has the tensor blur's width, so fusing it
@@ -163,7 +176,7 @@
                   (dotimes [i n]
                     (let [g (if (pos? dmax) (/ (aget a i) dmax) 0.0)
                           l (min 1.0 (/ (aget a i) (+ (* 2.0 (aget m-a i)) (* 0.30 mean-a) 1e-12)))
-                          E0 (aget E-arr i)
+                          E0 (aget E-fuse i)
                           E (if e-sq? (* E0 E0) E0)
                           v (min 1.0 (max g l (* 0.85 E)))]
                       (aset P i v)))

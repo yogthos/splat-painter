@@ -129,7 +129,8 @@ uint wang32(uint v){
   return v;
 }
 float poshash(int n, int lvl, int salt){
-  return float(wang32(wang32(uint(n)*2u + uint(lvl)) ^ (uint(salt) * 2654435769u))) / 4294967296.0;
+  // top 23 bits only: exactly representable in float32 AND the CPU's doubles
+  return float(wang32(wang32(uint(n)*2u + uint(lvl)) ^ (uint(salt) * 2654435769u)) >> 9) / 8388608.0;
 }
 
 float hash01(int a, int b, int salt){

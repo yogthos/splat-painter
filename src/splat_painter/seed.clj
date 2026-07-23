@@ -65,11 +65,16 @@
     (mod v 4294967296)))
 
 (defn- poshash
-  "Avalanche-hashed position component in [0,1) from candidate index + level + salt."
+  "Avalanche-hashed position component in [0,1) from candidate index + level + salt.
+   Only the TOP 23 hash bits are used so the value is exactly representable in both
+   float32 (GPU) and double (CPU) — full 32-bit fractions rounded differently in the
+   GPU's float conversion and broke exact CPU/GPU count parity."
   [n lvl salt]
-  (/ (double (wang32 (bit-xor (wang32 (+ (* (long n) 2) (long lvl)))
-                              (mod (* (long salt) 2654435769) 4294967296))))
-     4294967296.0))
+  (/ (double (bit-shift-right
+               (wang32 (bit-xor (wang32 (+ (* (long n) 2) (long lvl)))
+                                (mod (* (long salt) 2654435769) 4294967296)))
+               9))
+     8388608.0))
 
 (defn- blend-angle
   "Undirected-orientation blend between t1 and t2 weighted by w.
