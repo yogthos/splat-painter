@@ -94,7 +94,7 @@
 ;; hard ceiling = the shader's MAX_SPLATS. The Splats control sets the working budget up to
 ;; this; more splats = smaller strokes = more preserved detail (a detailed oil painting) at a
 ;; higher render cost, fewer = larger strokes = looser/abstract and faster.
-(def ^:private splat-budget 120000)
+(def ^:private splat-budget 200000)
 
 (defn- detail-fraction
   "Fraction of the map array under `key` (:detail aggregate or :sharp fine-band)
@@ -122,9 +122,9 @@
 (defn- seg-count "segments per stroke at placement level" [lvl]
   (let [l (long lvl)] (cond (zero? l) 1 (== l 1) 6 (== l 2) 4 (== l 3) 3 :else 2)))
 (defn- step-frac "step length as a fraction of the level stdev" [lvl]
-  (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 (== l 4) 0.6 :else 0.5)))
+  (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 (== l 4) 0.6 (== l 5) 0.5 :else 0.4)))
 (defn- bend-frac "how much of the Curvature bend this level keeps" [lvl]
-  (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 (== l 4) 0.15 :else 0.1)))
+  (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 (== l 4) 0.15 (== l 5) 0.1 :else 0.05)))
 (defn- level-map-kind
   "Which placement map a level reads — matched to the scale it paints: broad levels
    the smoothed aggregate, mid levels the MID band map (face-feature frequencies),
@@ -135,7 +135,7 @@
   "Colour-rawness floor per level: small strokes must paint faithful colour — a
    half-blur blend at feature scale just softens the feature it exists to keep."
   [lvl]
-  (let [l (long lvl)] (cond (<= l 1) 0.0 (<= l 3) 0.45 :else 0.7)))
+  (let [l (long lvl)] (cond (<= l 1) 0.0 (<= l 3) 0.45 (<= l 5) 0.7 :else 0.85)))
 (defn- stroke-len-frac
   "The Stroke slider as stroke LENGTH: scales the chain step. 2.5 (default) = 1.0."
   [stroke]
@@ -159,7 +159,7 @@
         budget  (min (double splat-budget) (max 500.0 (double count)))
         warp    (* 0.95 (double curvature))
         area    (double (* (long H) (long W)))
-        nlev    (long (max 1 (min 6 (inc (Math/round (* (double detail) 5.0))))))
+        nlev    (long (max 1 (min 7 (inc (Math/round (* (double detail) 6.0))))))
         thresh  (fn [lvl] (if (zero? (long lvl)) -1.0 (min 0.9 (* 0.26 (double lvl)))))
         ;; base layer overlaps heavily (spacing 0.72×stdev ⇒ full coverage); finer layers are
         ;; sparser accents (the base fills behind them, so gaps between fine strokes don't

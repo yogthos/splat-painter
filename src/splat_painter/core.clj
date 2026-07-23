@@ -629,7 +629,7 @@
    [:label {:label @status-atom :xalign 0.0 :halign :start
             :max-width-chars 22 :ellipsize :end}]
    [:separator {}]
-   [slider "Splats"    1000 120000 1000 count-atom]     ; budget: higher = more detail, slower
+   [slider "Splats"    1000 200000 1000 count-atom]     ; budget: higher = more detail, slower
    [slider "Size"      6    50    0.5   size-atom]
    [slider "Detail"    0.0  1.0   0.02  detail-atom]
    [slider "Variation" 0.0  1.0   0.02  variation-atom]
