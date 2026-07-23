@@ -150,13 +150,13 @@
     ;; threshold + head-colour sampling); 553 (colour-guarded traces). Now: the edge
     ;; band belongs to base+fine only (mid fills suppressed at E>0.45), and every
     ;; stroke shrinks near edges so soft tails can't cross silhouettes.
-    ;; latest: contour strokes paint their own SIDE's colour (geometry snaps, colour
-    ;; pre-snap) + dithered 75% mid-level edge suppression.
-    (is (= 744 (count splats)))
-    (is (approx= 0.5  16608.848  sx) "Σ mean-x")
-    (is (approx= 0.5  21335.830  sy) "Σ mean-y")
-    (is (approx= 1.0  234530.089 sd) "Σ det(cov)")
-    (is (approx= 0.05 827.028    sc) "Σ colour")))
+    ;; latest: per-level glaze alpha (finer layers translucent) + strokes FADE at
+    ;; colour boundaries (dry-out) instead of breaking into gapped dashes.
+    (is (= 827 (count splats)))
+    (is (approx= 0.5  18497.858  sx) "Σ mean-x")
+    (is (approx= 0.5  23886.346  sy) "Σ mean-y")
+    (is (approx= 1.0  234533.154 sd) "Σ det(cov)")
+    (is (approx= 0.05 969.229    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -168,7 +168,9 @@
     (is (every? #(and (> % 0.0) (<= % 1.0)) alphas))
     (is (some #(= 1.0 %) alphas) "stroke heads + base fills carry full paint")
     (is (some #(< % 0.5) alphas) "stroke tails taper below half paint")
-    (is (approx= 1e-6 0.35 (reduce min alphas)) "the tail taper floor is 1−0.65")))
+    ;; tails now include the per-level glaze (×0.75 finest) and dry-out fades, so
+    ;; the floor is below the plain 0.35 taper — just pin that tails thin properly.
+    (is (< (reduce min alphas) 0.35) "tails thin below the plain taper floor")))
 
 (deftest layer-params-shared-spec
   ;; layer-params is the per-level placement spec BOTH the CPU loop and the GPU generation

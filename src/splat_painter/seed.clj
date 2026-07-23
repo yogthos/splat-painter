@@ -133,6 +133,13 @@
   (let [l (long lvl)]
     (double (cond (<= l 1) (nth muls 0) (<= l 3) (nth muls 1) :else (nth muls 2)))))
 
+(defn- level-alpha
+  "Paint translucency per level — PROGRESSIVE REFINEMENT: broad layers are opaque
+   (coverage), each finer layer glazes more, letting the accumulated layers show
+   through so detail builds on the underpainting instead of scratching over it."
+  [lvl]
+  (let [l (long lvl)] (cond (<= l 1) 1.0 (<= l 3) 0.9 :else 0.75)))
+
 (defn- level-map-kind
   "Which placement map a level reads — matched to the scale it paints: broad levels
    the smoothed aggregate, mid levels the MID band map (face-feature frequencies),
@@ -299,6 +306,7 @@
     (let [[th coh] (sample-fields nf x y)]
       [[x y ssz D sn tn 1.0 th coh hb x y traw]])
     (let [kmax (dec (long segs))
+          lal  (level-alpha lvl)
           ;; fine strokes snap onto the edge ridge at the seed and after every step
           ;; (predictor: tangent step; corrector: ridge snap) — the stroke GLUES to
           ;; the line it is painting instead of braiding beside it.
@@ -311,20 +319,22 @@
           cx0 x cy0 y
           [x y] (if snap? (edge-snap dmap nf x y 1.75 hd wd) [x y])
           [hr hg hb0] (sample-arr blur-px iw ih x y)]
-      (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 acc []]
-        (if (or (> k kmax)
-                ;; the stroke ENDS when the canvas stops matching its brush-load: a
-                ;; trace that overshoots its region (tight curvature, long steps)
-                ;; would drag the head colour across the silhouette as ghosting.
-                (and (pos? k)
-                     (let [[br bg bb] (sample-arr blur-px iw ih px py)]
-                       (> (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))
-                          0.22))))
+      (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
+        (if (or (> k kmax) (< fade 0.15))
           acc
-          (let [[th coh] (sample-fields nf px py)
+          (let [;; the stroke FADES when the canvas stops matching its brush-load —
+                ;; a brush running dry — instead of breaking dead: abrupt ends left
+                ;; broken dashes with gaps around busy detail (eyes, fur ticking).
+                fade (if (and (pos? k)
+                              (let [[br bg bb] (sample-arr blur-px iw ih px py)]
+                                (> (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))
+                                   0.22)))
+                       (* fade 0.4)
+                       fade)
+                [th coh] (sample-fields nf px py)
                 t   (/ (double k) (double kmax))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
-                al  (- 1.0 (* 0.65 t t))                         ; …and the paint thins out
+                al  (* lal fade (- 1.0 (* 0.65 t t)))            ; taper × glaze × dry-out
                 acc (conj acc [px py sz D sn tn al th coh hb cx0 cy0 traw])
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
@@ -347,7 +357,7 @@
             (let [nx0 (max 0.0 (min hd (+ px (* L dx))))
                   ny0 (max 0.0 (min wd (+ py (* L dy))))
                   [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd) [nx0 ny0])]
-              (recur (inc k) nx1 ny1 dx dy acc))))))))
+              (recur (inc k) nx1 ny1 dx dy fade acc))))))))
 
 (defn- layered-means
   "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
