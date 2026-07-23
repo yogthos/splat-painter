@@ -76,6 +76,7 @@ joltc -M:test      # unit + golden-field regression tests
 joltc -M:check     # headless: shader GLSL structure, packing, full pipeline
 joltc -M:preview   # CPU render to PNG (no GL needed)
 joltc -M:prof      # analysis/placement profiling
+joltc -M:pin       # print the golden fixture's actual checksums (for re-pinning)
 ```
 
 Dev/debug entry points live under `test/`; only the app ships from `src/`.
