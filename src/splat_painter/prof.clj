@@ -18,20 +18,48 @@
         [img0 load-ms] (once-ms #(image/load-image path 1024))
         _ (println (format "image %dx%d, load %.0f ms" (:width img0) (:height img0) load-ms))
         [sfield an-ms] (once-ms #(structure/analyze img0))
-        [dmap d-ms]    (once-ms #(wavelet/detail-map img0))
+        [dmap d-ms]    (once-ms #(wavelet/placement-map img0 sfield))
         [blur b-ms]    (once-ms #(structure/blur-image img0 2))
         img (assoc img0 :structure sfield :detail dmap :blur blur :noise-fields (seed/prep-noise sfield))
         _ (println (format "ONE-TIME load: analyze %.0f  detail %.0f  blur %.0f ms"
                            an-ms d-ms b-ms))
         H  (double (:height img))
-        ;; detail-map strength: what does the wavelet map report across the image?
-        _  (let [dm dmap dv (:detail dm) dmx (:dmax dm)
-                 vals (map (fn [i] (/ (aget ^doubles dv i) (max 1e-9 dmx))) (range (alength ^doubles dv)))
+        ;; placement-map stats
+        _  (let [pm dmap dv (:detail pm) dmx (max 1e-9 (:dmax pm))
+                 vals (map (fn [i] (/ (aget ^doubles dv i) dmx)) (range (alength ^doubles dv)))
                  n (count vals) srt (sort vals)
                  pct (fn [p] (nth srt (min (dec n) (long (* p n)))))]
-             (println (format "detail-map: mean %.2f  p50 %.2f  p90 %.2f  p99 %.2f  (frac>0.5: %.2f)"
+             (println (format "placement-map: mean %.3f  p50 %.3f  p90 %.3f  p99 %.3f  (frac>0.5: %.3f)"
                               (/ (reduce + vals) n) (pct 0.5) (pct 0.9) (pct 0.99)
                               (/ (double (count (filter #(> % 0.5) vals))) n))))
+        ;; dark/bright split: luma at map resolution (LINEAR, not gamma),
+        ;; grouped by scene brightness <0.25 vs >=0.25
+        _  (let [pm dmap dv (:detail pm)
+                 sh (:h pm) sw (:w pm)
+                 n (* sh sw)
+                 ^doubles lum (structure/luma-of img0 sh sw)
+                 dark-vals (double-array n) bright-vals (double-array n)
+                 dc (volatile! 0) bc (volatile! 0)]
+             (dotimes [i n]
+               (if (< (aget lum i) 0.25)
+                 (do (aset dark-vals @dc (/ (aget dv i) (max 1e-9 (:dmax pm)))) (vswap! dc inc))
+                 (do (aset bright-vals @bc (/ (aget dv i) (max 1e-9 (:dmax pm)))) (vswap! bc inc))))
+             (let [nd @dc nb @bc
+                   quad (fn [^doubles arr cnt]
+                          (if (zero? cnt)
+                            {:n 0 :p50 0.0 :p90 0.0 :f26 0.0 :f52 0.0}
+                            (let [srt (sort (take cnt (seq arr)))
+                                  p   (fn [q] (nth srt (min (dec cnt) (long (* q cnt)))))
+                                  frac (fn [thr]
+                                         (/ (double (count (filter #(> % thr) srt))) cnt))]
+                              {:n cnt :p50 (p 0.5) :p90 (p 0.9)
+                               :f26 (frac 0.26) :f52 (frac 0.52)})))]
+               (println (format "dark  (luma<0.25):  n=%d p50=%.3f p90=%.3f frac>=0.26=%.3f frac>=0.52=%.3f"
+                                (:n (quad dark-vals nd)) (:p50 (quad dark-vals nd))
+                                (:p90 (quad dark-vals nd)) (:f26 (quad dark-vals nd)) (:f52 (quad dark-vals nd))))
+               (println (format "bright(luma>=0.25): n=%d p50=%.3f p90=%.3f frac>=0.26=%.3f frac>=0.52=%.3f"
+                                (:n (quad bright-vals nb)) (:p50 (quad bright-vals nb))
+                                (:p90 (quad bright-vals nb)) (:f26 (quad bright-vals nb)) (:f52 (quad bright-vals nb))))))
         run (fn [s] (let [fld (seed/splat-field img {:size s})
                           f (:splats fld)
                           xs (map (comp first :mean) f)

@@ -106,7 +106,7 @@
           sfield (structure/analyze img0)
           img    (assoc img0 :structure sfield
                              :blur   (structure/blur-image img0 2)
-                             :detail (wavelet/detail-map img0)
+                             :detail (wavelet/placement-map img0 sfield)
                              :noise-fields (seed/prep-noise sfield))]
       (reset! image-atom img)
       ;; Size is the base (flat-region) stroke stdev; detail shrinks it locally. Seed

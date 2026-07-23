@@ -73,6 +73,84 @@
            dmax (loop [i 0 m 0.0] (if (< i n) (recur (inc i) (max m (aget acc i))) m))]
        {:h sh :w sw :detail acc :dmax dmax :src-h H :src-w W}))))
 
+(defn placement-map
+  "Luma-relative, edge-fused placement map at ≤`max-side` pixels.
+   Returns {:h :w :detail ^doubles :dmax :src-h :src-w} with :dmax 1.0
+   (pre-normalized, so detail-at and the GPU sampler need no change).
+
+   Three components fused per cell:
+   - g: globally-normalized Haar detail energy (today's behavior — bright- region
+        values can't regress, acting as a floor)
+   - l: local-relative Haar detail — acc(i) divided by its wide local mean +
+        a fraction of the global mean, so dark regions with high *relative*
+        contrast (dark fur, dark foliage) read high even though their absolute
+        Haar energy is small
+   - E: structure-tensor edge strength sqrt(grad2/gmax), resampled from the
+        sfield grid — puts fine splats ON contours (gravestone text, silhouette
+        edges) even where texture energy is low; the tensor's theta/coherence
+        then elongate those splats along the edge
+
+   The 0.30*mean(acc) floor in l(i)'s denominator keeps truly flat regions
+   (deep black background, sky) from being noise-amplified past the thresholds."
+  ([image sfield] (placement-map image sfield 512 4))
+  ([image sfield max-side levels]
+   (let [H (:height image) W (:width image)
+         scale (min 1.0 (/ (double max-side) (double (max H W))))
+         sh (max 1 (long (Math/round (* H scale))))
+         sw (max 1 (long (Math/round (* W scale))))
+         n       (* sh sw)
+         ;; gamma-corrected luma at placement-map resolution
+         ^doubles lum (structure/luma-of image sh sw)
+         _       (dotimes [i n] (aset lum i (Math/pow (aget lum i) 0.4545)))
+         ;; Haar multi-scale detail energy (same pipeline as detail-map)
+         acc     (double-array n)]
+     (loop [lev 1 ch sh cw sw ^doubles src lum block 2]
+       (when (and (<= lev levels) (>= ch 2) (>= cw 2))
+         (let [hc2 (quot ch 2) wc2 (quot cw 2)
+               ll  (double-array (* hc2 wc2))]
+           (haar-detail-energy! src ch cw ll acc sh sw block)
+           (recur (inc lev) hc2 wc2 ll (* 2 block)))))
+     ;; small box-blur to remove Haar block pattern (radius /40 — crisper than /24)
+     (let [blur-r  (max 1 (quot (min sh sw) 40))
+           ^doubles acc (structure/box-blur acc sh sw blur-r)
+           ;; g(i) = global normalization (today's behavior floor)
+           dmax    (loop [i 0 m 0.0] (if (< i n) (recur (inc i) (max m (aget acc i))) m))
+           ;; m(i) = wide local mean of acc for luma-relative normalization
+           wide-r  (max 2 (quot (min sh sw) 8))
+           ^doubles m-acc (structure/box-blur acc sh sw wide-r)
+           ;; denominator floor for l(i)
+           mean-acc (/ (loop [i 0 s 0.0] (if (< i n) (recur (inc i) (+ s (aget acc i))) s)) n)
+           ;; E(i) = edge strength sqrt(grad2/gmax) from structure tensor, resampled
+           ;; nearest-neighbour from the tensor grid to the placement-map grid
+           sf-h    (:h sfield) sf-w (:w sfield)
+           ^doubles sf-grad2 (:grad2 sfield)
+           sf-gmax (max (double (:gmax sfield)) 1e-12)
+           sf-srch (double (or (:src-h sfield) sf-h))
+           sf-srcw (double (or (:src-w sfield) sf-w))
+           E-arr   (double-array n)]
+       (dotimes [ri sh]
+         (dotimes [ci sw]
+           (let [x     (* ri (/ (double H) sh))
+                 y     (* ci (/ (double W) sw))
+                 sfi   (min (dec sf-h) (max 0 (long (Math/round (* x (/ sf-h sf-srch))))))
+                 sfj   (min (dec sf-w) (max 0 (long (Math/round (* y (/ sf-w sf-srcw))))))
+                 sfidx (+ (* sfi sf-w) sfj)
+                 g2    (aget sf-grad2 sfidx)]
+             (aset E-arr (+ (* ri sw) ci)
+                   (Math/sqrt (/ (max 0.0 g2) sf-gmax))))))
+       ;; P(i) = fused placement
+       (let [P (double-array n)]
+         (dotimes [i n]
+           (let [g (if (pos? dmax) (/ (aget acc i) dmax) 0.0)
+                 l (min 1.0 (/ (aget acc i) (+ (* 2.0 (aget m-acc i)) (* 0.30 mean-acc) 1e-12)))
+                 E (aget E-arr i)
+                 v (min 1.0 (max g l (* 0.85 E)))]
+             (aset P i v)))
+         ;; final light smoothing so transitions are gradual
+         (let [smooth-r (max 1 (quot (min sh sw) 50))
+               ^doubles P (structure/box-blur P sh sw smooth-r)]
+           {:h sh :w sw :detail P :dmax 1.0 :src-h H :src-w W}))))))
+
 (defn detail-at
   "Normalized detail ∈ [0,1] at full-image coords (x=row, y=col), sampled from the
    reduced-res map. 0 = flat, 1 = the most detailed cell."
