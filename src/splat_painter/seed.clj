@@ -209,13 +209,21 @@
    edge strokes alternate the two sides' colours as centres jittered across the
    contour — a bright/dark bead necklace along every silhouette).
    Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
-  [nf lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb]
+  [nf lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb blur-px iw ih]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
       [[x y ssz D sn tn 1.0 th coh hb x y]])
-    (let [kmax (dec (long segs))]
+    (let [kmax (dec (long segs))
+          [hr hg hb0] (sample-arr blur-px iw ih x y)]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 acc []]
-        (if (> k kmax)
+        (if (or (> k kmax)
+                ;; the stroke ENDS when the canvas stops matching its brush-load: a
+                ;; trace that overshoots its region (tight curvature, long steps)
+                ;; would drag the head colour across the silhouette as ghosting.
+                (and (pos? k)
+                     (let [[br bg bb] (sample-arr blur-px iw ih px py)]
+                       (> (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))
+                          0.22))))
           acc
           (let [[th coh] (sample-fields nf px py)
                 t   (/ (double k) (double kmax))
@@ -255,8 +263,9 @@
    the surviving seed, then hand it to `stroke-segments` (base fill vs traced brush stroke).
    Emits [x y size D sn tn alpha theta coherence] per SEGMENT (D = effective detail 0..1;
    sn/tn = per-seed size/tone jitter hashes in [-0.5,0.5])."
-  [dmap nf detail size variation curvature stroke count H W]
+  [dmap nf detail size variation curvature stroke count H W blur-px]
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
+        iw   (long W) ih (long H)
         deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
         {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke count H W)]
     (persistent!
@@ -327,7 +336,8 @@
                                                        (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
                                                        (* ssz szf) D 0.0 tn ds curvature stroke hd wd
                                                        segs stepf bendf
-                                                       (if (<= (long lvl) 1) 1.0 0.0))]
+                                                       (if (<= (long lvl) 1) 1.0 0.0)
+                                                       blur-px iw ih)]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         levels))))
@@ -474,7 +484,7 @@
         ^doubles blur-px (or (:blur image) pixels)
         ^doubles blurh-px (or (:blur-heavy image) blur-px)
         nf         (or (:noise-fields image) (prep-noise sfield))
-        segments   (layered-means dmap nf detail size variation curvature stroke n height width)
+        segments   (layered-means dmap nf detail size variation curvature stroke n height width blur-px)
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec

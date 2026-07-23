@@ -268,8 +268,16 @@ void main(){
   float stepf = u_stepf[k];                      // broad levels stroke long and curl,
   float bendf = u_bendf[k];                      // fine levels make short precise marks
   float px = x2, py = y2, dxp = 0.0, dyp = 0.0;
+  vec3 headBlur = sampleRGB(u_blurTex, x2, y2);
   for (int q = 0; q < SEGS; q++) {
     if (q >= segs) break;
+    if (q > 0) {
+      // the stroke ends when the canvas stops matching its brush-load — an
+      // overshooting trace would drag the head colour across the silhouette
+      vec3 cb = sampleRGB(u_blurTex, px, py);
+      vec3 dcl = abs(cb - headBlur);
+      if (max(dcl.r, max(dcl.g, dcl.b)) > 0.22) break;
+    }
     float tt = float(q) / float(segs - 1);
     float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));  // width tapers to the tip
     float al = 1.0 - 0.65 * tt * tt;                 // …and the paint thins out

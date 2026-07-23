@@ -147,13 +147,14 @@
     ;; older: count=254 (pre placement-map); 497 (dabs); 516 (uniform 6-seg strokes);
     ;; 488 (scale-relative strokes); 584 (6-level pyramid + blur-leaning colour);
     ;; 558 (E² sharp map + 40% broad tone jitter); 560 (rotated grids + full-cell
-    ;; jitter; then capped elongation + stroke-length + seed-level size jitter).
-    ;; Now: dithered placement threshold + one-stroke-one-colour head sampling.
-    (is (= 567 (count splats)))
-    (is (approx= 0.5  13155.482  sx) "Σ mean-x")
-    (is (approx= 0.5  17513.244  sy) "Σ mean-y")
-    (is (approx= 1.0  223379.279 sd) "Σ det(cov)")
-    (is (approx= 0.05 602.864    sc) "Σ colour")))
+    ;; jitter; then capped elongation + stroke-length + seed-level size jitter);
+    ;; 567 (dithered threshold + head-colour sampling). Now: traces terminate at
+    ;; colour-region boundaries (edge-ghosting fix).
+    (is (= 553 (count splats)))
+    (is (approx= 0.5  12809.160  sx) "Σ mean-x")
+    (is (approx= 0.5  17106.073  sy) "Σ mean-y")
+    (is (approx= 1.0  223136.181 sd) "Σ det(cov)")
+    (is (approx= 0.05 571.652    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
