@@ -193,7 +193,6 @@ flat out float v_alpha;          // per-splat paint alpha (stroke taper)
 flat out vec2  v_major;          // stroke long-axis unit dir (rows, cols) — bristle frame
 flat out vec2  v_mean;           // splat mean — per-stroke noise seed
 out vec2 v_d;                    // image-space offset from the mean (rows, cols)
-out vec2 v_ip;                   // image-space fragment position — canvas-grain sample
 
 void main(){
   int splat  = (u_count - 1) - (gl_VertexID / 6);   // back-to-front paint order
@@ -226,7 +225,6 @@ void main(){
   vec2 he = (3.5 + 2.0 * u_tex_edge) * sqrt(vec2(c00, c11));
   v_d = s * he;
   vec2 ip = t0.xy + v_d;                  // image position (x=row top-down, y=col)
-  v_ip = ip;
   // image px -> pane px (contain fit, centered; inverse of the loop shader's mapping)
   float scale = min(u_viewport.x / u_image.x, u_viewport.y / u_image.y);
   vec2 org = 0.5 * (u_viewport - u_image * scale);
@@ -243,7 +241,6 @@ flat in float v_alpha;
 flat in vec2  v_major;
 flat in vec2  v_mean;
 in vec2 v_d;
-in vec2 v_ip;
 uniform float u_opacity;
 uniform float u_tex_streak;      // bristle tonal-streak amount (0 = off)
 uniform float u_tex_grain;       // canvas-grain brightness+chroma amount (0 = off)
@@ -278,20 +275,29 @@ void main(){
   // ragged edge (bristles fall short / overshoot the clean ellipse).
   float streak = vnoise(vec2(across * 0.7, along * 0.06) + seed) - 0.5;
 
-  // CANVAS GRAIN: image-space mottle shared by every stroke (pigment settling into
-  // the tooth). Three offset taps give a subtle chroma break, not pure luminance.
-  float g0 = vnoise(v_ip * 0.15 + 11.3);
-  float g1 = vnoise(v_ip * 0.15 + 41.7);
-  float g2 = vnoise(v_ip * 0.15 + 71.9);
+  // GRAIN: a PER-STROKE isotropic mottle in the stroke's OWN frame with its own
+  // seed, so every dab carries its own tooth rather than one shared canvas texture.
+  float gn = vnoise(vec2(across, along) * 0.5 + seed * 1.7)        - 0.5;
+  float gs = vnoise(vec2(across, along) * 0.5 + seed * 1.7 + 19.0) - 0.5;
 
   // ragged edge: only ever scales pdf, so it's invisible at the core (pdf≈0) and
   // grows toward the shoulder where the contour actually reads.
   float pdf = max(pdf0 * (1.0 + u_tex_edge * 2.0 * streak), 0.0);
   float a = v_alpha * u_opacity * exp(-pow(pdf, v_hard));
 
-  float bright = 1.0 + u_tex_streak * streak + u_tex_grain * (g0 - 0.5);
-  vec3  chroma = u_tex_grain * 0.35 * (vec3(g0, g1, g2) - 0.5);
-  vec3  col = clamp(v_color * bright + chroma, 0.0, 1.0);
+  // texture catches the LIGHT: bristle marks and tooth show in lit passages, not the
+  // dark underlayers — gate by the stroke's own luminance so shadows stay smooth.
+  float lum  = dot(v_color, vec3(0.299, 0.587, 0.114));
+  float gate = smoothstep(0.02, 0.32, lum);
+  float sAmt = u_tex_streak * gate, gAmt = u_tex_grain * gate;
+
+  // grain INHERITS the stroke's colour + lightness: it mottles brightness and the
+  // stroke's OWN saturation (thicker vs thinner pigment = a richer/greyer version of
+  // the same hue), never a foreign colour cast.
+  float bright = 1.0 + sAmt * streak + gAmt * gn;
+  float sat = 1.0 + gAmt * 0.6 * gs;
+  vec3  base = mix(vec3(lum), v_color, sat);   // same hue, varied richness
+  vec3  col = clamp(base * bright, 0.0, 1.0);
   frag = vec4(col * a, a);        // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
 }")
 
