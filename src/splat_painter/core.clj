@@ -103,6 +103,8 @@
           sfield (structure/analyze img0)
           img    (assoc img0 :structure sfield
                              :blur   (structure/blur-image img0 2)
+                             ;; heavy blur = the smooth colour field broad strokes paint with
+                             :blur-heavy (structure/blur-image img0 (max 6 (quot (:height img0) 80)))
                              :detail (wavelet/placement-map img0 sfield)
                              :noise-fields (seed/prep-noise sfield))]
       (reset! image-atom img)

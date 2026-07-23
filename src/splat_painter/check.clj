@@ -91,7 +91,9 @@
     ;; splat-record: elongation, covariance, colour blend
     (assert-contains gs-src "float e   = 1.0 + u_stroke * coh * (0.25 + 0.75 * D);" "gen elongation")
     (assert-contains gs-src "float c00 = sx2*c*c + sy2*s*s;" "gen covariance c00")
-    (assert-contains gs-src "float t = clamp(0.55 + 0.45 * max(coh0, D), 0.0, 1.0);" "gen colour blend t")
+    (assert-contains gs-src "float t = clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0);" "gen blur-leaning colour blend t")
+    (assert-contains gs-src "uniform sampler2D u_blurHTex;" "gen heavy-blur texture")
+    (assert-contains gs-src "float hb = (lvl <= 1) ? 1.0 : 0.0;" "broad strokes use heavy blur")
     (assert-contains gs-src "o_a = vec4(px, py, c00, c01);" "gen output o_a layout")
     (assert-contains gs-src "o_b = vec4(c11, color.r, color.g, color.b);" "gen output o_b layout")
     (assert-contains gs-src "o_c = vec4(alpha, 0.0, 0.0, 0.0);" "gen output o_c (stroke-taper alpha)")

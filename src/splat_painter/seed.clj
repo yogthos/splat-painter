@@ -97,9 +97,9 @@
 (defn- seg-count "segments per stroke at placement level" [lvl]
   (let [l (long lvl)] (cond (zero? l) 1 (== l 1) 6 (== l 2) 4 (== l 3) 3 :else 2)))
 (defn- step-frac "step length as a fraction of the level stdev" [lvl]
-  (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 :else 0.6)))
+  (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 (== l 4) 0.6 :else 0.5)))
 (defn- bend-frac "how much of the Curvature bend this level keeps" [lvl]
-  (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 :else 0.15)))
+  (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 (== l 4) 0.15 :else 0.1)))
 (defn- sharp-level? "finest levels threshold against the fine-band :sharp map" [lvl]
   (>= (long lvl) 2))
 
@@ -119,7 +119,7 @@
         budget  (min (double splat-budget) (max 500.0 (double count)))
         warp    (* 0.95 (double curvature))
         area    (double (* (long H) (long W)))
-        nlev    (long (max 1 (min 5 (inc (Math/round (* (double detail) 4.0))))))
+        nlev    (long (max 1 (min 6 (inc (Math/round (* (double detail) 5.0))))))
         thresh  (fn [lvl] (if (zero? (long lvl)) -1.0 (min 0.9 (* 0.26 (double lvl)))))
         ;; base layer overlaps heavily (spacing 0.72×stdev ⇒ full coverage); finer layers are
         ;; sparser accents (the base fills behind them, so gaps between fine strokes don't
@@ -175,11 +175,14 @@
    noise scaled by `curvature`, with size AND alpha tapering toward the tail — a brush
    line that fades out at the end, layered over the underpainting. `dirsign` picks
    which way along the tangent the stroke pulls (per-seed hash, so strokes alternate).
-   Returns [[x y size D sn tn alpha theta coherence]…]."
-  [nf lvl x y ssz D sn tn dirsign curvature hd wd segs stepf bendf]
+   `hb` (1.0 for base + the broadest detail level) selects the HEAVY blur as the
+   stroke's smooth colour source — broad strokes carry colour smoothed at their own
+   scale, so smooth gradients (bokeh, sky) reproduce without stroke banding.
+   Returns [[x y size D sn tn alpha theta coherence hb]…]."
+  [nf lvl x y ssz D sn tn dirsign curvature hd wd segs stepf bendf hb]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
-      [[x y ssz D sn tn 1.0 th coh]])
+      [[x y ssz D sn tn 1.0 th coh hb]])
     (let [kmax (dec (long segs))]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 acc []]
         (if (> k kmax)
@@ -188,7 +191,7 @@
                 t   (/ (double k) (double kmax))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
                 al  (- 1.0 (* 0.65 t t))                         ; …and the paint thins out
-                acc (conj acc [px py sz D sn tn al th coh])
+                acc (conj acc [px py sz D sn tn al th coh hb])
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
                 ;; broad strokes curl freely, fine marks stay faithful to the edge.
@@ -263,7 +266,8 @@
                               emitted (stroke-segments nf lvl
                                                        (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
                                                        ssz D sn tn ds curvature hd wd
-                                                       segs stepf bendf)]
+                                                       segs stepf bendf
+                                                       (if (<= (long lvl) 1) 1.0 0.0))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))
         (transient [])
         levels))))
@@ -363,7 +367,9 @@
 
      covariance: elongation e = 1 + stroke·coh·(0.25+0.75·dlev) tapers round→thin with detail;
                  s0 = csz·(1 + variation·snoise) jitters size; Σ = R(θ)·diag((s0·√e)²,(s0/√e)²)·Rᵀ.
-     colour:     t = 0.55 + 0.45·max(coherence,dlev) blends blur→raw (crisper at edges/detail);
+     colour:     t = 0.15 + 0.85·max(coherence,dlev) blends blur→raw — mostly the smooth
+                 blur in flat regions (seamless gradients, no stroke banding), raw at
+                 edges/detail;
                  contrast about 0.5; tone = 1 + variation·0.3·tnoise."
   [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast]
   (let [coh (+ min-coh (* (- 1.0 min-coh) coherence))
@@ -372,7 +378,7 @@
         s0  (* csz (+ 1.0 (* variation 0.5 (* 2.0 snoise))))
         sx  (* s0 se)                 ; long axis along θ
         sy  (/ s0 se)                 ; short axis across the stroke
-        t   (min 1.0 (max 0.0 (+ 0.55 (* 0.45 (max coherence (double dlev))))))
+        t   (min 1.0 (max 0.0 (+ 0.15 (* 0.85 (max coherence (double dlev))))))
         [br bg bb] blur-rgb [rr rg rb] raw-rgb
         color0 [(+ (* br (- 1.0 t)) (* rr t))
                 (+ (* bg (- 1.0 t)) (* rg t))
@@ -404,13 +410,15 @@
         dmap       (or (:detail image)    (wavelet/placement-map image sfield))
         ^doubles raw-px  pixels
         ^doubles blur-px (or (:blur image) pixels)
+        ^doubles blurh-px (or (:blur-heavy image) blur-px)
         nf         (or (:noise-fields image) (prep-noise sfield))
         segments   (layered-means dmap nf detail size variation curvature n height width)
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
-                     (for [[x y csz dlev sn tn alpha theta coherence] segments
-                           :let [blur-rgb (sample-arr blur-px width height x y)
+                     (for [[x y csz dlev sn tn alpha theta coherence hb] segments
+                           :let [blur-rgb (sample-arr (if (and hb (pos? (double hb))) blurh-px blur-px)
+                                                      width height x y)
                                  raw-rgb  (sample-arr raw-px width height x y)]]
                        (assoc (splat-record x y csz dlev theta coherence sn tn
                                             blur-rgb raw-rgb stroke variation contrast)
