@@ -237,6 +237,27 @@
 
 (declare sample-fields)
 
+(defn- edge-snap
+  "Move a fine-stroke position onto the local EDGE RIDGE: sample edge strength at
+   p and at ±h across the local tangent, fit a parabola, step to its peak (clamped
+   to ±h). Seeds scatter across a thin line by the placement noise; without the
+   snap each stroke traces PARALLEL to the line at its own offset and a crisp
+   1px line renders as a wobbly multi-strand braid."
+  [dmap nf x y h hd wd]
+  (let [[th _] (sample-fields nf x y)
+        nx (- (Math/sin th)) ny (Math/cos th)
+        e0 (wavelet/edge-at dmap x y)
+        ep (wavelet/edge-at dmap (+ x (* nx h)) (+ y (* ny h)))
+        em (wavelet/edge-at dmap (- x (* nx h)) (- y (* ny h)))]
+    (if (< (max e0 ep em) 0.12)
+      [x y]
+      (let [den (- (+ em ep) (* 2.0 e0))
+            d   (if (< (Math/abs den) 1e-9)
+                  0.0
+                  (max -1.0 (min 1.0 (/ (- em ep) (* 2.0 den)))))]
+        [(max 0.0 (min hd (+ x (* nx h d))))
+         (max 0.0 (min wd (+ y (* ny h d))))]))))
+
 (defn- map-at
   "Sample the placement map matched to a level's scale."
   [dmap kind x y]
@@ -262,11 +283,16 @@
    edge strokes alternate the two sides' colours as centres jittered across the
    contour — a bright/dark bead necklace along every silhouette).
    Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
-  [nf lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw blur-px iw ih]
+  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw blur-px iw ih]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
       [[x y ssz D sn tn 1.0 th coh hb x y traw]])
     (let [kmax (dec (long segs))
+          ;; fine strokes snap onto the edge ridge at the seed and after every step
+          ;; (predictor: tangent step; corrector: ridge snap) — the stroke GLUES to
+          ;; the line it is painting instead of braiding beside it.
+          snap? (>= (long lvl) 2)
+          [x y] (if snap? (edge-snap dmap nf x y 1.75 hd wd) [x y])
           [hr hg hb0] (sample-arr blur-px iw ih x y)]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 acc []]
         (if (or (> k kmax)
@@ -286,7 +312,10 @@
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
                 ;; broad strokes curl freely, fine marks stay faithful to the edge.
-                bend (* (double curvature) 0.9 (double bendf)
+                ;; the Perlin bend is GATED by coherence: a straight, strongly
+                ;; oriented edge (coh→1) is traced straight — wobble belongs to
+                ;; flow regions, not to lines.
+                bend (* (double curvature) 0.9 (double bendf) (- 1.0 (* 0.7 coh))
                         (- (noise/noise2 (* 0.05 px) (* 0.05 py)) 0.5))
                 cb (Math/cos bend) sb (Math/sin bend)
                 dx0 (Math/cos th) dy0 (Math/sin th)
@@ -298,10 +327,10 @@
                 ;; the Stroke slider is stroke LENGTH: it scales the chain step (the
                 ;; curve-following extent), not the segment ellipse. 2.5 (default) = 1.
                 L  (* ssz (double stepf) (stroke-len-frac stroke))]
-            (recur (inc k)
-                   (max 0.0 (min hd (+ px (* L dx))))
-                   (max 0.0 (min wd (+ py (* L dy))))
-                   dx dy acc)))))))
+            (let [nx0 (max 0.0 (min hd (+ px (* L dx))))
+                  ny0 (max 0.0 (min wd (+ py (* L dy))))
+                  [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd) [nx0 ny0])]
+              (recur (inc k) nx1 ny1 dx dy acc))))))))
 
 (defn- layered-means
   "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
@@ -394,7 +423,7 @@
                               emitted (if (and (or (== (long lvl) 1) (== (long lvl) 2))
                                                (> Ev 0.45))
                                         []
-                                        (stroke-segments nf lvl
+                                        (stroke-segments nf dmap lvl
                                                          (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
                                                          (* ssz szf (- 1.0 (* 0.45 Ev)))
                                                          D 0.0 tn ds curvature stroke hd wd
