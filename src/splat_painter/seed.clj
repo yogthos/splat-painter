@@ -100,8 +100,17 @@
   (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 (== l 4) 0.6 :else 0.5)))
 (defn- bend-frac "how much of the Curvature bend this level keeps" [lvl]
   (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 (== l 4) 0.15 :else 0.1)))
-(defn- sharp-level? "finest levels threshold against the fine-band :sharp map" [lvl]
-  (>= (long lvl) 2))
+(defn- level-map-kind
+  "Which placement map a level reads — matched to the scale it paints: broad levels
+   the smoothed aggregate, mid levels the MID band map (face-feature frequencies),
+   the finest levels the sharp fine-band map."
+  [lvl]
+  (let [l (long lvl)] (cond (<= l 1) :detail (<= l 3) :mid :else :sharp)))
+(defn- raw-floor
+  "Colour-rawness floor per level: small strokes must paint faithful colour — a
+   half-blur blend at feature scale just softens the feature it exists to keep."
+  [lvl]
+  (let [l (long lvl)] (cond (<= l 1) 0.0 (<= l 3) 0.45 :else 0.7)))
 (defn- stroke-len-frac
   "The Stroke slider as stroke LENGTH: scales the chain step. 2.5 (default) = 1.0."
   [stroke]
@@ -154,7 +163,7 @@
         ;; so their term is multiplied accordingly — the budget counts splats, not seeds.
         ;; Each fine level estimates its survivor fraction on ITS OWN map (aggregate vs
         ;; sharp fine-band — the same map it thresholds against when placing).
-        lvl-frac (fn [lvl] (detail-fraction dmap (if (sharp-level? lvl) :sharp :detail) (thresh lvl)))
+        lvl-frac (fn [lvl] (detail-fraction dmap (level-map-kind lvl) (thresh lvl)))
         ;; SUBDIVISION: a cell claimed by a finer level is NOT painted by coarser
         ;; detail levels (base always paints — coverage); the per-level costs below
         ;; use the exclusive fractions.
@@ -203,11 +212,20 @@
                                        :nx nx :ny ny :offset off
                                        :cphi cph :sphi sph
                                        :segs (seg-count lvl) :stepf (step-frac lvl)
-                                       :bendf (bend-frac lvl) :sharp? (sharp-level? lvl)})))))]
+                                       :bendf (bend-frac lvl) :map-kind (level-map-kind lvl)
+                                       :traw (raw-floor lvl)})))))]
     {:nlev nlev :warp warp :scale scale :levels levels
      :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))}))
 
 (declare sample-fields)
+
+(defn- map-at
+  "Sample the placement map matched to a level's scale."
+  [dmap kind x y]
+  (cond
+    (= kind :sharp) (wavelet/sharp-at dmap x y)
+    (= kind :mid)   (wavelet/mid-at dmap x y)
+    :else           (wavelet/detail-at dmap x y)))
 
 (defn- stroke-segments
   "Emit one seed's splat segments — THE SHARED BRUSH-STROKE SPEC the GPU generation
@@ -226,10 +244,10 @@
    edge strokes alternate the two sides' colours as centres jittered across the
    contour — a bright/dark bead necklace along every silhouette).
    Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
-  [nf lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb blur-px iw ih]
+  [nf lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw blur-px iw ih]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
-      [[x y ssz D sn tn 1.0 th coh hb x y]])
+      [[x y ssz D sn tn 1.0 th coh hb x y traw]])
     (let [kmax (dec (long segs))
           [hr hg hb0] (sample-arr blur-px iw ih x y)]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 acc []]
@@ -246,7 +264,7 @@
                 t   (/ (double k) (double kmax))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
                 al  (- 1.0 (* 0.65 t t))                         ; …and the paint thins out
-                acc (conj acc [px py sz D sn tn al th coh hb x y])
+                acc (conj acc [px py sz D sn tn al th coh hb x y traw])
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
                 ;; broad strokes curl freely, fine marks stay faithful to the edge.
@@ -287,7 +305,7 @@
         {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke count H W)]
     (persistent!
       (reduce
-        (fn [acc [idx {:keys [lvl ssz sp th nx ny cphi sphi segs stepf bendf sharp?]}]]
+        (fn [acc [idx {:keys [lvl ssz sp th nx ny cphi sphi segs stepf bendf map-kind traw]}]]
           (loop [i 0 acc acc]
             (if (>= i nx)
               acc
@@ -309,18 +327,17 @@
                               ;; preserve) small structure the smoothed aggregate blurs away.
                               ;; The cutoff is DITHERED ±25% per seed — a hard threshold on
                               ;; a map oscillating around it dashes contours into beads.
-                              dv (if sharp?
-                                   (wavelet/sharp-at dmap cx cy)
-                                   (wavelet/detail-at dmap cx cy))
+                              dv (map-at dmap map-kind cx cy)
                               thd (* th (+ 0.75 (* 0.5 (hash01 (+ (* i 43) lvl) j 19))))
                               ;; SUBDIVISION: skip if the next-finer level (previous
-                              ;; entry — levels are finest-first) claims this cell.
+                              ;; entry — levels are finest-first) claims this cell. The
+                              ;; claim is DITHERED like the threshold so the handoff
+                              ;; between scales is a gradual interleave, not a seam.
                               claimed? (and (pos? (long lvl)) (pos? (long idx))
                                             (let [fl (nth levels (dec (long idx)))
-                                                  fdv (if (:sharp? fl)
-                                                        (wavelet/sharp-at dmap cx cy)
-                                                        (wavelet/detail-at dmap cx cy))]
-                                              (>= fdv (:th fl))))]
+                                                  fdv (map-at dmap (:map-kind fl) cx cy)]
+                                              (>= fdv (* (:th fl)
+                                                         (+ 0.75 (* 0.5 (hash01 (+ (* i 47) lvl) j 23)))))))]
                           (if (and (pos? (long lvl)) (or claimed? (< dv thd)))
                             (recur (inc j) acc)      ; not detailed enough for this fine level
                             (let [;; FULL-CELL jitter (±sp/2): the ±22% of the old 0.45 factor
@@ -371,7 +388,7 @@
                                                          D 0.0 tn ds curvature stroke hd wd
                                                          segs stepf bendf
                                                          (if (<= (long lvl) 1) 1.0 0.0)
-                                                         blur-px iw ih))]
+                                                         traw blur-px iw ih))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         (map-indexed vector levels)))))
@@ -477,14 +494,15 @@
                  blur in flat regions (seamless gradients, no stroke banding), raw at
                  edges/detail;
                  contrast about 0.5; tone = 1 + variation·0.3·tnoise."
-  [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast]
+  [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast traw]
   (let [coh (+ min-coh (* (- 1.0 min-coh) coherence))
         e   (+ 1.0 (* (min (double stroke) 1.5) coh (+ 0.25 (* 0.75 (double dlev)))))
         se  (Math/sqrt e)
         s0  (* csz (+ 1.0 (* variation 0.5 (* 2.0 snoise))))
         sx  (* s0 se)                 ; long axis along θ
         sy  (/ s0 se)                 ; short axis across the stroke
-        t   (min 1.0 (max 0.0 (+ 0.15 (* 0.85 (max coherence (double dlev))))))
+        t   (max (double traw)
+                 (min 1.0 (max 0.0 (+ 0.15 (* 0.85 (max coherence (double dlev)))))))
         [br bg bb] blur-rgb [rr rg rb] raw-rgb
         color0 [(+ (* br (- 1.0 t)) (* rr t))
                 (+ (* bg (- 1.0 t)) (* rg t))
@@ -522,12 +540,13 @@
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
-                     (for [[x y csz dlev sn tn alpha theta coherence hb hx hy] segments
+                     (for [[x y csz dlev sn tn alpha theta coherence hb hx hy traw] segments
                            :let [blur-rgb (sample-arr (if (and hb (pos? (double hb))) blurh-px blur-px)
                                                       width height hx hy)
                                  raw-rgb  (sample-arr raw-px width height hx hy)]]
                        (assoc (splat-record x y csz dlev theta coherence sn tn
-                                            blur-rgb raw-rgb stroke variation contrast)
+                                            blur-rgb raw-rgb stroke variation contrast
+                                            (or traw 0.0))
                               :alpha (double alpha))))
         ;; PAINT ORDER needs NO sort: `layered-means` emits finest level first, so the field is
         ;; already small→large. The shader composites front-to-back (index 0 = topmost), so the

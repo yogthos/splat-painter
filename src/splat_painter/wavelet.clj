@@ -112,15 +112,24 @@
          ;; Haar multi-scale detail energy (same pipeline as detail-map); snapshot the
          ;; FINE-BAND energy (levels 1-2) before the coarse bands are added.
          acc     (double-array n)
-         acc-fine
-         (loop [lev 1 ch sh cw sw ^doubles src lum block 2 fine nil]
+         ;; band snapshots: after band 1 (finest only), band 2, band 3 — the FINE map
+         ;; uses bands 1-2, the MID map bands 2-3 (face features — eyelids, lips,
+         ;; nostrils — are mid-frequency: they score near-zero on the finest bands
+         ;; and drown in the smoothed aggregate).
+         [acc-1 acc-fine acc-3]
+         (loop [lev 1 ch sh cw sw ^doubles src lum block 2 s1 nil s2 nil s3 nil]
            (if (and (<= lev levels) (>= ch 2) (>= cw 2))
              (let [hc2 (quot ch 2) wc2 (quot cw 2)
                    ll  (double-array (* hc2 wc2))]
                (haar-detail-energy! src ch cw ll acc sh sw block)
                (recur (inc lev) hc2 wc2 ll (* 2 block)
-                      (if (= lev 2) (aclone acc) fine)))
-             (or fine (aclone acc))))
+                      (if (= lev 1) (aclone acc) s1)
+                      (if (= lev 2) (aclone acc) s2)
+                      (if (= lev 3) (aclone acc) s3)))
+             [(or s1 (aclone acc)) (or s2 (aclone acc)) (or s3 (aclone acc))]))
+         acc-mid (let [m (double-array n)]
+                   (dotimes [i n] (aset m i (- (aget ^doubles acc-3 i) (aget ^doubles acc-1 i))))
+                   m)
          ;; E(i) = edge strength sqrt(grad2/gmax) from structure tensor, resampled
          ;; nearest-neighbour from the tensor grid to the placement-map grid
          sf-h    (:h sfield) sf-w (:w sfield)
@@ -163,8 +172,10 @@
          P  (fuse acc (max 1 (quot (min sh sw) 40)) (max 1 (quot (min sh sw) 50)) false)
          ;; sharp: fine bands only, minimal smoothing, E² — text/eye-scale structure
          ;; survives and fine strokes hug the edge cores
-         Ps (fuse acc-fine 1 1 true)]
-     {:h sh :w sw :detail P :sharp Ps :edge E-arr :dmax 1.0 :src-h H :src-w W})))
+         Ps (fuse acc-fine 1 1 true)
+         ;; mid: bands 2-3, light smoothing, plain E — the map the mid levels place by
+         Pm (fuse acc-mid (max 1 (quot (min sh sw) 60)) 1 false)]
+     {:h sh :w sw :detail P :sharp Ps :mid Pm :edge E-arr :dmax 1.0 :src-h H :src-w W})))
 
 (defn detail-at
   "Normalized detail ∈ [0,1] at full-image coords (x=row, y=col), sampled from the
@@ -191,6 +202,16 @@
           yi (min (dec W) (max 0 (long (Math/round (* (double y) (/ (double W) src-w))))))]
       (aget d (+ (* xi W) yi)))
     0.0))
+
+(defn mid-at
+  "The mid placement levels' map: the UNION (max) of the :mid band map (Haar bands
+   2-3 — face-feature-scale structure) and the :sharp fine-band map, so mid strokes
+   serve smooth features AND fine texture (dark fur, small text) alike. Falls back
+   to :detail when the maps are absent."
+  [dmap x y]
+  (if-let [m (:mid dmap)]
+    (max (detail-at (assoc dmap :detail m) x y) (sharp-at dmap x y))
+    (detail-at dmap x y)))
 
 (defn sharp-at
   "Like detail-at but over the :sharp fine-band map — what the finest placement

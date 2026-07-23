@@ -84,6 +84,9 @@ void main(){
     float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
     ts = ts * ts * (3.0 - 2.0 * ts);
     float hardness = mix(u_hard_sharp, u_hard_soft, ts);
+    // ANTIALIAS: below ~2.5px stdev a hard-edged profile spans less than a pixel and
+    // shimmers as jaggies — tiny marks ease back to a pure gaussian (soft dab).
+    hardness = 1.0 + (hardness - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
     float a = t2.x * u_opacity * exp(-pow(pdf, hardness));  // t2.x = per-splat paint alpha (stroke taper)
     float wa = T * a;
     acc += wa * t1.yzw;
@@ -143,6 +146,9 @@ void main(){
     float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
     ts = ts * ts * (3.0 - 2.0 * ts);
     float hardness = mix(u_hard_sharp, u_hard_soft, ts);
+    // ANTIALIAS: below ~2.5px stdev a hard-edged profile spans less than a pixel and
+    // shimmers as jaggies — tiny marks ease back to a pure gaussian (soft dab).
+    hardness = 1.0 + (hardness - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
     float a = t2.x * u_opacity * exp(-pow(pdf, hardness));
     float wa = T * a;
     acc += wa * t1.yzw;
@@ -199,6 +205,8 @@ void main(){
   float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
   ts = ts * ts * (3.0 - 2.0 * ts);
   v_hard = mix(u_hard_sharp, u_hard_soft, ts);
+  // ANTIALIAS: tiny marks ease back to a pure gaussian (see the loop shaders)
+  v_hard = 1.0 + (v_hard - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
   // two triangles (0,1,2)(2,1,3) over corner ids 0..3 = (∓,∓)(±,∓)(∓,±)(±,±)
   int cid = corner == 0 ? 0 : (corner == 1 || corner == 4) ? 1
           : (corner == 2 || corner == 3) ? 2 : 3;

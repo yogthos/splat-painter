@@ -121,7 +121,7 @@
   ;; comes from the segment chain, not the ellipse); s0=5 (snoise 0);
   ;; t=0.15+0.85·0.5=0.575 (blur-leaning); contrast 1, tone 1 (tnoise 0).
   (let [{:keys [mean cov color]}
-        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0)
+        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0)
         [c00 c01 _ c11] cov
         [cr cg cb] color]
     (is (= [10.0 20.0] mean))
@@ -150,11 +150,13 @@
     ;; threshold + head-colour sampling); 553 (colour-guarded traces). Now: the edge
     ;; band belongs to base+fine only (mid fills suppressed at E>0.45), and every
     ;; stroke shrinks near edges so soft tails can't cross silhouettes.
-    (is (= 464 (count splats)))
-    (is (approx= 0.5  11014.249  sx) "Σ mean-x")
-    (is (approx= 0.5  14541.963  sy) "Σ mean-y")
-    (is (approx= 1.0  187143.766 sd) "Σ det(cov)")
-    (is (approx= 0.05 467.163    sc) "Σ colour")))
+    ;; latest: mid-band∪sharp map for levels 2-3, dithered subdivision claim,
+    ;; per-level colour-rawness floor.
+    (is (= 523 (count splats)))
+    (is (approx= 0.5  12395.147  sx) "Σ mean-x")
+    (is (approx= 0.5  16774.364  sy) "Σ mean-y")
+    (is (approx= 1.0  186602.869 sd) "Σ det(cov)")
+    (is (approx= 0.05 587.502    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
