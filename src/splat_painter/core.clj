@@ -34,6 +34,9 @@
 (defonce variation-atom (r/atom 0.5))   ; per-stroke size/tone jitter
 (defonce curvature-atom (r/atom 0.5))   ; Perlin warp — how much strokes bend/curve off-grid
 (defonce contrast-atom (r/atom 1.0))
+(defonce broad-atom    (r/atom 1.0))   ; per-tier size multipliers: background/large
+(defonce mid-atom      (r/atom 1.0))   ; features vs mid structure vs the finest
+(defonce fine-atom     (r/atom 1.0))   ; details, each loosened/focused independently
 (defonce hardness-atom (r/atom 1.7))   ; edge crispness of detail strokes; large strokes always
                                        ; soften to a round gaussian (u_hard_soft fixed at 1.0)
 (defonce status-atom   (r/atom "no image loaded — click Open Image…"))
@@ -103,6 +106,9 @@
 (defn- cur-detail [] (or (some-> (System/getenv "GA_PAINTER_DETAIL") Double/parseDouble)      @detail-atom))
 (defn- cur-stroke [] (or (some-> (System/getenv "GA_PAINTER_STROKE") Double/parseDouble)      @stroke-atom))
 (defn- cur-var    [] (or (some-> (System/getenv "GA_PAINTER_VAR")    Double/parseDouble)      @variation-atom))
+(defn- cur-broad  [] (or (some-> (System/getenv "GA_PAINTER_BROAD")  Double/parseDouble)      @broad-atom))
+(defn- cur-mid    [] (or (some-> (System/getenv "GA_PAINTER_MID")    Double/parseDouble)      @mid-atom))
+(defn- cur-fine   [] (or (some-> (System/getenv "GA_PAINTER_FINE")   Double/parseDouble)      @fine-atom))
 
 (defn- field-for-current-controls []
   (when-let [img @image-atom]
@@ -112,7 +118,10 @@
                            :detail    (cur-detail)
                            :variation (cur-var)
                            :curvature @curvature-atom
-                           :contrast  @contrast-atom})))
+                           :contrast  @contrast-atom
+                           :size-broad (cur-broad)
+                           :size-mid   (cur-mid)
+                           :size-fine  (cur-fine)})))
 
 (defn- request-render! []
   (when-let [a @area-atom] (glx/gtk-gl-area-queue-render a)))
@@ -322,7 +331,8 @@
 
 (defn- gpu-controls []
   {:count (cur-count) :size (cur-size) :stroke (cur-stroke) :detail (cur-detail)
-   :variation (cur-var) :curvature @curvature-atom :contrast @contrast-atom})
+   :variation (cur-var) :curvature @curvature-atom :contrast @contrast-atom
+   :size-broad (cur-broad) :size-mid (cur-mid) :size-fine (cur-fine)})
 
 (defn- ensure-gpu!
   "Lazily build the GPU-generation objects (gen program, buffer-render program, perm
@@ -631,6 +641,9 @@
    [:separator {}]
    [slider "Splats"    1000 200000 1000 count-atom]     ; budget: higher = more detail, slower
    [slider "Size"      6    50    0.5   size-atom]
+   [slider "Broad"     0.4  2.5   0.05  broad-atom]    ; background/large-feature looseness
+   [slider "Mid"       0.4  2.5   0.05  mid-atom]      ; mid-structure size
+   [slider "Fine"      0.4  2.5   0.05  fine-atom]     ; finest-detail size (lower = tighter)
    [slider "Detail"    0.0  1.0   0.02  detail-atom]
    [slider "Variation" 0.0  1.0   0.02  variation-atom]
    [slider "Curvature" 0.0  1.0   0.02  curvature-atom]
