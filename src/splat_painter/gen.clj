@@ -25,7 +25,7 @@
             [splat-painter.noise :as noise]
             [jolt.ffi :as ffi]))
 
-(def ^:private max-levels 6)
+(def ^:private max-levels 7)
 
 ;; --- generation program: vertex + geometry (transform feedback) --------------
 (def ^:private vs-src
@@ -45,7 +45,7 @@ out vec4 o_a;
 out vec4 o_b;
 out vec4 o_c;
 
-const int   ML      = 6;
+const int   ML      = 7;
 const float MIN_COH = 0.28;
 const int   SEGS    = 6;      // segments per fine-level brush stroke (seed/stroke-segs)
 

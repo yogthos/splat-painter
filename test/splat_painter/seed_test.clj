@@ -150,13 +150,13 @@
     ;; threshold + head-colour sampling); 553 (colour-guarded traces). Now: the edge
     ;; band belongs to base+fine only (mid fills suppressed at E>0.45), and every
     ;; stroke shrinks near edges so soft tails can't cross silhouettes.
-    ;; latest: edge-ridge snapped traces (predictor/corrector — fine strokes glue
-    ;; to the line they paint) + coherence-gated Perlin bend.
-    (is (= 568 (count splats)))
-    (is (approx= 0.5  12757.314  sx) "Σ mean-x")
-    (is (approx= 0.5  16858.556  sy) "Σ mean-y")
-    (is (approx= 1.0  234529.957 sd) "Σ det(cov)")
-    (is (approx= 0.05 596.693    sc) "Σ colour")))
+    ;; latest: 7-level pyramid (finest = size/64 pixel marks; detail 0.6 → 5
+    ;; levels), 200k budget ceiling.
+    (is (= 740 (count splats)))
+    (is (approx= 0.5  16495.236  sx) "Σ mean-x")
+    (is (approx= 0.5  21165.382  sy) "Σ mean-y")
+    (is (approx= 1.0  234527.332 sd) "Σ det(cov)")
+    (is (approx= 0.05 896.011    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -181,9 +181,9 @@
         dmap   (wavelet/placement-map img sfield)
         {:keys [nlev levels total warp]} (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 4000 48 64)
         cells (map (fn [l] (* (:nx l) (:ny l))) levels)]
-    (is (= 4 nlev) "detail 0.6 -> 1+round(3.0) = 4 levels")
-    (is (= 4 (count levels)))
-    (is (= 3 (:lvl (first levels))) "finest level first")
+    (is (= 5 nlev) "detail 0.6 -> 1+round(3.6) = 5 levels")
+    (is (= 5 (count levels)))
+    (is (= 4 (:lvl (first levels))) "finest level first")
     (is (= 0 (:lvl (last levels)))  "base level last")
     (is (= -1.0 (:th (last levels))) "base keeps all cells")
     (is (= 0 (:offset (first levels))))
