@@ -164,7 +164,7 @@
          ;; sharp: fine bands only, minimal smoothing, E² — text/eye-scale structure
          ;; survives and fine strokes hug the edge cores
          Ps (fuse acc-fine 1 1 true)]
-     {:h sh :w sw :detail P :sharp Ps :dmax 1.0 :src-h H :src-w W})))
+     {:h sh :w sw :detail P :sharp Ps :edge E-arr :dmax 1.0 :src-h H :src-w W})))
 
 (defn detail-at
   "Normalized detail ∈ [0,1] at full-image coords (x=row, y=col), sampled from the
@@ -177,6 +177,20 @@
         xi (min (dec H) (max 0 (long (Math/round (* (double x) (/ (double H) src-h))))))
         yi (min (dec W) (max 0 (long (Math/round (* (double y) (/ (double W) src-w))))))]
     (if (pos? dmax) (min 1.0 (/ (aget d (+ (* xi W) yi)) dmax)) 0.0)))
+
+(defn edge-at
+  "Raw structure-tensor edge strength ∈ [0,1] at full-image coords, from the map's
+   :edge channel (sqrt(grad2/gmax), no normalization) — the band where broad fill
+   strokes must not tread."
+  [dmap x y]
+  (if-let [e (:edge dmap)]
+    (let [H (:h dmap) W (:w dmap)
+          src-h (long (or (:src-h dmap) H)) src-w (long (or (:src-w dmap) W))
+          ^doubles d e
+          xi (min (dec H) (max 0 (long (Math/round (* (double x) (/ (double H) src-h))))))
+          yi (min (dec W) (max 0 (long (Math/round (* (double y) (/ (double W) src-w))))))]
+      (aget d (+ (* xi W) yi)))
+    0.0))
 
 (defn sharp-at
   "Like detail-at but over the :sharp fine-band map — what the finest placement
