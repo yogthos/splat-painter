@@ -154,16 +154,32 @@
         ;; so their term is multiplied accordingly — the budget counts splats, not seeds.
         ;; Each fine level estimates its survivor fraction on ITS OWN map (aggregate vs
         ;; sharp fine-band — the same map it thresholds against when placing).
-        K (loop [lvl 0 acc 0.0]
-            (if (>= lvl nlev)
-              acc
-              (let [f  (if (zero? lvl)
-                         1.0
-                         (detail-fraction dmap (if (sharp-level? lvl) :sharp :detail) (thresh lvl)))
-                    sp (sp-of lvl 1.0)
-                    m  (double (seg-count lvl))]
-                (recur (inc lvl) (+ acc (/ (* m f area) (* sp sp)))))))
-        scale (max 1.0 (Math/sqrt (/ K budget)))
+        lvl-frac (fn [lvl] (detail-fraction dmap (if (sharp-level? lvl) :sharp :detail) (thresh lvl)))
+        ;; SUBDIVISION: a cell claimed by a finer level is NOT painted by coarser
+        ;; detail levels (base always paints — coverage); the per-level costs below
+        ;; use the exclusive fractions.
+        ;; TWO-TIER budget: the levels that exist at moderate Detail (0-3) get the
+        ;; scale THEY need; the added ultra-fine levels (4-5) fit their own scale into
+        ;; the REMAINING budget. A single uniform scale let the finest levels' huge
+        ;; demand fatten the base ×2.6+ as Detail rose — maxing Detail made everything
+        ;; coarser. Now raising Detail leaves the broad/mid painting untouched and
+        ;; adds fine accents on top: monotone by construction.
+        k-of (fn [lvl]
+               (let [f (cond
+                         (zero? (long lvl))        1.0
+                         (< (long lvl) (dec nlev)) (max 0.0 (- (lvl-frac lvl) (lvl-frac (inc (long lvl)))))
+                         :else                     (lvl-frac lvl))
+                     sp (sp-of lvl 1.0)]
+                 (/ (* (double (seg-count lvl)) f area) (* sp sp))))
+        Kc (reduce + 0.0 (map k-of (range 0 (min nlev 4))))
+        Kf (if (> nlev 4) (reduce + 0.0 (map k-of (range 4 nlev))) 0.0)
+        scale-c (max 1.0 (Math/sqrt (/ Kc budget)))
+        scale-f (if (<= nlev 4)
+                  scale-c
+                  (let [rem (max (* 0.15 budget) (- budget (/ Kc (* scale-c scale-c))))]
+                    (max scale-c (Math/sqrt (/ Kf rem)))))
+        scale-of (fn [lvl] (if (<= (long lvl) 3) scale-c scale-f))
+        scale scale-c
         ;; build FINEST level first (lvl nlev-1 → 0), assigning cumulative candidate offsets
         ;; in that same order, so GPU gl_VertexID order == CPU emission order == paint order.
         ;; Each level carries its SCALE-RELATIVE stroke behaviour: segment count, step
@@ -171,8 +187,9 @@
         levels (loop [lvl (dec nlev) off 0 out []]
                  (if (< lvl 0)
                    out
-                   (let [ssz (* scale (/ smax (Math/pow 2.0 (double lvl))))
-                         sp  (sp-of lvl scale)
+                   (let [lsc (scale-of lvl)
+                         ssz (* lsc (/ smax (Math/pow 2.0 (double lvl))))
+                         sp  (sp-of lvl lsc)
                          phi (grid-phi lvl)
                          cph (Math/cos phi) sph (Math/sin phi)
                          ;; the rotated grid must cover the image rectangle in grid
@@ -270,7 +287,7 @@
         {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke count H W)]
     (persistent!
       (reduce
-        (fn [acc {:keys [lvl ssz sp th nx ny cphi sphi segs stepf bendf sharp?]}]
+        (fn [acc [idx {:keys [lvl ssz sp th nx ny cphi sphi segs stepf bendf sharp?]}]]
           (loop [i 0 acc acc]
             (if (>= i nx)
               acc
@@ -295,8 +312,16 @@
                               dv (if sharp?
                                    (wavelet/sharp-at dmap cx cy)
                                    (wavelet/detail-at dmap cx cy))
-                              thd (* th (+ 0.75 (* 0.5 (hash01 (+ (* i 43) lvl) j 19))))]
-                          (if (and (pos? (long lvl)) (< dv thd))
+                              thd (* th (+ 0.75 (* 0.5 (hash01 (+ (* i 43) lvl) j 19))))
+                              ;; SUBDIVISION: skip if the next-finer level (previous
+                              ;; entry — levels are finest-first) claims this cell.
+                              claimed? (and (pos? (long lvl)) (pos? (long idx))
+                                            (let [fl (nth levels (dec (long idx)))
+                                                  fdv (if (:sharp? fl)
+                                                        (wavelet/sharp-at dmap cx cy)
+                                                        (wavelet/detail-at dmap cx cy))]
+                                              (>= fdv (:th fl))))]
+                          (if (and (pos? (long lvl)) (or claimed? (< dv thd)))
                             (recur (inc j) acc)      ; not detailed enough for this fine level
                             (let [;; FULL-CELL jitter (±sp/2): the ±22% of the old 0.45 factor
                                   ;; left cell centres visible as residual rows.
@@ -349,7 +374,7 @@
                                                          blur-px iw ih))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
-        levels))))
+        (map-indexed vector levels)))))
 
 ;; --- precomputed smooth Perlin fields (flow angle, size, tone) ---------------
 ;; noise2 is ~30 ops; calling it 4× per splat over ~14k splats dominated the render.
