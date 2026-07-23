@@ -163,11 +163,13 @@
     ;; frame side offset, junction-tolerant coherence gate, canvas re-mix.
     ;; (sd 194712→221537) sealed base coverage: the base shrinks gently near
     ;; edges (0.25·Ev) so its paint always reaches the boundary.
-    (is (= 841 (count splats)))
-    (is (approx= 0.5  18099.586  sx) "Σ mean-x")
-    (is (approx= 0.5  24765.089  sy) "Σ mean-y")
-    (is (approx= 1.0  221537.436 sd) "Σ det(cov)")
-    (is (approx= 0.05 1016.886   sc) "Σ colour")))
+    ;; (841→689) brush lift: a chain that exits its colour region (mismatch
+    ;; >0.45) emits NOTHING — escaped segments were a dark halo along contours.
+    (is (= 689 (count splats)))
+    (is (approx= 0.5  14942.719  sx) "Σ mean-x")
+    (is (approx= 0.5  20285.148  sy) "Σ mean-y")
+    (is (approx= 1.0  221524.772 sd) "Σ det(cov)")
+    (is (approx= 0.05 748.184    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments

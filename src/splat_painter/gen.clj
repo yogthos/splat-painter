@@ -413,12 +413,15 @@ void main(){
   for (int q = 0; q < SEGS; q++) {
     if (q >= segs || fade < 0.15) break;
     if (q > 0) {
-      // the stroke FADES when the canvas stops matching its brush-load — a brush
-      // running dry — instead of breaking dead into gapped dashes
+      // TWO-TIER dry-out (mirror seed): gradual drift DRIES the brush (x0.4);
+      // a LARGE mismatch (>0.45) means the stroke EXITED its colour region — a
+      // chain escaping a curved silhouette would paint its dark brush-load into
+      // the background — so the painter LIFTS the brush and emits nothing.
       vec3 cb = sampleRGB(u_blurTex, px, py);
       vec3 dcl = abs(cb - headBlur);
-      // liner strokes tolerate gradual on-ridge drift; real boundaries still stop them
-      if (max(dcl.r, max(dcl.g, dcl.b)) > ((lvl >= 4) ? 0.3 : 0.22)) fade *= 0.4;
+      float dmx = max(dcl.r, max(dcl.g, dcl.b));
+      if (dmx > 0.45) fade = 0.0;
+      else if (dmx > ((lvl >= 4) ? 0.3 : 0.22)) fade *= 0.4;
     }
     vec2 tc = fieldsAt(px, py);
     // follow the line only while there IS a line (mirror seed/stroke-segments):
@@ -427,6 +430,7 @@ void main(){
     // ...but a strong edge under the brush keeps the line alive: real ink lines
     // push THROUGH junctions, where coherence dips while edge energy stays high
     if (q > 0 && lvl >= 4 && tc.y < 0.35 && edgeAt(px, py) < 0.5) fade *= 0.5;
+    if (fade < 0.15) break;                        // brush lifted — emit nothing
     float tt = float(q) / float(segs - 1);
     // IMPASTO body (mirror seed/stroke-segments): fine liner strokes on a strong
     // edge paint nearly opaque — the contour is defined by thin bodied lines whose
