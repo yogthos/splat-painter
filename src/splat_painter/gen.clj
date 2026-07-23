@@ -25,7 +25,7 @@
             [splat-painter.noise :as noise]
             [jolt.ffi :as ffi]))
 
-(def ^:private max-levels 4)
+(def ^:private max-levels 5)
 
 ;; --- generation program: vertex + geometry (transform feedback) --------------
 (def ^:private vs-src
@@ -45,7 +45,7 @@ out vec4 o_a;
 out vec4 o_b;
 out vec4 o_c;
 
-const int   ML      = 4;
+const int   ML      = 5;
 const float MIN_COH = 0.28;
 const int   SEGS    = 6;      // segments per fine-level brush stroke (seed/stroke-segs)
 
@@ -196,10 +196,13 @@ void emitSplat(float px, float py, float csz, float D, float sn, float tn, float
 
 void main(){
   int v = v_id[0];
-  // decode candidate index -> finest-first level slot k
+  // decode candidate index -> finest-first level slot k. CONSTANT loop bound (ML) so
+  // the compiler can fully unroll: with a uniform bound (u_nlev) + break, Apple's GLSL
+  // mis-executed the last slot in this geometry shader — the base level (slot 4 at five
+  // levels) emitted NOTHING, which truncated the underpainting and left gaps.
   int k = 0;
-  for (int m = 0; m < u_nlev; m++) {
-    if (v >= u_off[m] && v < u_off[m] + u_nx[m] * u_ny[m]) { k = m; break; }
+  for (int m = 0; m < ML; m++) {
+    if (m < u_nlev && v >= u_off[m] && v < u_off[m] + u_nx[m] * u_ny[m]) { k = m; break; }
   }
   int local = v - u_off[k];
   int i = local / u_ny[k];

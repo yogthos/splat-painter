@@ -22,7 +22,7 @@
   per-splat paint alpha (brush strokes taper it toward the stroke tail)."
   (:require [glimmer-gl.gl :as gl]))
 
-(def max-splats "shader splat ceiling + transform-feedback buffer capacity" 49152)
+(def max-splats "shader splat ceiling + transform-feedback buffer capacity" 131072)
 (def tile-w "splats per splat-texture row (must match the shader's TILE_W)" 4096)
 
 (def ^:private vs-src
