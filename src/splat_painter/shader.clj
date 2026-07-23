@@ -192,6 +192,7 @@ flat out float v_hard;
 flat out float v_alpha;          // per-splat paint alpha (stroke taper)
 flat out vec2  v_major;          // stroke long-axis unit dir (rows, cols) — bristle frame
 flat out vec2  v_mean;           // splat mean — per-stroke noise seed
+flat out float v_edge;           // per-stroke edge-raggedness amount (0 on base strokes)
 out vec2 v_d;                    // image-space offset from the mean (rows, cols)
 
 void main(){
@@ -216,13 +217,19 @@ void main(){
   v_hard = mix(u_hard_sharp, u_hard_soft, ts);
   // ANTIALIAS: tiny marks ease back to a pure gaussian (see the loop shaders)
   v_hard = 1.0 + (v_hard - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
+  // edge raggedness rides the SMALLER strokes only: the base/large coverage layer
+  // (ts→1) stays solid so thinning coverage can't open gaps to the black clear;
+  // fine marks (ts→0) get the full break-up, over the underpainting where it reads.
+  float edgeAmt = u_tex_edge * (1.0 - ts);
+  v_edge = edgeAmt;
   // two triangles (0,1,2)(2,1,3) over corner ids 0..3 = (∓,∓)(±,∓)(∓,±)(±,±)
   int cid = corner == 0 ? 0 : (corner == 1 || corner == 4) ? 1
           : (corner == 2 || corner == 3) ? 2 : 3;
   vec2 s  = vec2((cid & 1) == 0 ? -1.0 : 1.0, (cid & 2) == 0 ? -1.0 : 1.0);
-  // marginal stdevs = exact AABB of the ellipse; grow it when edge raggedness can
-  // push the contour OUTWARD, so a dilated bristle can't clip against the quad.
-  vec2 he = (3.5 + 2.0 * u_tex_edge) * sqrt(vec2(c00, c11));
+  // marginal stdevs = exact AABB of the ellipse; grow the quad enough to CONTAIN the
+  // loosened gaussian when a bristle erodes pdf (effective σ scales ~1/√(1-edgeAmt)),
+  // so the tail reaches ~0 inside the quad instead of clipping to a hard rectangle.
+  vec2 he = (3.5 + 5.0 * edgeAmt) * sqrt(vec2(c00, c11));
   v_d = s * he;
   vec2 ip = t0.xy + v_d;                  // image position (x=row top-down, y=col)
   // image px -> pane px (contain fit, centered; inverse of the loop shader's mapping)
@@ -240,6 +247,7 @@ flat in float v_hard;
 flat in float v_alpha;
 flat in vec2  v_major;
 flat in vec2  v_mean;
+flat in float v_edge;
 in vec2 v_d;
 uniform float u_opacity;
 uniform float u_tex_streak;      // bristle tonal-streak amount (0 = off)
@@ -281,8 +289,9 @@ void main(){
   float gs = vnoise(vec2(across, along) * 0.5 + seed * 1.7 + 19.0) - 0.5;
 
   // ragged edge: only ever scales pdf, so it's invisible at the core (pdf≈0) and
-  // grows toward the shoulder where the contour actually reads.
-  float pdf = max(pdf0 * (1.0 + u_tex_edge * 2.0 * streak), 0.0);
+  // grows toward the shoulder where the contour actually reads. v_edge is 0 on the
+  // base coverage strokes (see the vertex shader) so they stay solid.
+  float pdf = max(pdf0 * (1.0 + v_edge * 2.0 * streak), 0.0);
   float a = v_alpha * u_opacity * exp(-pow(pdf, v_hard));
 
   // texture catches the LIGHT: bristle marks and tooth show in lit passages, not the
