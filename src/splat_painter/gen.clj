@@ -64,6 +64,10 @@ uniform int   u_segs[ML];
 uniform float u_stepf[ML];
 uniform float u_bendf[ML];
 uniform int   u_sharp[ML];
+// per-level grid rotation (cos/sin, CPU-computed) — axis-aligned grids read as a
+// corduroy ripple of stroke rows; each level gets its own angle (seed/grid-phi)
+uniform float u_cphi[ML];
+uniform float u_sphi[ML];
 uniform float u_warp;
 uniform int   u_H;
 uniform int   u_W;
@@ -210,14 +214,20 @@ void main(){
   int j = local - i * u_ny[k];
   int lvl = u_lvl[k];
   float sp = u_sp[k], ssz = u_ssz[k], th = u_th[k];
-  float cx = (float(i) + 0.5) * sp;
-  float cy = (float(j) + 0.5) * sp;
+  // rotated grid coords -> image coords about the image centre (mirror of
+  // seed/layered-means); cells landing outside the image are discarded.
+  float uu = (float(i) + 0.5) * sp - 0.5 * float(u_nx[k]) * sp;
+  float vv = (float(j) + 0.5) * sp - 0.5 * float(u_ny[k]) * sp;
+  float cx = 0.5 * float(u_H) + u_cphi[k]*uu - u_sphi[k]*vv;
+  float cy = 0.5 * float(u_W) + u_sphi[k]*uu + u_cphi[k]*vv;
+  if (cx < 0.0 || cx >= float(u_H) || cy < 0.0 || cy >= float(u_W)) return;
   // each level reads the map matched to ITS scale (mirror of seed/layered-means)
   float dv = (u_sharp[k] == 1) ? sharpAt(cx, cy) : detailAt(cx, cy);
   if (lvl > 0 && dv < th) return;                 // not detailed enough -> discard
 
-  float jx = sp * 0.45 * (hash01(i*137 + lvl, j, 3) - 0.5);
-  float jy = sp * 0.45 * (hash01(i*149 + lvl, j, 7) - 0.5);
+  // FULL-CELL jitter (±sp/2) — smaller jitter left cell centres visible as rows
+  float jx = sp * (hash01(i*137 + lvl, j, 3) - 0.5);
+  float jy = sp * (hash01(i*149 + lvl, j, 7) - 0.5);
   float x = cx + jx, y = cy + jy;
   float D = min(1.0, u_detail * dv * 2.2);
   float aw = u_warp * (1.0 - D) * ssz;
@@ -269,7 +279,7 @@ void main(){
 (def ^:private gen-uniform-names
   ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv"
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
-   "u_segs" "u_stepf" "u_bendf" "u_sharp"
+   "u_segs" "u_stepf" "u_bendf" "u_sharp" "u_cphi" "u_sphi"
    "u_detailTex" "u_dmax" "u_detailDim" "u_detailSrc"
    "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurHTex" "u_rawTex" "u_permTex"])
 
@@ -420,6 +430,8 @@ void main(){
         stf (pad (map :stepf levels) 1.0)
         bnf (pad (map :bendf levels) 1.0)
         shp (pad (map (fn [l] (if (:sharp? l) 1 0)) levels) 0)
+        cph (pad (map :cphi levels) 1.0)
+        sph (pad (map :sphi levels) 0.0)
         [sig-min sig-max] (sig-range levels variation)]
     (gl/gl-use-program program)
     ;; per-level + controls
@@ -443,6 +455,8 @@ void main(){
     (set-1fv! (:u_stepf locs) stf)
     (set-1fv! (:u_bendf locs) bnf)
     (set-1iv! (:u_sharp locs) shp)
+    (set-1fv! (:u_cphi locs) cph)
+    (set-1fv! (:u_sphi locs) sph)
     ;; field textures on units 1..5 (unit 0 is the render splat buffer)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 1)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:detail fields)) (gl/gl-uniform-1i (:u_detailTex locs) 1)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 2)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:noise fields))  (gl/gl-uniform-1i (:u_noiseTex locs) 2)

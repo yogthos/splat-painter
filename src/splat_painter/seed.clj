@@ -102,6 +102,13 @@
   (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 (== l 4) 0.15 :else 0.1)))
 (defn- sharp-level? "finest levels threshold against the fine-band :sharp map" [lvl]
   (>= (long lvl) 2))
+(defn- grid-phi
+  "Each level's candidate grid is ROTATED by its own angle: axis-aligned grids put
+   strokes in horizontal/vertical rows whose periodic overlap reads as a fine
+   corduroy ripple across flat regions — and stacked levels moiré. Distinct
+   rotations per level break both."
+  [lvl]
+  (mod (* 0.55 (inc (long lvl))) Math/PI))
 
 (defn layer-params
   "Pure per-level placement parameters — THE SHARED SPEC for the CPU loop
@@ -154,11 +161,18 @@
                    out
                    (let [ssz (* scale (/ smax (Math/pow 2.0 (double lvl))))
                          sp  (sp-of lvl scale)
-                         nx  (long (Math/ceil (/ (double H) sp)))
-                         ny  (long (Math/ceil (/ (double W) sp)))]
+                         phi (grid-phi lvl)
+                         cph (Math/cos phi) sph (Math/sin phi)
+                         ;; the rotated grid must cover the image rectangle in grid
+                         ;; coords: extents = the rect's projections onto the grid axes.
+                         nx  (long (inc (Math/ceil (/ (+ (* (double H) (Math/abs cph))
+                                                         (* (double W) (Math/abs sph))) sp))))
+                         ny  (long (inc (Math/ceil (/ (+ (* (double H) (Math/abs sph))
+                                                         (* (double W) (Math/abs cph))) sp))))]
                      (recur (dec lvl) (+ off (* nx ny))
                             (conj out {:lvl lvl :ssz ssz :sp sp :th (thresh lvl)
                                        :nx nx :ny ny :offset off
+                                       :cphi cph :sphi sph
                                        :segs (seg-count lvl) :stepf (step-frac lvl)
                                        :bendf (bend-frac lvl) :sharp? (sharp-level? lvl)})))))]
     {:nlev nlev :warp warp :scale scale :levels levels
@@ -229,7 +243,7 @@
         {:keys [warp levels]} (layer-params dmap detail size variation curvature count H W)]
     (persistent!
       (reduce
-        (fn [acc {:keys [lvl ssz sp th nx ny segs stepf bendf sharp?]}]
+        (fn [acc {:keys [lvl ssz sp th nx ny cphi sphi segs stepf bendf sharp?]}]
           (loop [i 0 acc acc]
             (if (>= i nx)
               acc
@@ -237,18 +251,27 @@
                 (loop [j 0 acc acc]
                   (if (>= j ny)
                     acc
-                    (let [cx (* (+ (double i) 0.5) sp)
-                          cy (* (+ (double j) 0.5) sp)
-                          ;; each level reads the map matched to ITS scale: the finest
-                          ;; levels use the sharp fine-band map so they land on (and
-                          ;; preserve) small structure the smoothed aggregate blurs away.
-                          dv (if sharp?
-                               (wavelet/sharp-at dmap cx cy)
-                               (wavelet/detail-at dmap cx cy))]
-                      (if (and (pos? (long lvl)) (< dv th))
-                        (recur (inc j) acc)          ; not detailed enough for this fine level
-                        (let [jx (* sp 0.45 (- (hash01 (+ (* i 137) lvl) j 3) 0.5))
-                              jy (* sp 0.45 (- (hash01 (+ (* i 149) lvl) j 7) 0.5))
+                    (let [;; rotated grid coords -> image coords about the image centre;
+                          ;; cells that land outside the image are discarded (the grid's
+                          ;; bounding box over-covers so the whole rect is still tiled).
+                          uu (- (* (+ (double i) 0.5) sp) (* 0.5 (double nx) sp))
+                          vv (- (* (+ (double j) 0.5) sp) (* 0.5 (double ny) sp))
+                          cx (+ (* 0.5 (double H)) (- (* (double cphi) uu) (* (double sphi) vv)))
+                          cy (+ (* 0.5 (double W)) (+ (* (double sphi) uu) (* (double cphi) vv)))]
+                      (if (or (< cx 0.0) (>= cx (double H)) (< cy 0.0) (>= cy (double W)))
+                        (recur (inc j) acc)
+                        (let [;; each level reads the map matched to ITS scale: the finest
+                              ;; levels use the sharp fine-band map so they land on (and
+                              ;; preserve) small structure the smoothed aggregate blurs away.
+                              dv (if sharp?
+                                   (wavelet/sharp-at dmap cx cy)
+                                   (wavelet/detail-at dmap cx cy))]
+                          (if (and (pos? (long lvl)) (< dv th))
+                            (recur (inc j) acc)      ; not detailed enough for this fine level
+                            (let [;; FULL-CELL jitter (±sp/2): the ±22% of the old 0.45 factor
+                                  ;; left cell centres visible as residual rows.
+                                  jx (* sp (- (hash01 (+ (* i 137) lvl) j 3) 0.5))
+                                  jy (* sp (- (hash01 (+ (* i 149) lvl) j 7) 0.5))
                               x  (+ cx jx) y (+ cy jy)
                               D  (deff dv)
                               ;; flat-region Perlin warp breaks any residual level lattice;
@@ -271,7 +294,7 @@
                                                        ssz D sn tn ds curvature hd wd
                                                        segs stepf bendf
                                                        (if (<= (long lvl) 1) 1.0 0.0))]
-                          (recur (inc j) (reduce conj! acc emitted)))))))))))
+                          (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         levels))))
 

@@ -142,13 +142,14 @@
                                 [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc cr cg cb)])
                               [0.0 0.0 0.0 0.0] splats)]
     ;; older: count=254 (pre placement-map); 497 (dabs); 516 (uniform 6-seg strokes);
-    ;; 488 (scale-relative strokes); 584 (6-level pyramid + blur-leaning colour).
-    ;; Now: E² in the sharp map (fine strokes hug edge cores) + 40% broad tone jitter.
-    (is (= 558 (count splats)))
-    (is (approx= 0.5  14295.314  sx) "Σ mean-x")
-    (is (approx= 0.5  16996.950  sy) "Σ mean-y")
-    (is (approx= 1.0  278647.178 sd) "Σ det(cov)")
-    (is (approx= 0.05 648.020    sc) "Σ colour")))
+    ;; 488 (scale-relative strokes); 584 (6-level pyramid + blur-leaning colour);
+    ;; 558 (E² sharp map + 40% broad tone jitter). Now: per-level ROTATED grids +
+    ;; full-cell jitter (the lattice-ripple fix).
+    (is (= 560 (count splats)))
+    (is (approx= 0.5  12823.700  sx) "Σ mean-x")
+    (is (approx= 0.5  17270.491  sy) "Σ mean-y")
+    (is (approx= 1.0  242651.628 sd) "Σ det(cov)")
+    (is (approx= 0.05 603.785    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments

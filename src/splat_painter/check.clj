@@ -84,6 +84,7 @@
     ;; placement (layered-means): threshold discard + jitter + Perlin warp gate
     (assert-contains gs-src "if (lvl > 0 && dv < th) return;" "gen threshold discard")
     (assert-contains gs-src "hash01(i*137 + lvl, j, 3)" "gen jitter x hash")
+    (assert-contains gs-src "float cx = 0.5 * float(u_H) + u_cphi[k]*uu - u_sphi[k]*vv;" "rotated level grid")
     (assert-contains gs-src "float aw = u_warp * (1.0 - D) * ssz;" "gen warp amplitude")
     ;; hash01 (uint wrap == CPU mod 2^32) + Perlin (permutation texture)
     (assert-contains gs-src "uint(a)*73856093u + uint(b)*19349663u + uint(salt)*83492791u" "gen hash01 constants")
