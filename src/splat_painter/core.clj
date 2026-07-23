@@ -79,14 +79,16 @@
 (defn- cur-count  [] (or (some-> (System/getenv "GA_PAINTER_COUNT")  Double/parseDouble long) @count-atom))
 (defn- cur-size   [] (or (some-> (System/getenv "GA_PAINTER_SIZE")   Double/parseDouble)      @size-atom))
 (defn- cur-detail [] (or (some-> (System/getenv "GA_PAINTER_DETAIL") Double/parseDouble)      @detail-atom))
+(defn- cur-stroke [] (or (some-> (System/getenv "GA_PAINTER_STROKE") Double/parseDouble)      @stroke-atom))
+(defn- cur-var    [] (or (some-> (System/getenv "GA_PAINTER_VAR")    Double/parseDouble)      @variation-atom))
 
 (defn- field-for-current-controls []
   (when-let [img @image-atom]
     (seed/splat-field img {:count     (cur-count)
                            :size      (cur-size)
-                           :stroke    @stroke-atom
+                           :stroke    (cur-stroke)
                            :detail    (cur-detail)
-                           :variation @variation-atom
+                           :variation (cur-var)
                            :curvature @curvature-atom
                            :contrast  @contrast-atom})))
 
@@ -199,7 +201,11 @@
             (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
             (gl/gl-uniform-3f (:u_bg locs) (double (nth bg 0)) (double (nth bg 1)) (double (nth bg 2)))
             (gl/gl-uniform-1f (:u_opacity locs) (double (or (:opacity fld) 1.0)))
-            (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
+            (gl/gl-uniform-1f (:u_hard_sharp locs)
+                          ;; short-stroke regimes render fine marks as SOFT dabs — hard
+                          ;; plateau-edged dots don't merge and bead contours into pearls
+                          (+ 1.0 (* (- (double @hardness-atom) 1.0)
+                                    (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
             (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)   ; large strokes = round gaussian (fixed)
             (gl/gl-uniform-1f (:u_sig_min locs) (double (or (:sig-min fld) 1.0)))
             (gl/gl-uniform-1f (:u_sig_max locs) (double (or (:sig-max fld) 1.0)))
@@ -280,8 +286,8 @@
     (let [v (ffi/read p :int 0)] (ffi/free p) v)))
 
 (defn- gpu-controls []
-  {:count (cur-count) :size (cur-size) :stroke @stroke-atom :detail (cur-detail)
-   :variation @variation-atom :curvature @curvature-atom :contrast @contrast-atom})
+  {:count (cur-count) :size (cur-size) :stroke (cur-stroke) :detail (cur-detail)
+   :variation (cur-var) :curvature @curvature-atom :contrast @contrast-atom})
 
 (defn- ensure-gpu!
   "Lazily build the GPU-generation objects (gen program, buffer-render program, perm
@@ -347,7 +353,11 @@
         (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
         (gl/gl-uniform-3f (:u_bg locs) 0.0 0.0 0.0)
         (gl/gl-uniform-1f (:u_opacity locs) 0.9)   ; fixed stroke alpha (slider removed)
-        (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
+        (gl/gl-uniform-1f (:u_hard_sharp locs)
+                          ;; short-stroke regimes render fine marks as SOFT dabs — hard
+                          ;; plateau-edged dots don't merge and bead contours into pearls
+                          (+ 1.0 (* (- (double @hardness-atom) 1.0)
+                                    (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
@@ -363,7 +373,11 @@
         (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
         (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
         (gl/gl-uniform-1f (:u_opacity locs) 0.9)   ; fixed stroke alpha (slider removed)
-        (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
+        (gl/gl-uniform-1f (:u_hard_sharp locs)
+                          ;; short-stroke regimes render fine marks as SOFT dabs — hard
+                          ;; plateau-edged dots don't merge and bead contours into pearls
+                          (+ 1.0 (* (- (double @hardness-atom) 1.0)
+                                    (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
@@ -534,7 +548,11 @@
         (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
         (gl/gl-uniform-3f (:u_bg locs) (double (nth bg 0)) (double (nth bg 1)) (double (nth bg 2)))
         (gl/gl-uniform-1f (:u_opacity locs) (double (or (:opacity fld) 1.0)))
-        (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
+        (gl/gl-uniform-1f (:u_hard_sharp locs)
+                          ;; short-stroke regimes render fine marks as SOFT dabs — hard
+                          ;; plateau-edged dots don't merge and bead contours into pearls
+                          (+ 1.0 (* (- (double @hardness-atom) 1.0)
+                                    (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)   ; large strokes = round gaussian (fixed)
         (gl/gl-uniform-1f (:u_sig_min locs) (double (or (:sig-min fld) 1.0)))
         (gl/gl-uniform-1f (:u_sig_max locs) (double (or (:sig-max fld) 1.0))))
@@ -581,7 +599,7 @@
    [slider "Detail"    0.0  1.0   0.02  detail-atom]
    [slider "Variation" 0.0  1.0   0.02  variation-atom]
    [slider "Curvature" 0.0  1.0   0.02  curvature-atom]
-   [slider "Stroke"    0.0  4.0   0.05  stroke-atom]
+   [slider "Stroke"    1.0  4.0   0.05  stroke-atom]   ; <1 degenerates chains to bead dots
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
    [slider "Hardness"  1.0  4.0   0.05  hardness-atom]])   ; detail-stroke crispness (big strokes stay round)
 

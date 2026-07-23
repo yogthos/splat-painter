@@ -102,6 +102,11 @@
   (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 (== l 4) 0.15 :else 0.1)))
 (defn- sharp-level? "finest levels threshold against the fine-band :sharp map" [lvl]
   (>= (long lvl) 2))
+(defn- stroke-len-frac
+  "The Stroke slider as stroke LENGTH: scales the chain step. 2.5 (default) = 1.0."
+  [stroke]
+  (+ 0.4 (* 0.24 (double stroke))))
+
 (defn- grid-phi
   "Each level's candidate grid is ROTATED by its own angle: axis-aligned grids put
    strokes in horizontal/vertical rows whose periodic overlap reads as a fine
@@ -121,8 +126,9 @@
    candidate-cell start (finest-first). :total = Σ nx·ny (candidate count the GPU
    draws as GL_POINTS). :warp = flat-region Perlin warp gain, :scale = the uniform
    size-up that keeps the field under budget."
-  [dmap detail size variation curvature count H W]
+  [dmap detail size variation curvature stroke count H W]
   (let [smax    (double size)
+        slen    (stroke-len-frac stroke)
         budget  (min (double splat-budget) (max 500.0 (double count)))
         warp    (* 0.95 (double curvature))
         area    (double (* (long H) (long W)))
@@ -135,7 +141,13 @@
         ;; COVERS the along-edge span, so the total segment count (and thus the budget scale —
         ;; the stroke WIDTH) stays what single dabs cost. Without this the ×segs budget term
         ;; would fatten every stroke and smear the detail the chains exist for.
-        overlap (fn [lvl] (if (zero? (long lvl)) 0.72 (* 1.25 (Math/sqrt (double (seg-count lvl))))))
+        ;; fine spacing also scales with √(stroke length): the seed grid assumes each
+        ;; chain spans ~segs·step of edge — short strokes (low Stroke) must pack
+        ;; denser or they render as sparse isolated pearls; long strokes space out.
+        ;; At the default Stroke (2.5) the factor is exactly 1.
+        overlap (fn [lvl] (if (zero? (long lvl))
+                            0.72
+                            (* 1.25 (Math/sqrt (* (double (seg-count lvl)) slen)))))
         sp-of   (fn [lvl scale] (* (overlap lvl) scale (/ smax (Math/pow 2.0 (double lvl)))))
         ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working
         ;; budget. Fine-level seeds emit segs(lvl) SEGMENTS each (a traced brush stroke),
@@ -192,11 +204,15 @@
    `hb` (1.0 for base + the broadest detail level) selects the HEAVY blur as the
    stroke's smooth colour source — broad strokes carry colour smoothed at their own
    scale, so smooth gradients (bokeh, sky) reproduce without stroke banding.
-   Returns [[x y size D sn tn alpha theta coherence hb]…]."
-  [nf lvl x y ssz D sn tn dirsign curvature hd wd segs stepf bendf hb]
+   Every segment carries the chain HEAD's position (hx,hy) as its colour-sample
+   point: ONE STROKE = ONE BRUSH-LOAD OF PAINT (per-segment colour sampling made
+   edge strokes alternate the two sides' colours as centres jittered across the
+   contour — a bright/dark bead necklace along every silhouette).
+   Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
+  [nf lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
-      [[x y ssz D sn tn 1.0 th coh hb]])
+      [[x y ssz D sn tn 1.0 th coh hb x y]])
     (let [kmax (dec (long segs))]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 acc []]
         (if (> k kmax)
@@ -205,7 +221,7 @@
                 t   (/ (double k) (double kmax))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
                 al  (- 1.0 (* 0.65 t t))                         ; …and the paint thins out
-                acc (conj acc [px py sz D sn tn al th coh hb])
+                acc (conj acc [px py sz D sn tn al th coh hb x y])
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
                 ;; broad strokes curl freely, fine marks stay faithful to the edge.
@@ -218,7 +234,9 @@
                       (if (neg? (+ (* dx0 dxp) (* dy0 dyp))) -1.0 1.0))
                 dx1 (* sgn dx0) dy1 (* sgn dy0)
                 dx (- (* cb dx1) (* sb dy1)) dy (+ (* sb dx1) (* cb dy1))
-                L  (* ssz (double stepf))]
+                ;; the Stroke slider is stroke LENGTH: it scales the chain step (the
+                ;; curve-following extent), not the segment ellipse. 2.5 (default) = 1.
+                L  (* ssz (double stepf) (stroke-len-frac stroke))]
             (recur (inc k)
                    (max 0.0 (min hd (+ px (* L dx))))
                    (max 0.0 (min wd (+ py (* L dy))))
@@ -237,10 +255,10 @@
    the surviving seed, then hand it to `stroke-segments` (base fill vs traced brush stroke).
    Emits [x y size D sn tn alpha theta coherence] per SEGMENT (D = effective detail 0..1;
    sn/tn = per-seed size/tone jitter hashes in [-0.5,0.5])."
-  [dmap nf detail size variation curvature count H W]
+  [dmap nf detail size variation curvature stroke count H W]
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
         deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
-        {:keys [warp levels]} (layer-params dmap detail size variation curvature count H W)]
+        {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke count H W)]
     (persistent!
       (reduce
         (fn [acc {:keys [lvl ssz sp th nx ny cphi sphi segs stepf bendf sharp?]}]
@@ -263,10 +281,13 @@
                         (let [;; each level reads the map matched to ITS scale: the finest
                               ;; levels use the sharp fine-band map so they land on (and
                               ;; preserve) small structure the smoothed aggregate blurs away.
+                              ;; The cutoff is DITHERED ±25% per seed — a hard threshold on
+                              ;; a map oscillating around it dashes contours into beads.
                               dv (if sharp?
                                    (wavelet/sharp-at dmap cx cy)
-                                   (wavelet/detail-at dmap cx cy))]
-                          (if (and (pos? (long lvl)) (< dv th))
+                                   (wavelet/detail-at dmap cx cy))
+                              thd (* th (+ 0.75 (* 0.5 (hash01 (+ (* i 43) lvl) j 19))))]
+                          (if (and (pos? (long lvl)) (< dv thd))
                             (recur (inc j) acc)      ; not detailed enough for this fine level
                             (let [;; FULL-CELL jitter (±sp/2): the ±22% of the old 0.45 factor
                                   ;; left cell centres visible as residual rows.
@@ -281,17 +302,30 @@
                                    (+ x (* aw (noise/noise2 (* 0.06 x) (* 0.06 y)))))
                               y2 (if (< aw 0.2) y
                                    (+ y (* aw (noise/noise2 (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))
-                              sn (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
-                              ;; broad flat-area strokes keep only 40% of the tone jitter —
-                              ;; full jitter on big smooth fills reads as streaks/banding.
-                              tn (* (if (<= (long lvl) 1) 0.4 1.0)
+                              sn0 (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
+                              ;; size jitter applies at SEED level to the whole chain —
+                              ;; segment size AND step together — so chains stay
+                              ;; self-overlapping at any Variation (per-segment size
+                              ;; jitter with a fixed step beaded strokes into dotted
+                              ;; pearls). Broad levels keep 40% (base coverage).
+                              ;; the shrink side is CLAMPED at 0.75: strokes jittered far
+                              ;; below their level's size land at the bottom of the
+                              ;; hardness ramp and render as isolated hard pearls along
+                              ;; edges — variety comes from growing, not vanishing.
+                              szf (max 0.75 (+ 1.0 (* variation sn0 (if (<= (long lvl) 1) 0.4 1.0))))
+                              ;; tone jitter is scale-relative: broad fills keep 40% (full
+                              ;; jitter banded smooth walls) and the FINEST marks keep 30%
+                              ;; (alternating-tone hard dabs bead edges into pearls) — the
+                              ;; visible mid-scale brushwork carries the painterly variety.
+                              tn (* (let [l (long lvl)]
+                                      (cond (<= l 1) 0.4 (>= l 4) 0.3 :else 1.0))
                                     (- (hash01 (+ (* i 37) lvl) j 13) 0.5))
                               ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
                               ;; keep centres in-bounds so no budget is wasted off-screen
                               ;; (edges stay covered by the splats' tails).
                               emitted (stroke-segments nf lvl
                                                        (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
-                                                       ssz D sn tn ds curvature hd wd
+                                                       (* ssz szf) D 0.0 tn ds curvature stroke hd wd
                                                        segs stepf bendf
                                                        (if (<= (long lvl) 1) 1.0 0.0))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
@@ -391,7 +425,9 @@
    (CPU: array lookups; GPU: texture fetches) — this fn is only the arithmetic, so both paths
    compute identical splats.
 
-     covariance: elongation e = 1 + stroke·coh·(0.25+0.75·dlev) tapers round→thin with detail;
+     covariance: elongation e = 1 + min(stroke,1.5)·coh·(0.25+0.75·dlev) — capped: stroke
+                 LENGTH comes from the segment chain (which follows the curve); unbounded
+                 segment elongation made rigid needles that ink dark contours across edges;
                  s0 = csz·(1 + variation·snoise) jitters size; Σ = R(θ)·diag((s0·√e)²,(s0/√e)²)·Rᵀ.
      colour:     t = 0.15 + 0.85·max(coherence,dlev) blends blur→raw — mostly the smooth
                  blur in flat regions (seamless gradients, no stroke banding), raw at
@@ -399,7 +435,7 @@
                  contrast about 0.5; tone = 1 + variation·0.3·tnoise."
   [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast]
   (let [coh (+ min-coh (* (- 1.0 min-coh) coherence))
-        e   (+ 1.0 (* stroke coh (+ 0.25 (* 0.75 (double dlev)))))
+        e   (+ 1.0 (* (min (double stroke) 1.5) coh (+ 0.25 (* 0.75 (double dlev)))))
         se  (Math/sqrt e)
         s0  (* csz (+ 1.0 (* variation 0.5 (* 2.0 snoise))))
         sx  (* s0 se)                 ; long axis along θ
@@ -438,14 +474,14 @@
         ^doubles blur-px (or (:blur image) pixels)
         ^doubles blurh-px (or (:blur-heavy image) blur-px)
         nf         (or (:noise-fields image) (prep-noise sfield))
-        segments   (layered-means dmap nf detail size variation curvature n height width)
+        segments   (layered-means dmap nf detail size variation curvature stroke n height width)
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
-                     (for [[x y csz dlev sn tn alpha theta coherence hb] segments
+                     (for [[x y csz dlev sn tn alpha theta coherence hb hx hy] segments
                            :let [blur-rgb (sample-arr (if (and hb (pos? (double hb))) blurh-px blur-px)
-                                                      width height x y)
-                                 raw-rgb  (sample-arr raw-px width height x y)]]
+                                                      width height hx hy)
+                                 raw-rgb  (sample-arr raw-px width height hx hy)]]
                        (assoc (splat-record x y csz dlev theta coherence sn tn
                                             blur-rgb raw-rgb stroke variation contrast)
                               :alpha (double alpha))))

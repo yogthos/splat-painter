@@ -107,7 +107,9 @@
   (let [img (gray-img 32 32 (fn [x _] (if (< x 16) 0.0 1.0)))
         {:keys [splats]} (seed/splat-field img {:count 256 :size 3.0 :stroke 3.0 :detail 0.0 :variation 0.0})
         ratios (map (fn [{[c00 _ _ c11] :cov}] (/ (max c00 c11) (max 1e-9 (min c00 c11)))) splats)]
-    (is (> (apply max ratios) 2.0))))   ; some splat elongated at the edge
+    ;; elongation is CAPPED (min(stroke,1.5)) — chains provide length — so the max
+    ;; per-splat axis ratio is bounded; still clearly anisotropic at the edge.
+    (is (> (apply max ratios) 1.5))))
 
 (deftest field-carries-opacity
   (is (= 0.42 (:opacity (seed/splat-field (solid 8 8 [1 1 1]) {:count 4 :opacity 0.42})))))
@@ -115,16 +117,17 @@
 (deftest splat-record-spec
   ;; the pure per-splat math the GPU generation shader must reproduce; pin it directly so the
   ;; CPU/GPU spec is guarded independently of placement + field sampling.
-  ;; coh=0.64, e=2 → √e; s0=5 (snoise 0); t=0.15+0.85·0.5=0.575 (blur-leaning — smooth away
-  ;; from edges); contrast 1, tone 1 (tnoise 0).
+  ;; coh=0.64; e = 1+min(2.5,1.5)·0.64·0.625 = 1.6 (elongation CAPPED — stroke length
+  ;; comes from the segment chain, not the ellipse); s0=5 (snoise 0);
+  ;; t=0.15+0.85·0.5=0.575 (blur-leaning); contrast 1, tone 1 (tnoise 0).
   (let [{:keys [mean cov color]}
         (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0)
         [c00 c01 _ c11] cov
         [cr cg cb] color]
     (is (= [10.0 20.0] mean))
-    (is (approx= 1e-6 50.0    c00))   ; sx² = (s0·√e)², e=2 ⇒ 50
+    (is (approx= 1e-6 40.0    c00))   ; sx² = s0²·e = 25·1.6
     (is (approx= 1e-6 0.0     c01))   ; θ=0 ⇒ axis-aligned
-    (is (approx= 1e-6 12.5    c11))   ; sy² = (s0/√e)² = 12.5
+    (is (approx= 1e-6 15.625  c11))   ; sy² = s0²/e = 25/1.6
     (is (approx= 1e-6 0.63    cr))    ; 0.4·0.425 + 0.8·0.575
     (is (approx= 1e-6 0.285   cg))
     (is (approx= 1e-6 0.2275  cb))))
@@ -143,13 +146,14 @@
                               [0.0 0.0 0.0 0.0] splats)]
     ;; older: count=254 (pre placement-map); 497 (dabs); 516 (uniform 6-seg strokes);
     ;; 488 (scale-relative strokes); 584 (6-level pyramid + blur-leaning colour);
-    ;; 558 (E² sharp map + 40% broad tone jitter). Now: per-level ROTATED grids +
-    ;; full-cell jitter (the lattice-ripple fix).
-    (is (= 560 (count splats)))
-    (is (approx= 0.5  12823.700  sx) "Σ mean-x")
-    (is (approx= 0.5  17270.491  sy) "Σ mean-y")
-    (is (approx= 1.0  242651.628 sd) "Σ det(cov)")
-    (is (approx= 0.05 603.785    sc) "Σ colour")))
+    ;; 558 (E² sharp map + 40% broad tone jitter); 560 (rotated grids + full-cell
+    ;; jitter; then capped elongation + stroke-length + seed-level size jitter).
+    ;; Now: dithered placement threshold + one-stroke-one-colour head sampling.
+    (is (= 567 (count splats)))
+    (is (approx= 0.5  13155.482  sx) "Σ mean-x")
+    (is (approx= 0.5  17513.244  sy) "Σ mean-y")
+    (is (approx= 1.0  223379.279 sd) "Σ det(cov)")
+    (is (approx= 0.05 602.864    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -172,7 +176,7 @@
                                             0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
         sfield (structure/analyze img)
         dmap   (wavelet/placement-map img sfield)
-        {:keys [nlev levels total warp]} (seed/layer-params dmap 0.6 6.0 0.5 0.5 4000 48 64)
+        {:keys [nlev levels total warp]} (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 4000 48 64)
         cells (map (fn [l] (* (:nx l) (:ny l))) levels)]
     (is (= 4 nlev) "detail 0.6 -> 1+round(3.0) = 4 levels")
     (is (= 4 (count levels)))
@@ -207,14 +211,14 @@
     (is (every? (fn [{[r g b] :color}] (and (<= 0.0 r 1.0) (<= 0.0 g 1.0) (<= 0.0 b 1.0))) splats))))
 
 (deftest detail-makes-more-splats-in-texture
-  ;; half-flat, half-checkerboard. detail>0 subdivides cells in the textured half,
-  ;; producing more splats than detail=0 (uniform grid, 1 splat per cell).
-  (let [img (gray-img 32 32 (fn [x y]
-                              (if (< x 16)
+  ;; half-flat, half-checkerboard. detail>0 adds fine levels in the textured half,
+  ;; producing more splats than detail=0 (base only). Budget must be realistic: at a
+  ;; tiny budget the level scale-up dominates and the comparison inverts.
+  (let [img (gray-img 48 48 (fn [x y]
+                              (if (< x 24)
                                 0.5                                       ; flat top half
-                                (if (odd? (+ (int x) (int y))) 0.0 1.0)))) ; checkerboard bottom half
-        ;; small min so the coarse base has room to subdivide in the textured half
-        cnt-detail-0 (count (:splats (seed/splat-field img {:count 100 :size 1.0 :detail 0.0 :variation 0.0})))
-        cnt-detail-1 (count (:splats (seed/splat-field img {:count 100 :size 1.0 :detail 1.0 :variation 0.0})))]
+                                (if (odd? (+ (int x) (int y))) 0.0 1.0)))) ; checkerboard
+        cnt-detail-0 (count (:splats (seed/splat-field img {:count 2000 :size 2.0 :detail 0.0 :variation 0.0})))
+        cnt-detail-1 (count (:splats (seed/splat-field img {:count 2000 :size 2.0 :detail 1.0 :variation 0.0})))]
     (is (> cnt-detail-1 cnt-detail-0)
         (str "detail=1 should produce more splats than detail=0: " cnt-detail-1 " vs " cnt-detail-0))))
