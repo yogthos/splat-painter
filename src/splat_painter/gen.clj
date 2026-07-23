@@ -126,6 +126,24 @@ float detailAt(float x, float y){
   vec4 t = texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0);
   return u_dmax > 0.0 ? min(1.0, t.r / u_dmax) : 0.0;
 }
+
+// BILINEAR orientation-field sample (mirrors seed/sample-fields exactly: same
+// continuous coord fx = x·dim/src, same floor/clamp). The texture stores cos2θ /
+// sin2θ / coherence — double-angle components interpolate undirected orientations
+// (0 ≡ π) smoothly, where nearest-sampled raw angles stair-step along contours.
+// Returns (theta, coherence).
+vec2 fieldsAt(float x, float y){
+  float fx = clamp(x * u_noiseDim.x / u_noiseSrc.x, 0.0, u_noiseDim.x - 1.0);
+  float fy = clamp(y * u_noiseDim.y / u_noiseSrc.y, 0.0, u_noiseDim.y - 1.0);
+  int i0 = int(fx); int i1 = min(i0 + 1, int(u_noiseDim.x) - 1); float wx = fx - float(i0);
+  int j0 = int(fy); int j1 = min(j0 + 1, int(u_noiseDim.y) - 1); float wy = fy - float(j0);
+  vec3 v00 = texelFetch(u_noiseTex, ivec2(j0, i0), 0).xyz;
+  vec3 v01 = texelFetch(u_noiseTex, ivec2(j1, i0), 0).xyz;
+  vec3 v10 = texelFetch(u_noiseTex, ivec2(j0, i1), 0).xyz;
+  vec3 v11 = texelFetch(u_noiseTex, ivec2(j1, i1), 0).xyz;
+  vec3 b = mix(mix(v00, v01, wy), mix(v10, v11, wy), wx);
+  return vec2(0.5 * atan(b.y, b.x), clamp(b.z, 0.0, 1.0));
+}
 vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (int trunc)
   int xi = clamp(int(x), 0, u_H - 1);
   int yi = clamp(int(y), 0, u_W - 1);
@@ -159,9 +177,12 @@ void main(){
   x2 = clamp(x2, 0.0, float(u_H - 1));
   y2 = clamp(y2, 0.0, float(u_W - 1));
 
-  // sample precomputed fields at the final centre
-  vec4  nf   = texelFetch(u_noiseTex, fieldTexel(x2, y2, u_noiseDim, u_noiseSrc), 0);
-  float theta = nf.x, coh0 = nf.y, snoise = nf.z, tnoise = nf.w;
+  // sample the orientation field (bilinear) at the final centre; per-seed size/tone
+  // jitter is hashed (independent per stroke), mirroring seed/layered-means.
+  vec2  tc    = fieldsAt(x2, y2);
+  float theta = tc.x, coh0 = tc.y;
+  float snoise = hash01(i*31 + lvl, j, 11) - 0.5;
+  float tnoise = hash01(i*37 + lvl, j, 13) - 0.5;
   vec3  blur = sampleRGB(u_blurTex, x2, y2);
   vec3  raw  = sampleRGB(u_rawTex,  x2, y2);
 
@@ -252,11 +273,12 @@ void main(){
         ^doubles dd (:detail dmap)
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
-        ^doubles th (:theta nf) ^doubles co (:coherence nf)
-        ^doubles sn (:snoise nf) ^doubles tn (:tnoise nf)
+        ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
         detail-t (new-tex) noise-t (new-tex) blur-t (new-tex) raw-t (new-tex)]
     (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) 0.0 0.0 1.0])))
-    (upload-rgba! noise-t  Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget th i) (aget co i) (aget sn i) (aget tn i)])))
+    ;; orientation as double-angle components (cos2θ, sin2θ) + coherence — the GS
+    ;; bilinearly blends the components (fieldsAt), never the raw angle.
+    (upload-rgba! noise-t  Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget c2 i) (aget s2 i) (aget co i) 0.0])))
     (upload-rgba! blur-t   W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blur b) (aget blur (+ b 1)) (aget blur (+ b 2)) 1.0]))))
     (upload-rgba! raw-t    W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget raw b) (aget raw (+ b 1)) (aget raw (+ b 2)) 1.0]))))
     {:detail detail-t :noise noise-t :blur blur-t :raw raw-t :perm perm-tex

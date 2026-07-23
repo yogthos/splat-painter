@@ -26,12 +26,7 @@
                 0 = none. default 0.5.
     :opacity    per-splat alpha 0..1, passed through into the returned field.
                 default 0.9.
-    :sharpness  deprecated/ignored — stroke colour now always leans toward the raw
-                (edge-preserving) pixel, fully at edges/detail. Kept for API compat.
-                was: 0..1, colour blend toward the raw (edge-preserving) pixel at
-                edges. 0 = always the smooth blur. default 0.7.
     :contrast   0.5..2.0 per-channel contrast about 0.5. 1.0 = no change.
-    :palette    max colors for diversity quantization; 0 (or <2) = off. default 0.
     :background additive base; a number (gray) or [r g b]; defaults to black
 
   An image is {:height :width :pixels (flat H*W*3 double-array 0..1) :channels 3}.
@@ -40,8 +35,7 @@
   (:require [splat-painter.gaussian :as gauss]
             [splat-painter.structure :as structure]
             [splat-painter.wavelet :as wavelet]
-            [splat-painter.noise :as noise]
-            [splat-painter.palette :as p]))
+            [splat-painter.noise :as noise]))
 
 ;; Baseline elongation floor: even a flat region (coherence 0) elongates a little so
 ;; the field reads as brushwork, but keep it modest — too much makes flat areas a
@@ -148,8 +142,9 @@
    Per-level geometry (ssz/sp/th/nx/ny, budget scale, finest-first order) comes from
    `layer-params` — the same spec the GPU generation pass consumes, so the two paths place
    identical cells. Here we walk it on the CPU: threshold-test each cell, jitter + Perlin-warp
-   the survivors, and emit [x y stdev D] (D = effective detail 0..1). `variation`/`curvature`
-   feed the warp; detail strokes (D≈1) stay put → faithful edges."
+   the survivors, and emit [x y stdev D sn tn] (D = effective detail 0..1; sn/tn = the seed's
+   size/tone jitters in [-0.5,0.5], per-seed hash so no two strokes match). `variation`/
+   `curvature` feed the warp; detail strokes (D≈1) stay put → faithful edges."
   [dmap detail size variation curvature count H W]
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
         deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
@@ -183,7 +178,9 @@
                           ;; keep centres in-bounds so no budget is wasted off-screen
                           ;; (edges stay covered by the splats' tails).
                           (recur (inc j)
-                            (conj! acc [(max 0.0 (min hd x2)) (max 0.0 (min wd y2)) ssz D])))))))))))
+                            (conj! acc [(max 0.0 (min hd x2)) (max 0.0 (min wd y2)) ssz D
+                                        (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
+                                        (- (hash01 (+ (* i 37) lvl) j 13) 0.5)])))))))))))
         (transient [])
         levels))))
 
@@ -193,19 +190,24 @@
 ;; once and sampling (a cheap aget) per splat is visually identical and far faster.
 
 (defn prep-noise
-  "Precompute, at `sfield`'s tensor resolution, everything the per-splat loop needs
-   that depends only on POSITION: the final blended stroke orientation (edge-seeded
-   flow + Perlin fill + sharp edge), the coherence, and the size/tone Perlin fields.
-   Folding the orientation blends (2 atan2/cos/sin each) into this one-time pass makes
-   the hot loop a handful of array samples. Returns
-   {:h :w :src-h :src-w :theta :coherence :snoise :tnoise}."
+  "Precompute, at `sfield`'s tensor resolution, the per-POSITION stroke orientation
+   field: the final blended orientation (edge-seeded flow + Perlin fill + sharp edge)
+   stored as its DOUBLE-ANGLE components cos(2θ)/sin(2θ) — the representation that
+   interpolates correctly for undirected orientations (0 ≡ π) — plus the coherence.
+   Storing components instead of the raw angle lets sample-fields (and the GPU's
+   texture fetch) blend BILINEARLY between texels: nearest-neighbour sampling of a
+   coarse angle grid stair-steps stroke orientation along every contour, which reads
+   as a regular sawtooth/zipper in the render. Per-stroke size/tone jitter is NOT a
+   field any more — it's per-seed hash01 in layered-means (jitter should be
+   independent per stroke, not spatially smooth). Returns
+   {:h :w :src-h :src-w :c2 :s2 :coherence}."
   [sfield]
   (let [H (:h sfield) W (:w sfield)
         srch (double (or (:src-h sfield) H)) srcw (double (or (:src-w sfield) W))
         n (* H W) fs 0.004
         ^doubles s-theta (:theta sfield) ^doubles s-coh (:coherence sfield)
         ^doubles f-theta (:flow-theta sfield) ^doubles f-str (:flow-str sfield)
-        ftheta (double-array n) cohr (double-array n) sn (double-array n) tn (double-array n)]
+        c2 (double-array n) s2 (double-array n) cohr (double-array n)]
     (dotimes [xi H]
       (dotimes [yi W]
         (let [idx (+ (* xi W) yi)
@@ -216,23 +218,33 @@
               coherence (aget s-coh idx)
               flow-base (blend-angle flow-t (aget f-theta idx) (min 1.0 (* 2.5 (aget f-str idx))))
               theta (blend-angle flow-base (aget s-theta idx) coherence)]
-          (aset ftheta idx theta)
-          (aset cohr idx coherence)
-          (aset sn idx (- (noise/noise2 (+ (* x fs) 613.0) (+ (* y fs) 227.0)) 0.5))
-          (aset tn idx (- (noise/noise2 (+ (* x fs) 941.0) (+ (* y fs) 373.0)) 0.5)))))
+          (aset c2 idx (Math/cos (* 2.0 theta)))
+          (aset s2 idx (Math/sin (* 2.0 theta)))
+          (aset cohr idx coherence))))
     {:h H :w W :src-h (:src-h sfield) :src-w (:src-w sfield)
-     :theta ftheta :coherence cohr :snoise sn :tnoise tn}))
+     :c2 c2 :s2 s2 :coherence cohr}))
 
 (defn- sample-fields
-  "[theta coherence snoise tnoise] from a prep-noise field at full-image (x,y)."
+  "[theta coherence] at full-image (x,y), BILINEARLY interpolated from the prep-noise
+   grid. The orientation blends in double-angle space (c2/s2 components) so 0 ≡ π is
+   seamless; θ = ½·atan2(s2,c2). The GPU generation shader implements this exact
+   formula (same continuous coord fx = x·H/srch, same floor/clamp), so both paths
+   compute identical fields."
   [nf x y]
-  (let [H (:h nf) W (:w nf)
-        srch (long (or (:src-h nf) H)) srcw (long (or (:src-w nf) W))
-        xi (min (dec H) (max 0 (long (Math/round (* (double x) (/ (double H) srch))))))
-        yi (min (dec W) (max 0 (long (Math/round (* (double y) (/ (double W) srcw))))))
-        idx (+ (* xi W) yi)]
-    [(aget ^doubles (:theta nf) idx) (aget ^doubles (:coherence nf) idx)
-     (aget ^doubles (:snoise nf) idx) (aget ^doubles (:tnoise nf) idx)]))
+  (let [H (long (:h nf)) W (long (:w nf))
+        srch (double (or (:src-h nf) H)) srcw (double (or (:src-w nf) W))
+        ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles coh (:coherence nf)
+        fx (min (double (dec H)) (max 0.0 (* (double x) (/ (double H) srch))))
+        fy (min (double (dec W)) (max 0.0 (* (double y) (/ (double W) srcw))))
+        i0 (long fx) i1 (min (dec H) (inc i0)) wx (- fx (double i0))
+        j0 (long fy) j1 (min (dec W) (inc j0)) wy (- fy (double j0))
+        bl (fn [^doubles a]
+             (let [v00 (aget a (+ (* i0 W) j0)) v01 (aget a (+ (* i0 W) j1))
+                   v10 (aget a (+ (* i1 W) j0)) v11 (aget a (+ (* i1 W) j1))]
+               (+ (* (- 1.0 wx) (+ (* (- 1.0 wy) v00) (* wy v01)))
+                  (* wx         (+ (* (- 1.0 wy) v10) (* wy v11))))))]
+    [(* 0.5 (Math/atan2 (bl s2) (bl c2)))
+     (min 1.0 (max 0.0 (bl coh)))]))
 
 ;; --- helpers (unchanged) ----------------------------------------------------
 
@@ -294,9 +306,9 @@
   "Build a splat field from `image` (see ns doc) and `controls` (see ns doc).
    Returns {:splats […] :background [r g b] :height :width :opacity}."
   [{:keys [height width pixels] :as image} controls]
-  (let [{:keys [count size stroke detail variation curvature opacity contrast palette background]
+  (let [{:keys [count size stroke detail variation curvature opacity contrast background]
          :or   {count 6000 size 3.0 stroke 2.0 detail 0.6 variation 0.5 curvature 0.5
-                opacity 0.9 contrast 1.0 palette 0 background 0.0}} controls
+                opacity 0.9 contrast 1.0 background 0.0}} controls
         n          (long (or count 6000))
         size       (double (or size 3.0))
         stroke     (double stroke)
@@ -304,28 +316,21 @@
         variation  (double variation)
         curvature  (double curvature)
         contrast   (double contrast)
-        palette-n  (int (or palette 0))
         sfield     (or (:structure image) (structure/analyze image))
         dmap       (or (:detail image)    (wavelet/placement-map image sfield))
         ^doubles raw-px  pixels
         ^doubles blur-px (or (:blur image) pixels)
-        gmax-sqrt  (Math/sqrt (max (:gmax sfield) 0.0))
         nf         (or (:noise-fields image) (prep-noise sfield))
         means      (layered-means dmap detail size variation curvature n height width)
         ;; sample the per-position fields (CPU array lookups; the GPU path fetches the same
         ;; from field textures) then hand off to the pure `splat-record` math shared with GPU.
         splats     (vec
-                     (for [[x y csz dlev] means
-                           :let [[theta coherence snoise tnoise] (sample-fields nf x y)
+                     (for [[x y csz dlev sn tn] means
+                           :let [[theta coherence] (sample-fields nf x y)
                                  blur-rgb (sample-arr blur-px width height x y)
                                  raw-rgb  (sample-arr raw-px width height x y)]]
-                       (splat-record x y csz dlev theta coherence snoise tnoise
+                       (splat-record x y csz dlev theta coherence sn tn
                                      blur-rgb raw-rgb stroke variation contrast)))
-        splats (if (>= palette-n 2)
-                 (let [cols (map :color splats)
-                       q    (p/quantize cols palette-n)]
-                   (mapv (fn [s c] (assoc s :color c)) splats q))
-                 splats)
         ;; PAINT ORDER needs NO sort: `layered-means` emits finest level first, so the field is
         ;; already small→large. The shader composites front-to-back (index 0 = topmost), so the
         ;; small crisp detail strokes sit at the front over the big soft underpainting. Dropping

@@ -140,12 +140,13 @@
         [sx sy sd sc] (reduce (fn [[sx sy sd sc] {[mx my] :mean [c00 c01 _ c11] :cov [cr cg cb] :color}]
                                 [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc cr cg cb)])
                               [0.0 0.0 0.0 0.0] splats)]
-    ;; old: count=254 sx=6438.922 sy=8095.514 sd=210455.049 sc=308.503
+    ;; older: count=254 sx=6438.922 sy=8095.514 sd=210455.049 sc=308.503 (pre placement-map)
+    ;; old:   count=497 sd=224608.308 sc=540.778 (nearest theta + Perlin size/tone fields)
     (is (= 497 (count splats)))
     (is (approx= 0.05 12432.697  sx) "Σ mean-x")
     (is (approx= 0.05 16448.738  sy) "Σ mean-y")
-    (is (approx= 0.5  224608.308 sd) "Σ det(cov)")
-    (is (approx= 0.05 540.778    sc) "Σ colour")))
+    (is (approx= 0.5  285693.820 sd) "Σ det(cov)")
+    (is (approx= 0.05 536.450    sc) "Σ colour")))
 
 (deftest layer-params-shared-spec
   ;; layer-params is the per-level placement spec BOTH the CPU loop and the GPU generation

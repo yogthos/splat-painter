@@ -32,8 +32,6 @@
 (defonce detail-atom   (r/atom 0.6))    ; how many fine detail levels are added
 (defonce variation-atom (r/atom 0.5))   ; per-stroke size/tone jitter
 (defonce curvature-atom (r/atom 0.5))   ; Perlin warp — how much strokes bend/curve off-grid
-(defonce opacity-atom  (r/atom 0.9))
-(defonce palette-atom  (r/atom 0.0))
 (defonce contrast-atom (r/atom 1.0))
 (defonce hardness-atom (r/atom 1.7))   ; edge crispness of detail strokes; large strokes always
                                        ; soften to a round gaussian (u_hard_soft fixed at 1.0)
@@ -89,8 +87,6 @@
                            :detail    @detail-atom
                            :variation @variation-atom
                            :curvature @curvature-atom
-                           :opacity   @opacity-atom
-                           :palette   (int @palette-atom)
                            :contrast  @contrast-atom})))
 
 (defn- request-render! []
@@ -344,7 +340,7 @@
         (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
         (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
         (gl/gl-uniform-3f (:u_bg locs) 0.0 0.0 0.0)
-        (gl/gl-uniform-1f (:u_opacity locs) (double @opacity-atom))
+        (gl/gl-uniform-1f (:u_opacity locs) 0.9)   ; fixed stroke alpha (slider removed)
         (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
@@ -360,7 +356,7 @@
         (gl/gl-uniform-1i (:u_count locs) (int n))
         (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
         (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
-        (gl/gl-uniform-1f (:u_opacity locs) (double @opacity-atom))
+        (gl/gl-uniform-1f (:u_opacity locs) 0.9)   ; fixed stroke alpha (slider removed)
         (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
@@ -555,8 +551,6 @@
    [slider "Variation" 0.0  1.0   0.02  variation-atom]
    [slider "Curvature" 0.0  1.0   0.02  curvature-atom]
    [slider "Stroke"    0.0  4.0   0.05  stroke-atom]
-   [slider "Opacity"   0.1  1.0   0.02  opacity-atom]
-   [slider "Palette"   0    64    1     palette-atom]
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
    [slider "Hardness"  1.0  4.0   0.05  hardness-atom]])   ; detail-stroke crispness (big strokes stay round)
 

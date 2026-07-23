@@ -6,10 +6,8 @@
             [splat-painter.seed-test]
             [splat-painter.image-test]
             [splat-painter.structure-test]
-            [splat-painter.palette-test]
             [splat-painter.noise-test]
-            [splat-painter.wavelet-test]
-            [splat-painter.grid-test]))
+            [splat-painter.wavelet-test]))
 
 (defmethod t/report :error [m]
   (t/with-test-out
@@ -26,10 +24,8 @@
                              'splat-painter.seed-test
                              'splat-painter.image-test
                              'splat-painter.structure-test
-                             'splat-painter.palette-test
                              'splat-painter.noise-test
-                             'splat-painter.wavelet-test
-                             'splat-painter.grid-test)
+                             'splat-painter.wavelet-test)
         failed (+ (:fail results 0) (:error results 0))]
     (println (format "\n%d tests, %d passed, %d failed"
                      (:test results 0) (:pass results 0) failed))
