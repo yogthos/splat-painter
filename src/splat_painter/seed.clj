@@ -463,18 +463,21 @@
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
         (if (or (> k kmax) (< fade 0.15))
           acc
-          (let [;; the stroke FADES when the canvas stops matching its brush-load —
-                ;; a brush running dry — instead of breaking dead: abrupt ends left
-                ;; broken dashes with gaps around busy detail (eyes, fur ticking).
-                ;; liner strokes (lvl≥4) tolerate a little more drift (0.3): the
-                ;; on-ridge blur shifts gradually along a lit contour, and killing
-                ;; the line for that stitches the edge into dashes. A real colour
-                ;; boundary still stops the stroke dead in two segments.
-                fade (if (and (pos? k)
-                              (let [[br bg bb] (sample-arr blur-px iw ih px py)]
-                                (> (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))
-                                   (if (>= (long lvl) 4) 0.3 0.22))))
-                       (* fade 0.4)
+          (let [;; TWO-TIER dry-out. Gradual drift DRIES the brush (×0.4) — abrupt
+                ;; ends left broken dashes, and liner strokes (lvl≥4) tolerate a
+                ;; little more drift (0.3) since on-ridge blur shifts along a lit
+                ;; contour. But a LARGE mismatch (>0.45) means the stroke has
+                ;; EXITED its colour region — a chain tangentially escaping a
+                ;; curved silhouette would paint its dark brush-load into the
+                ;; background (the halo of black lines hovering over hair) — so
+                ;; the painter LIFTS the brush: fade 0, and the guard below stops
+                ;; the chain BEFORE this segment is emitted.
+                fade (if (pos? k)
+                       (let [[br bg bb] (sample-arr blur-px iw ih px py)
+                             dmx (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))]
+                         (cond (> dmx 0.45) 0.0
+                               (> dmx (if (>= (long lvl) 4) 0.3 0.22)) (* fade 0.4)
+                               :else fade))
                        fade)
                 [th coh] (sample-fields nf px py)
                 ;; follow the line only while there IS a line: when local coherence
@@ -486,8 +489,10 @@
                 fade (if (and (pos? k) (>= (long lvl) 4) (< coh 0.35)
                               (< (wavelet/edge-at dmap px py) 0.5))
                        (* fade 0.5)
-                       fade)
-                t   (/ (double k) (double kmax))
+                       fade)]
+           (if (< fade 0.15)
+            acc                                     ; brush lifted — emit nothing
+            (let [t   (/ (double k) (double kmax))
                 ;; IMPASTO body: ON a strong edge the fine liner strokes carry nearly
                 ;; full paint — the contour is defined by opaque thin lines whose soft
                 ;; shoulders blend, not by translucent glazes that let the mixed-colour
@@ -549,7 +554,7 @@
                               [nx1 ny1]
                               [(max 0.0 (min hd (+ nx1 (* sidem 0.55 ssz (- dy)))))
                                (max 0.0 (min wd (+ ny1 (* sidem 0.55 ssz dx))))])]
-              (recur (inc k) nx2 ny2 dx dy fade acc))))))))
+              (recur (inc k) nx2 ny2 dx dy fade acc))))))))))
 
 (defn- layered-means
   "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
