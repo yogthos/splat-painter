@@ -13,11 +13,12 @@
                          "libgdk_pixbuf-2.0.0.dylib"
                          "libgdk_pixbuf-2.0.dylib"]
                 :linux  ["libgdk_pixbuf-2.0.so.0" "libgdk_pixbuf-2.0.so"]}]
- :aliases {:probe {:main-opts ["-m" "splat-painter.probe"]}
-           :run   {:main-opts ["-m" "splat-painter.core"]}
-           :check {:main-opts ["-m" "splat-painter.check"]}
-           :prof  {:main-opts ["-m" "splat-painter.prof"]}
-           :preview {:main-opts ["-m" "splat-painter.preview"]}
+ ;; dev/debug entry points (check, prof, preview, tf-smoke, the test runner) live
+ ;; under test/ — only the app itself ships from src/.
+ :aliases {:run   {:main-opts ["-m" "splat-painter.core"]}
+           :check {:extra-paths ["test"] :main-opts ["-m" "splat-painter.check"]}
+           :prof  {:extra-paths ["test"] :main-opts ["-m" "splat-painter.prof"]}
+           :preview {:extra-paths ["test"] :main-opts ["-m" "splat-painter.preview"]}
            :test  {:extra-paths ["test"] :main-opts ["-m" "splat-painter.test-runner"]}}
 
  :tasks {run   "joltc -M:run"

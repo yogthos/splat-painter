@@ -14,3 +14,9 @@ DrawingWithGaussians/
 .dolt/
 *.db
 .beads-credential-key
+
+# local-only: issue tracker state, test images, rendered outputs, notes
+.beads/
+img/
+output/
+blog.md
