@@ -69,7 +69,7 @@
 ;; hard ceiling = the shader's MAX_SPLATS. The Splats control sets the working budget up to
 ;; this; more splats = smaller strokes = more preserved detail (a detailed oil painting) at a
 ;; higher render cost, fewer = larger strokes = looser/abstract and faster.
-(def ^:private splat-budget 48000)
+(def ^:private splat-budget 120000)
 
 (defn- detail-fraction
   "Fraction of the map array under `key` (:detail aggregate or :sharp fine-band)
@@ -95,11 +95,11 @@
 ;; finest levels read the SHARP fine-band detail map (wavelet/sharp-at), so they
 ;; land on (and preserve) text/eye-scale structure the smoothed aggregate blurs.
 (defn- seg-count "segments per stroke at placement level" [lvl]
-  (let [l (long lvl)] (cond (zero? l) 1 (== l 1) 6 (== l 2) 4 :else 3)))
+  (let [l (long lvl)] (cond (zero? l) 1 (== l 1) 6 (== l 2) 4 (== l 3) 3 :else 2)))
 (defn- step-frac "step length as a fraction of the level stdev" [lvl]
-  (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 :else 0.75)))
+  (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 :else 0.6)))
 (defn- bend-frac "how much of the Curvature bend this level keeps" [lvl]
-  (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 :else 0.3)))
+  (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 :else 0.15)))
 (defn- sharp-level? "finest levels threshold against the fine-band :sharp map" [lvl]
   (>= (long lvl) 2))
 
@@ -119,7 +119,7 @@
         budget  (min (double splat-budget) (max 500.0 (double count)))
         warp    (* 0.95 (double curvature))
         area    (double (* (long H) (long W)))
-        nlev    (long (max 1 (min 4 (inc (Math/round (* (double detail) 3.0))))))
+        nlev    (long (max 1 (min 5 (inc (Math/round (* (double detail) 4.0))))))
         thresh  (fn [lvl] (if (zero? (long lvl)) -1.0 (min 0.9 (* 0.26 (double lvl)))))
         ;; base layer overlaps heavily (spacing 0.72×stdev ⇒ full coverage); finer layers are
         ;; sparser accents (the base fills behind them, so gaps between fine strokes don't
@@ -169,7 +169,7 @@
 (defn- stroke-segments
   "Emit one seed's splat segments — THE SHARED BRUSH-STROKE SPEC the GPU generation
    shader mirrors. A base seed (lvl 0) is a single full-alpha fill splat. A fine seed
-   TRACES A BRUSH STROKE: `stroke-segs` segments stepped along the orientation field
+   TRACES A BRUSH STROKE: `segs` segments stepped along the orientation field
    (the edge tangent — structure/tensor-eigen's minor eigenvector), each step
    direction kept sign-continuous (the field is undirected) and bent by smooth Perlin
    noise scaled by `curvature`, with size AND alpha tapering toward the tail — a brush

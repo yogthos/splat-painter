@@ -26,7 +26,7 @@
             [jolt.ffi       :as ffi]))
 
 ;; --- reactive controls (the panel re-renders on change) ----------------------
-(defonce count-atom    (r/atom 14000))  ; splat budget (max strokes) — higher = more detail, slower
+(defonce count-atom    (r/atom 24000))  ; splat budget (max strokes) — higher = more detail, slower
 (defonce size-atom     (r/atom 16.0))   ; base (coarsest) splat stdev; finer levels halve it
 (defonce stroke-atom   (r/atom 2.5))
 (defonce detail-atom   (r/atom 0.6))    ; how many fine detail levels are added
@@ -76,15 +76,16 @@
 ;; request-render!, and on-render rebuilds the field from the current atoms — so
 ;; you tune the sliders, then hit Render to see the result.
 ;; test/headless overrides so a fixed count/size can be forced without the sliders
-(defn- cur-count [] (or (some-> (System/getenv "GA_PAINTER_COUNT") Double/parseDouble long) @count-atom))
-(defn- cur-size  [] (or (some-> (System/getenv "GA_PAINTER_SIZE")  Double/parseDouble)      @size-atom))
+(defn- cur-count  [] (or (some-> (System/getenv "GA_PAINTER_COUNT")  Double/parseDouble long) @count-atom))
+(defn- cur-size   [] (or (some-> (System/getenv "GA_PAINTER_SIZE")   Double/parseDouble)      @size-atom))
+(defn- cur-detail [] (or (some-> (System/getenv "GA_PAINTER_DETAIL") Double/parseDouble)      @detail-atom))
 
 (defn- field-for-current-controls []
   (when-let [img @image-atom]
     (seed/splat-field img {:count     (cur-count)
                            :size      (cur-size)
                            :stroke    @stroke-atom
-                           :detail    @detail-atom
+                           :detail    (cur-detail)
                            :variation @variation-atom
                            :curvature @curvature-atom
                            :contrast  @contrast-atom})))
@@ -274,7 +275,7 @@
     (let [v (ffi/read p :int 0)] (ffi/free p) v)))
 
 (defn- gpu-controls []
-  {:count (cur-count) :size (cur-size) :stroke @stroke-atom :detail @detail-atom
+  {:count (cur-count) :size (cur-size) :stroke @stroke-atom :detail (cur-detail)
    :variation @variation-atom :curvature @curvature-atom :contrast @contrast-atom})
 
 (defn- ensure-gpu!
@@ -391,7 +392,30 @@
     (println (format "  Σmean-y  GPU %.1f  CPU %.1f" gy cy))
     (println (format "  Σdet     GPU %.1f  CPU %.1f" gd cd))
     (println (format "  Σcolour  GPU %.2f  CPU %.2f" gc cc))
-    (println (format "  Σalpha   GPU %.2f  CPU %.2f" ga ca))))
+    (println (format "  Σalpha   GPU %.2f  CPU %.2f" ga ca))
+    ;; temp diagnostic: locate the first record where the two fields diverge
+    (when (System/getenv "GA_PAINTER_GPU_DIAG")
+      (let [m (min (count gpu) (count cpu))
+            di (loop [i 0]
+                 (if (>= i m)
+                   nil
+                   (let [[gx1 gy1] (:mean (nth gpu i)) [cx1 cy1] (:mean (nth cpu i))]
+                     (if (or (> (Math/abs (- gx1 cx1)) 0.5) (> (Math/abs (- gy1 cy1)) 0.5))
+                       i (recur (inc i))))))]
+        (println "  first-divergence idx:" di "of" m)
+        (when (and (nil? di) (< (count gpu) (count cpu)))
+          (let [g (nth gpu (dec (count gpu))) c (nth cpu (count gpu))
+                sig (fn [{[c00 c01 _ c11] :cov}] (Math/sqrt (Math/sqrt (max 1e-8 (- (* c00 c11) (* c01 c01))))))]
+            (println (format "  last GPU rec: mean %s sig %.2f | first MISSING cpu rec: mean %s sig %.2f"
+                             (pr-str (mapv #(format "%.0f" (double %)) (:mean g))) (sig g)
+                             (pr-str (mapv #(format "%.0f" (double %)) (:mean c))) (sig c)))))
+        (when di
+          (doseq [k (range (max 0 (- di 1)) (min m (+ di 3)))]
+            (println (format "   [%d] GPU %s a=%.2f | CPU %s a=%.2f" k
+                             (pr-str (mapv #(format "%.1f" (double %)) (:mean (nth gpu k))))
+                             (double (:alpha (nth gpu k)))
+                             (pr-str (mapv #(format "%.1f" (double %)) (:mean (nth cpu k))))
+                             (double (or (:alpha (nth cpu k)) 1.0))))))))))
 
 (defn- save-rgba-jolt! [buf iw ih path]
   ;; buf = iw*ih*4 RGBA bytes, bottom-up (glReadPixels); write top-down via the native
@@ -547,7 +571,7 @@
    [:label {:label @status-atom :xalign 0.0 :halign :start
             :max-width-chars 22 :ellipsize :end}]
    [:separator {}]
-   [slider "Splats"    1000 48000 500   count-atom]     ; budget: higher = more detail, slower
+   [slider "Splats"    1000 120000 1000 count-atom]     ; budget: higher = more detail, slower
    [slider "Size"      6    50    0.5   size-atom]
    [slider "Detail"    0.0  1.0   0.02  detail-atom]
    [slider "Variation" 0.0  1.0   0.02  variation-atom]
