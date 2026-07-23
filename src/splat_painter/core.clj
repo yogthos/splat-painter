@@ -296,6 +296,7 @@
                                    (* shader/max-splats 8 (ffi/sizeof :float)) ffi/null gl/GL-DYNAMIC-COPY)
                 {:gen     (gen/build-gen-program)
                  :render  (shader/build-program-buf)
+                 :quad    (shader/build-program-quad)
                  :perm    (gen/upload-perm!)
                  :tf-buf  tf-buf
                  :query   (gl/gen-one gl/gl-gen-queries)
@@ -311,14 +312,15 @@
 (defn- gpu-draw!
   "Generate the splat field on the GPU and composite it into the currently-bound
    framebuffer. `vw/vh` = framebuffer viewport pixels (letterbox target), `iw/ih` =
-   image pixels. Returns {:count survivors :total candidates :n rendered}."
+   image pixels. Renders one blended quad per splat (Σ quad-areas work — no
+   pixels×splats loop, no GPU-watchdog hang at high counts); set
+   GA_PAINTER_LOOP_RENDER to force the old per-pixel loop shader for A/B compares.
+   Returns {:count survivors :total candidates :n rendered}."
   [area vw vh iw ih]
-  (let [{:keys [gen render fields tf-buf query gen-vao buf-tex]} (ensure-gpu! area)
-        t0 (System/nanoTime)
+  (let [{:keys [gen render quad fields tf-buf query gen-vao buf-tex]} (ensure-gpu! area)
         {:keys [count total sig-min sig-max]}
         (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw})
-        n    (min count shader/max-splats)
-        locs (:locs render)]
+        n (min count shader/max-splats)]
     (gl/gl-finish)   ; make the transform-feedback writes visible to the texelFetch below
     (when (System/getenv "GA_PAINTER_GPU_TIME")
       (dotimes [_ 3] (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw}) (gl/gl-finish))
@@ -326,24 +328,51 @@
         (dotimes [_ reps] (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw}) (gl/gl-finish))
         (println (format "gpu-gen: %d->%d  %.1f ms/gen (warm avg of %d)" total count
                          (/ (- (System/nanoTime) t1) 1e6 reps) reps))))
-    (gl/gl-clear-color 0.05 0.06 0.09 1.0)
+    ;; the background fills the whole pane (the loop shader painted u_bg outside the
+    ;; image rect too), so clear to it, then scissor the splat quads to the image rect
+    ;; so stroke tails can't bleed into the letterbox bars.
+    (gl/gl-clear-color 0.0 0.0 0.0 1.0)
     (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
-    (gl/gl-use-program (:program render))
     (gl/gl-active-texture gl/GL-TEXTURE0)
     (gl/gl-bind-texture gl/GL-TEXTURE-BUFFER buf-tex)
     (gl/gl-tex-buffer gl/GL-TEXTURE-BUFFER gl/GL-RGBA32F tf-buf)
-    (gl/gl-uniform-1i (:u_splats locs) 0)
-    (gl/gl-uniform-1i (:u_count locs) (int n))
-    (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
-    (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
-    (gl/gl-uniform-3f (:u_bg locs) 0.0 0.0 0.0)
-    (gl/gl-uniform-1f (:u_opacity locs) (double @opacity-atom))
-    (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
-    (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
-    (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
-    (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
-    (gl/gl-bind-vertex-array (:vao (get @gl-state area)))
-    (gl/gl-draw-arrays gl/GL-TRIANGLE-STRIP 0 4)
+    (if (System/getenv "GA_PAINTER_LOOP_RENDER")
+      (let [locs (:locs render)]
+        (gl/gl-use-program (:program render))
+        (gl/gl-uniform-1i (:u_splats locs) 0)
+        (gl/gl-uniform-1i (:u_count locs) (int n))
+        (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
+        (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
+        (gl/gl-uniform-3f (:u_bg locs) 0.0 0.0 0.0)
+        (gl/gl-uniform-1f (:u_opacity locs) (double @opacity-atom))
+        (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
+        (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
+        (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
+        (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
+        (gl/gl-bind-vertex-array (:vao (get @gl-state area)))
+        (gl/gl-draw-arrays gl/GL-TRIANGLE-STRIP 0 4))
+      (let [locs (:locs quad)
+            scale (min (/ (double vw) iw) (/ (double vh) ih))
+            dw (long (Math/ceil (* iw scale))) dh (long (Math/ceil (* ih scale)))
+            ox (long (Math/floor (* 0.5 (- vw dw)))) oy (long (Math/floor (* 0.5 (- vh dh))))]
+        (gl/gl-use-program (:program quad))
+        (gl/gl-uniform-1i (:u_splats locs) 0)
+        (gl/gl-uniform-1i (:u_count locs) (int n))
+        (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
+        (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
+        (gl/gl-uniform-1f (:u_opacity locs) (double @opacity-atom))
+        (gl/gl-uniform-1f (:u_hard_sharp locs) (double @hardness-atom))
+        (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
+        (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
+        (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
+        (gl/gl-enable gl/GL-BLEND)
+        (gl/gl-blend-func gl/GL-ONE-FACTOR gl/GL-ONE-MINUS-SRC-ALPHA)
+        (gl/gl-enable gl/GL-SCISSOR-TEST)
+        (gl/gl-scissor (int ox) (int oy) (int dw) (int dh))
+        (gl/gl-bind-vertex-array gen-vao)          ; no enabled attribs — gl_VertexID only
+        (gl/gl-draw-arrays gl/GL-TRIANGLES 0 (int (* 6 n)))
+        (gl/gl-disable gl/GL-SCISSOR-TEST)
+        (gl/gl-disable gl/GL-BLEND)))
     {:count count :total total :n n}))
 
 (defn- splat-stats [splats]

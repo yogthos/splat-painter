@@ -148,6 +148,97 @@ void main(){
 }
 "))
 
+;; --- per-splat quad render (fixes the O(pixels × splats) hang) ----------------
+;; The loop shaders above evaluate EVERY splat at EVERY pixel — 3.4e10 iterations at
+;; the 48k slider max, which trips macOS's GPU watchdog. This variant is the standard
+;; gaussian-splatting renderer instead: one quad per splat covering its ~3.5σ extent,
+;; the fragment shader evaluates only THAT splat's gaussian, and hardware blending
+;; does the over-compositing. Work = Σ quad areas (~2e8 fragments) regardless of count.
+;;
+;;   order: the buffer is finest-first (index 0 = topmost), so drawing BACK-TO-FRONT
+;;   means reverse index order — splat = (u_count-1) - id. Premultiplied over-blend
+;;   (ONE, ONE_MINUS_SRC_ALPHA) onto a bg-cleared target is then exactly the loop
+;;   shader's front-to-back C = Σ c·α·T, final = C + T·bg.
+;;
+;;   geometry: attribute-less — 6 vertices per splat from gl_VertexID alone (the TF
+;;   generation pass already proves attribute-less draws on this driver). Axis-aligned
+;;   half-extents 3.5·(√c00, √c11) are the exact marginal stdevs of the ellipse, so
+;;   the quad bounds the 3.5σ contour; at the softest hardness (1.0) the truncated
+;;   tail is exp(-6.1)·opacity ≈ 0.2% ≈ half an 8-bit step — invisible.
+(def ^:private vs-src-quad
+  "#version 330 core
+uniform samplerBuffer u_splats;  // RGBA32F, 2 texels per splat (finest-first)
+uniform int   u_count;
+uniform vec2  u_viewport;        // pane pixels (pw, ph)
+uniform vec2  u_image;           // image pixels (iw, ih)
+uniform float u_hard_sharp;
+uniform float u_hard_soft;
+uniform float u_sig_min;
+uniform float u_sig_max;
+flat out vec3  v_color;
+flat out vec3  v_prec;           // p00, p11, cross
+flat out float v_hard;
+out vec2 v_d;                    // image-space offset from the mean (rows, cols)
+
+void main(){
+  int splat  = (u_count - 1) - (gl_VertexID / 6);   // back-to-front paint order
+  int corner = gl_VertexID - 6 * (gl_VertexID / 6);
+  vec4 t0 = texelFetch(u_splats, 2 * splat);
+  vec4 t1 = texelFetch(u_splats, 2 * splat + 1);
+  float c00 = t0.z, c01 = t0.w, c11 = t1.x;
+  float det = max(c00 * c11 - c01 * c01, 1e-8);
+  v_prec  = vec3(c11 / det, c00 / det, -2.0 * c01 / det);
+  v_color = t1.yzw;
+  float sig = sqrt(sqrt(det));
+  float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
+  ts = ts * ts * (3.0 - 2.0 * ts);
+  v_hard = mix(u_hard_sharp, u_hard_soft, ts);
+  // two triangles (0,1,2)(2,1,3) over corner ids 0..3 = (∓,∓)(±,∓)(∓,±)(±,±)
+  int cid = corner == 0 ? 0 : (corner == 1 || corner == 4) ? 1
+          : (corner == 2 || corner == 3) ? 2 : 3;
+  vec2 s  = vec2((cid & 1) == 0 ? -1.0 : 1.0, (cid & 2) == 0 ? -1.0 : 1.0);
+  vec2 he = 3.5 * sqrt(vec2(c00, c11));   // marginal stdevs = exact AABB of the ellipse
+  v_d = s * he;
+  vec2 ip = t0.xy + v_d;                  // image position (x=row top-down, y=col)
+  // image px -> pane px (contain fit, centered; inverse of the loop shader's mapping)
+  float scale = min(u_viewport.x / u_image.x, u_viewport.y / u_image.y);
+  vec2 org = 0.5 * (u_viewport - u_image * scale);
+  vec2 pane = vec2(ip.y * scale + org.x, (u_image.y - ip.x) * scale + org.y);
+  gl_Position = vec4(pane / u_viewport * 2.0 - 1.0, 0.0, 1.0);
+}")
+
+(def ^:private fs-src-quad
+  "#version 330 core
+flat in vec3  v_color;
+flat in vec3  v_prec;
+flat in float v_hard;
+in vec2 v_d;
+uniform float u_opacity;
+out vec4 frag;
+void main(){
+  float pdf = 0.5 * (v_prec.x * v_d.x * v_d.x + v_prec.z * v_d.x * v_d.y + v_prec.y * v_d.y * v_d.y);
+  float a = u_opacity * exp(-pow(pdf, v_hard));
+  frag = vec4(v_color * a, a);   // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
+}")
+
+(defn build-program-quad
+  "Compile + link the per-splat quad renderer (needs a current GL context).
+  Attribute-less: bind any VAO with no enabled attribs and draw 6·count GL_TRIANGLES
+  with blending (ONE, ONE_MINUS_SRC_ALPHA) onto a target cleared to the background.
+  Returns {:program :locs} or nil."
+  []
+  (when-let [prog (gl/make-program vs-src-quad fs-src-quad)]
+    {:program prog
+     :locs {:u_splats   (gl/gl-get-uniform-location prog "u_splats")
+            :u_count    (gl/gl-get-uniform-location prog "u_count")
+            :u_viewport (gl/gl-get-uniform-location prog "u_viewport")
+            :u_image    (gl/gl-get-uniform-location prog "u_image")
+            :u_opacity  (gl/gl-get-uniform-location prog "u_opacity")
+            :u_hard_sharp (gl/gl-get-uniform-location prog "u_hard_sharp")
+            :u_hard_soft  (gl/gl-get-uniform-location prog "u_hard_soft")
+            :u_sig_min    (gl/gl-get-uniform-location prog "u_sig_min")
+            :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")}}))
+
 (defn- render-uniform-locs [prog]
   {:u_splats   (gl/gl-get-uniform-location prog "u_splats")
    :u_count    (gl/gl-get-uniform-location prog "u_count")
@@ -171,9 +262,11 @@ void main(){
                      :a_pos (gl/gl-get-attrib-location prog "a_pos"))}))
 
 (defn sources
-  "Return {:vs-src :fs-src :fs-src-buf} — pure, no GL context (for headless inspection/tests)."
+  "Return {:vs-src :fs-src :fs-src-buf :vs-src-quad :fs-src-quad} — pure, no GL context
+  (for headless inspection/tests)."
   []
-  {:vs-src vs-src :fs-src fs-src :fs-src-buf fs-src-buf})
+  {:vs-src vs-src :fs-src fs-src :fs-src-buf fs-src-buf
+   :vs-src-quad vs-src-quad :fs-src-quad fs-src-quad})
 
 (defn pack-splats
   "Flatten a seq of splats into the RGBA32F texture payload (length 2*N*4): row i
