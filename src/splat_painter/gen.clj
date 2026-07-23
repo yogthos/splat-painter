@@ -168,6 +168,17 @@ float mapAt(int sel, float x, float y){
 float edgeAt(float x, float y){
   return texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0).b;
 }
+// MAX edge strength over centre + 4 diagonal taps at radius d (mirror seed/edge-near):
+// a stroke answers for edges anywhere under its BODY — centre-sampled Ev let daubs
+// seeded just off a silhouette ribbon mixed colour along it (the ghost veil).
+float edgeNear(float x, float y, float d){
+  float e = edgeAt(x, y);
+  e = max(e, edgeAt(x + d, y + d));
+  e = max(e, edgeAt(x - d, y - d));
+  e = max(e, edgeAt(x + d, y - d));
+  e = max(e, edgeAt(x - d, y + d));
+  return e;
+}
 // wavelet SUBJECTNESS (mirror seed/subject-at): smoothed aggregate detail (centre
 // + 4 diagonal taps) finds the detailed subjects; the raw centre term keeps thin
 // isolated features (wires) alive. 0 = flat bokeh, 1 = detailed subject.
@@ -333,9 +344,11 @@ void main(){
   // chains ribbon mixed colour along silhouettes as a ghost veil — the edge belongs
   // to base coverage below and fine strokes above), and base daubs SHRINK so their
   // soft tails can't reach across the silhouette.
-  float Ev = edgeAt(cx, cy);
+  // edge strength sensed over the stroke's FOOTPRINT (taps at 0.75·size), not just
+  // its centre; level 1's opaque heavy-blur ribbons suppress at 90% vs level 2's 75%
+  float Ev = (lvl <= 3) ? edgeNear(cx, cy, 0.75 * ssz) : edgeAt(cx, cy);
   if ((lvl == 1 || lvl == 2) && Ev > 0.45
-      && hash01(i*53 + lvl, j, 37) < 0.75) return;  // dithered — some mids fill the band
+      && hash01(i*53 + lvl, j, 37) < ((lvl == 1) ? 0.9 : 0.75)) return;
   // fat strokes shrink near edges so soft tails can't cross the silhouette; the
   // fine liner strokes (lvl>=4) ARE the edge's own paint and keep their size
   float ssz2 = ssz * szf * (1.0 - ((lvl <= 3) ? 0.45 : 0.1) * Ev);
@@ -348,6 +361,9 @@ void main(){
   // colour-rawness floor rises with fineness (seed/raw-floor): small strokes paint
   // faithful colour — a half-blur blend at feature scale softens the feature away
   float traw = (lvl <= 1) ? 0.0 : (lvl <= 3) ? 0.45 : (lvl <= 5) ? 0.7 : 0.85;
+  // fine colour rawness follows the local detail density (mirror seed): a crisp
+  // raw-colour mark never pops at full contrast on soft ground
+  if (lvl >= 4) traw *= 0.6 + 0.4 * sgate;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
     emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw);
     return;
@@ -401,7 +417,8 @@ void main(){
     // IMPASTO body (mirror seed/stroke-segments): fine liner strokes on a strong
     // edge paint nearly opaque — the contour is defined by thin bodied lines whose
     // soft shoulders blend; off-edge texture strokes keep the light mixing glaze.
-    float body = (lvl >= 4) ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0;
+    float body = ((lvl >= 4) ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0)
+               * (0.4 + 0.6 * sgate);
     float lal2 = lal + (0.9 - lal) * body;
     float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));  // width tapers to the tip
     float al = lal2 * fade * (1.0 - 0.65 * tt * tt); // taper × glaze × dry-out

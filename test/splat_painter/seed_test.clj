@@ -157,11 +157,13 @@
     ;; (757→841) IMPASTO edges: fine levels trace 8-seg liner lines packed dense
     ;; enough to hand off through dry-outs, with edge-driven body alpha and no
     ;; fine edge-shrink — contours are continuous bodied lines, not dashes.
-    (is (= 853 (count splats)))
-    (is (approx= 0.5  18696.790  sx) "Σ mean-x")
-    (is (approx= 0.5  24993.365  sy) "Σ mean-y")
-    (is (approx= 1.0  234569.090 sd) "Σ det(cov)")
-    (is (approx= 0.05 998.610    sc) "Σ colour")))
+    ;; (853→817) footprint-sensed edges: strokes answer for silhouettes anywhere
+    ;; under their body, and fine sharpness follows the local detail density.
+    (is (= 817 (count splats)))
+    (is (approx= 0.5  17609.864  sx) "Σ mean-x")
+    (is (approx= 0.5  23983.002  sy) "Σ mean-y")
+    (is (approx= 1.0  194710.538 sd) "Σ det(cov)")
+    (is (approx= 0.05 950.731    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments

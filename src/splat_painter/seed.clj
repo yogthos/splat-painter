@@ -350,6 +350,19 @@
     (= kind :mid)   (wavelet/mid-at dmap x y)
     :else           (wavelet/detail-at dmap x y)))
 
+(defn- edge-near
+  "MAX edge strength over the centre + 4 diagonal taps at radius d. A stroke of
+   size ~d must answer for edges anywhere under its BODY, not just at its centre:
+   centre-sampled Ev let daubs and chains seeded just off a silhouette escape the
+   edge-band shrink/suppression and ribbon their soft mixed-colour bodies along
+   it — the ghost veil around heads and shoulders."
+  [dmap x y d]
+  (max (wavelet/edge-at dmap x y)
+       (wavelet/edge-at dmap (+ x d) (+ y d))
+       (wavelet/edge-at dmap (- x d) (- y d))
+       (wavelet/edge-at dmap (+ x d) (- y d))
+       (wavelet/edge-at dmap (- x d) (+ y d))))
+
 (defn- subject-at
   "Wavelet SUBJECTNESS at (x,y): how much detail density surrounds this spot.
    The smoothed aggregate detail (centre + 4 diagonal taps at radius r) finds the
@@ -386,7 +399,7 @@
    edge strokes alternate the two sides' colours as centres jittered across the
    contour — a bright/dark bead necklace along every silhouette).
    Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
-  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw blur-px iw ih]
+  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
       [[x y ssz D sn tn 1.0 th coh hb x y traw]])
@@ -453,9 +466,13 @@
                 ;; shoulders blend, not by translucent glazes that let the mixed-colour
                 ;; underpainting bleed through as a halo. Off-edge texture strokes keep
                 ;; the light glaze and mix with the layers beneath.
-                body (if (>= (long lvl) 4)
-                       (min 1.0 (max 0.0 (/ (- (wavelet/edge-at dmap px py) 0.25) 0.45)))
-                       0.0)
+                ;; the body follows the SURROUNDING detail density too: a bodied
+                ;; line at full opacity on soft ground reads as pen-on-watercolour;
+                ;; sparse-detail areas get gentler, more gradual contour marks.
+                body (* (if (>= (long lvl) 4)
+                          (min 1.0 (max 0.0 (/ (- (wavelet/edge-at dmap px py) 0.25) 0.45)))
+                          0.0)
+                        (+ 0.4 (* 0.6 (double sgate))))
                 lal2 (+ lal (* (- 0.9 lal) body))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
                 al  (* lal2 fade (- 1.0 (* 0.65 t t)))           ; taper × glaze × dry-out
@@ -586,8 +603,11 @@
                               ;; near a strong edge the mid fill levels don't paint (their
                               ;; boundary-band chains ribbon mixed colour along silhouettes
                               ;; as a ghost veil) and base daubs SHRINK so their soft tails
-                              ;; can't reach across the silhouette.
-                              Ev (wavelet/edge-at dmap cx cy)
+                              ;; can't reach across the silhouette. Sensed over the stroke's
+                              ;; FOOTPRINT (taps at 0.75·size), not just its centre.
+                              Ev (if (<= (long lvl) 3)
+                                   (edge-near dmap cx cy (* 0.75 ssz))
+                                   (wavelet/edge-at dmap cx cy))
                               ;; tone jitter is scale-relative: broad fills keep 25% (full
                               ;; jitter banded smooth walls) and the FINEST marks keep 15%
                               ;; (alternating-tone bodied lines bead contours) — the
@@ -600,14 +620,15 @@
                               ;; (edges stay covered by the splats' tails).
                               emitted (if (and (or (== (long lvl) 1) (== (long lvl) 2))
                                                (> Ev 0.45)
-                                               ;; dithered: ~75% suppressed — a few mid
-                                               ;; strokes still fill the edge band, so
-                                               ;; fine contour strokes sit IN paint
-                                               ;; instead of standing alone as outlines.
-                                               ;; Level 3 stays: it carries text/eye-scale
-                                               ;; features; near edges it shrinks hard
-                                               ;; (below) instead of vanishing.
-                                               (< (hash01 (+ (* i 53) lvl) j 37) 0.75))
+                                               ;; dithered — a few mid strokes still fill
+                                               ;; the edge band so fine contour strokes sit
+                                               ;; IN paint, but level 1's chains are OPAQUE
+                                               ;; heavy-blur ribbons, so they suppress at
+                                               ;; 90% vs level 2's 75%. Level 3 stays: it
+                                               ;; carries text/eye-scale features; near
+                                               ;; edges it shrinks hard (below) instead.
+                                               (< (hash01 (+ (* i 53) lvl) j 37)
+                                                  (if (== (long lvl) 1) 0.9 0.75)))
                                         []
                                         (stroke-segments nf dmap lvl
                                                          (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
@@ -619,7 +640,13 @@
                                                          D 0.0 tn ds curvature stroke hd wd
                                                          segs stepf bendf
                                                          (if (<= (long lvl) 1) 1.0 0.0)
-                                                         traw blur-px iw ih))]
+                                                         ;; fine colour rawness follows the local
+                                                         ;; detail density — a crisp raw mark never
+                                                         ;; pops at full contrast on soft ground
+                                                         (if (>= (long lvl) 4)
+                                                           (* traw (+ 0.6 (* 0.4 sgate)))
+                                                           traw)
+                                                         sgate blur-px iw ih))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         (map-indexed vector levels)))))
