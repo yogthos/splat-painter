@@ -235,6 +235,12 @@ void main(){
   float dv = (u_sharp[k] == 1) ? sharpAt(cx, cy) : detailAt(cx, cy);
   float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));
   if (lvl > 0 && dv < thd) return;                // not detailed enough -> discard
+  // SUBDIVISION (mirror of seed/layered-means): a cell claimed by the next-finer
+  // level (slot k-1 — slots are finest-first) is not painted by this coarser level.
+  if (lvl > 0 && k > 0) {
+    float fdv = (u_sharp[k-1] == 1) ? sharpAt(cx, cy) : detailAt(cx, cy);
+    if (fdv >= u_th[k-1]) return;
+  }
 
   // FULL-CELL jitter (±sp/2) — smaller jitter left cell centres visible as rows
   float jx = sp * (hash01(i*137 + lvl, j, 3) - 0.5);

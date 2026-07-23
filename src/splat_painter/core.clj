@@ -12,7 +12,8 @@
   The one piece of raw FFI in the UI is the Open Image dialog: GTK4 removed
   synchronous dialogs, so GtkFileDialog's async open is driven through a
   :collect-safe foreign-callable standing in for GAsyncReadyCallback."
-  (:require [glimmer.core   :as ui]
+  (:require [clojure.string]
+            [glimmer.core   :as ui]
             [glimmer.ratom  :as r]
             [glimmer-gl.gtk :as glx]        ; registers :gl-area + :scale
             [glimmer-gl.gl  :as gl]
@@ -50,6 +51,7 @@
 (defonce saved?-atom (atom false)) ; one-shot headless save via GA_PAINTER_SAVE_PNG
 (defonce viewport   (atom [800 600]))
 (defonce area-atom  (atom nil))   ; the GLArea widget, for queue-render / dialog parent
+(defonce image-path-atom (atom nil)) ; source path of the loaded image (dialog-free save)
 
 ;; --- GtkFileDialog (GTK4 async file picker) ----------------------------------
 (ffi/defcfn gtk-file-dialog-new        "gtk_file_dialog_new"        [] :pointer)
@@ -61,6 +63,26 @@
 (ffi/defcfn g-file-get-path  "g_file_get_path" [:pointer] :string)
 (ffi/defcfn g-object-unref   "g_object_unref"  [:pointer] :void)
 (ffi/defcfn g-error-free     "g_error_free"    [:pointer] :void)
+
+;; --- GSettings schema guard ----------------------------------------------------
+;; GtkFileDialog ABORTS the process (GLib-GIO-ERROR -> SIGTRAP, uncatchable) when
+;; GLib can't find the GSettings schemas. On Homebrew macOS they live under
+;; /opt/homebrew/share, which a plain shell launch doesn't have in XDG_DATA_DIRS.
+(ffi/defcfn c-setenv "setenv" [:string :string :int] :int)
+
+(defn- readable? [path]
+  (try (do (slurp path) true) (catch Throwable _ false)))
+
+(def ^:private schema-dirs ["/opt/homebrew/share" "/usr/local/share" "/usr/share"])
+
+(defn- schemas-available? []
+  (some #(readable? (str % "/glib-2.0/schemas/gschemas.compiled")) schema-dirs))
+
+(defn- ensure-schema-path!
+  "Point GLib at the standard schema locations if the caller's environment didn't
+  (setenv overwrite=0 — an existing XDG_DATA_DIRS wins). Must run before GTK init."
+  []
+  (c-setenv "XDG_DATA_DIRS" (str (clojure.string/join ":" schema-dirs)) 0))
 
 ;; --- GtkFileDialog save variant -----------------------------------------------
 (ffi/defcfn gtk-file-dialog-save        "gtk_file_dialog_save"
@@ -113,6 +135,7 @@
                              :detail (wavelet/placement-map img0 sfield)
                              :noise-fields (seed/prep-noise sfield))]
       (reset! image-atom img)
+      (reset! image-path-atom path)
       ;; Size is the base (flat-region) stroke stdev; detail shrinks it locally. Seed
       ;; it relative to the image so default strokes are visible brush marks.
       (reset! size-atom (max 4.0 (/ (double (:height img)) 50.0)))
@@ -246,8 +269,20 @@
     (g-object-unref dialog)))
 
 (defn- save-image-dialog! []
-  (if-not @area-atom
+  (cond
+    (not @area-atom)
     (reset! status-atom "window not ready yet")
+
+    ;; no GSettings schemas anywhere -> opening the dialog would ABORT the process;
+    ;; save directly next to the source image instead.
+    (not (schemas-available?))
+    (let [path (str (or @image-path-atom "splat-painter") "-splats.png")]
+      (glx/make-current @area-atom)
+      (if gpu-gen?
+        (gpu-save-png! @area-atom path)
+        (save-png! path)))
+
+    :else
     (let [root   (glx/gtk-widget-get-root @area-atom)
           dialog (gtk-file-dialog-new)]
       (gtk-file-dialog-set-title dialog "Save PNG")
@@ -613,6 +648,9 @@
               :on-resize  on-resize}]])
 
 (defn -main [& args]
+  ;; GLib must see the GSettings schemas BEFORE GTK initializes, or the file
+  ;; dialogs hard-abort the process on machines where XDG_DATA_DIRS is unset.
+  (ensure-schema-path!)
   ;; an optional image path on the command line loads immediately — handy for
   ;; smoke-testing the full render path without clicking the dialog
   (when (seq args) (on-image-loaded (first args)))
