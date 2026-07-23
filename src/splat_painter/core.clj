@@ -641,7 +641,7 @@
    [:separator {}]
    [slider "Splats"    1000 600000 1000 count-atom]     ; budget: higher = more detail, slower
    [slider "Size"      6    50    0.5   size-atom]
-   [slider "Broad"     0.4  2.5   0.05  broad-atom]    ; background/large-feature looseness
+   [slider "Broad"     0.4  2.5   0.05  broad-atom]    ; bokeh: low-detail looseness, subjects untouched
    [slider "Mid"       0.4  2.5   0.05  mid-atom]      ; mid-structure size
    [slider "Fine"      0.4  2.5   0.05  fine-atom]     ; finest-detail size (lower = tighter)
    [slider "Detail"    0.0  1.0   0.02  detail-atom]

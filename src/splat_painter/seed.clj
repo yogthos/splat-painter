@@ -112,6 +112,26 @@
           (/ (double c) (double n))
           (recur (inc i) (if (>= (aget d i) thr) (inc c) c)))))))
 
+(defn- mean-inv-m2
+  "E[1/m²] over the aggregate map, where m(x) = 1+(b−1)·(1−s(x)) is the
+   bokeh-adaptive Broad multiplier (same subjectness shaping as subject-at,
+   sans taps). The base level's budget term: candidates thin by (bmin/m)²
+   as their strokes grow ×m, so the cost integrates the thinning."
+  [dmap b]
+  (let [^doubles d (:detail dmap)
+        dmax (double (max 1e-9 (:dmax dmap)))
+        n    (alength d)]
+    (if (zero? n)
+      1.0
+      (loop [i 0 acc 0.0]
+        (if (>= i n)
+          (/ acc (double n))
+          (let [p0 (min 1.0 (/ (aget d i) dmax))
+                s  (max (min 1.0 (max 0.0 (/ (- p0 0.05) 0.30)))
+                        (min 1.0 (max 0.0 (/ (- p0 0.10) 0.35))))
+                m  (+ 1.0 (* (- (double b) 1.0) (- 1.0 s)))]
+            (recur (inc i) (+ acc (/ 1.0 (* m m))))))))))
+
 ;; Fine-level seeds don't place one dab — they trace a BRUSH STROKE: a chain of
 ;; gaussian segments stepped along the orientation field. Stroke behaviour is
 ;; SCALE-RELATIVE (the coarse-to-fine pass adjusts its parameters to the scale it
@@ -219,9 +239,19 @@
                                  (if (<= l 4.0)
                                    (/ smax (Math/pow 2.0 l))
                                    (* (/ smax 16.0) (Math/pow 0.7 (- l 4.0)))))))
+        ;; the BROAD tier (lvl≤1) is BOKEH-ADAPTIVE: the Broad slider must never
+        ;; touch the detailed subjects, only loosen the flat regions. Its :ssz stays
+        ;; the SUBJECT-nominal size (no broad multiplier); at emission each seed
+        ;; grows ×m(x) = 1+(b−1)·(1−subjectness) and flat regions THIN candidates by
+        ;; (bmin/m)² to keep overlap constant — few LARGE smooth daubs in bokeh.
+        ;; The grid uses bmin = min(1,b): the densest spacing any region needs.
+        bmul    (double (nth tier-muls 0))
+        bmin    (min 1.0 bmul)
+        gmul    (fn [lvl] (if (<= (long lvl) 1) bmin (tier-mul tier-muls lvl)))
+        smul    (fn [lvl] (if (<= (long lvl) 1) 1.0 (tier-mul tier-muls lvl)))
         ;; tier multipliers scale size AND spacing together (constant overlap), so
         ;; each tier's density rebalances through the budget automatically.
-        sp-of   (fn [lvl scale] (* (overlap lvl) scale (tier-mul tier-muls lvl) (lsize lvl)))
+        sp-of   (fn [lvl scale] (* (overlap lvl) scale (gmul lvl) (lsize lvl)))
         ;; budget: total(scale)=K/scale² ⇒ smallest scale≥1 that fits under the working
         ;; budget. Fine-level seeds emit segs(lvl) SEGMENTS each (a traced brush stroke),
         ;; so their term is multiplied accordingly — the budget counts splats, not seeds.
@@ -239,9 +269,16 @@
         ;; demand fatten the base ×2.6+ as Detail rose — maxing Detail made everything
         ;; coarser. Now raising Detail leaves the broad/mid painting untouched and
         ;; adds fine accents on top: monotone by construction.
+        ;; the broad-tier grid runs at bmin spacing, so its budget terms carry bmin²
+        ;; (and the base integrates the bokeh thinning via E[1/m²]).
+        einv (if (== bmul 1.0) 1.0 (mean-inv-m2 dmap bmul))
         k-of (fn [lvl]
                (let [f (cond
-                         (zero? (long lvl))        1.0
+                         (zero? (long lvl))        (* einv bmin bmin)
+                         (== (long lvl) 1)         (* bmin bmin
+                                                      (if (< 1 (dec nlev))
+                                                        (max 0.0 (- (lvl-frac 1) (lvl-frac 2)))
+                                                        (lvl-frac 1)))
                          (and (<= (long lvl) 2) (< (long lvl) (dec nlev)))
                                                    (max 0.0 (- (lvl-frac lvl) (lvl-frac (inc (long lvl)))))
                          :else                     (lvl-frac lvl))
@@ -269,7 +306,7 @@
                  (if (< lvl 0)
                    out
                    (let [lsc (scale-of lvl)
-                         ssz (* lsc (tier-mul tier-muls lvl) (lsize lvl))
+                         ssz (* lsc (smul lvl) (lsize lvl))
                          sp  (sp-of lvl lsc)
                          nx  (long (Math/ceil (/ area (* sp sp))))
                          ny  1]
@@ -312,6 +349,25 @@
     (= kind :sharp) (wavelet/sharp-at dmap x y)
     (= kind :mid)   (wavelet/mid-at dmap x y)
     :else           (wavelet/detail-at dmap x y)))
+
+(defn- subject-at
+  "Wavelet SUBJECTNESS at (x,y): how much detail density surrounds this spot.
+   The smoothed aggregate detail (centre + 4 diagonal taps at radius r) finds the
+   detailed subjects of the image; the raw centre term keeps thin isolated
+   features (a wire against bokeh) alive. 0 = flat bokeh, 1 = detailed subject.
+   Drives the bokeh-adaptive broad tier AND the mid/fine placement gate: splat
+   size follows the wavelet's detail density — low detail = few big smooth
+   daubs, high detail = many small precise strokes."
+  [dmap x y r]
+  (let [p0 (wavelet/detail-at dmap x y)
+        ps (* 0.2 (+ p0
+                     (wavelet/detail-at dmap (+ x r) (+ y r))
+                     (wavelet/detail-at dmap (- x r) (- y r))
+                     (wavelet/detail-at dmap (+ x r) (- y r))
+                     (wavelet/detail-at dmap (- x r) (+ y r))))
+        s  (min 1.0 (max 0.0 (/ (- ps 0.05) 0.30)))]
+    (max s (min 1.0 (max 0.0 (/ (- p0 0.10) 0.35))))))
+
 
 (defn- stroke-segments
   "Emit one seed's splat segments — THE SHARED BRUSH-STROKE SPEC the GPU generation
@@ -445,6 +501,9 @@
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
         iw   (long W) ih (long H)
         deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
+        rr   (/ (double H) 24.0)                    ; subjectness tap radius
+        bmul (double (nth tier-muls 0))
+        bmin (min 1.0 bmul)
         {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke tier-muls count H W)]
     (persistent!
       (reduce
@@ -462,7 +521,22 @@
                           cy (* (double W) (poshash i lvl 31))]
                       (if false
                         (recur (inc j) acc)
-                        (let [;; each level reads the map matched to ITS scale: the finest
+                        (let [;; wavelet subjectness: drives the bokeh-adaptive broad tier
+                              ;; and gates mid/fine placement — splat size follows the
+                              ;; wavelet's local detail density.
+                              sgate (subject-at dmap cx cy rr)
+                              mloc  (+ 1.0 (* (- bmul 1.0) (- 1.0 sgate)))
+                              ;; broad tier: flat regions thin candidates by (bmin/m)² as
+                              ;; the kept seeds grow ×m — few LARGE daubs = smooth bokeh;
+                              ;; at full subjectness m=1 and the Broad dial has no effect.
+                              thin? (and (<= (long lvl) 1)
+                                         (let [pr (/ bmin mloc)]
+                                           (>= (hash01 (+ (* i 61) lvl) j 43) (* pr pr))))
+                              ;; mid/fine strokes belong where the wavelets see detail:
+                              ;; their map value is gated by subjectness so flat bokeh
+                              ;; keeps only the big smooth daubs.
+                              gain  (if (>= (long lvl) 2) (+ 0.25 (* 0.75 sgate)) 1.0)
+                              ;; each level reads the map matched to ITS scale: the finest
                               ;; levels use the sharp fine-band map so they land on (and
                               ;; preserve) small structure the smoothed aggregate blurs away.
                               ;; The cutoff is DITHERED ±25% per seed — a hard threshold on
@@ -477,12 +551,18 @@
                               ;; replacing them.
                               claimed? (and (pos? (long lvl)) (<= (long lvl) 2) (pos? (long idx))
                                             (let [fl (nth levels (dec (long idx)))
-                                                  fdv (map-at dmap (:map-kind fl) cx cy)]
+                                                  ;; the finer level is always ≥2, so its
+                                                  ;; claim carries the same subject gate
+                                                  fdv (* (map-at dmap (:map-kind fl) cx cy)
+                                                         (+ 0.25 (* 0.75 sgate)))]
                                               (>= fdv (* (:th fl)
                                                          (+ 0.75 (* 0.5 (hash01 (+ (* i 47) lvl) j 23)))))))]
-                          (if (and (pos? (long lvl)) (or claimed? (< dv thd)))
-                            (recur (inc j) acc)      ; not detailed enough for this fine level
-                            (let [;; hashed positions need no jitter — they ARE the noise
+                          (if (or thin?
+                                  (and (pos? (long lvl)) (or claimed? (< (* dv gain) thd))))
+                            (recur (inc j) acc)      ; thinned bokeh / not detailed enough
+                            (let [;; bokeh-adaptive broad size: kept flat-region daubs grow ×m
+                              ssz (if (<= (long lvl) 1) (* ssz mloc) ssz)
+                              ;; hashed positions need no jitter — they ARE the noise
                               x  cx y cy
                               D  (deff dv)
                               ;; flat-region Perlin warp breaks any residual level lattice;

@@ -201,18 +201,45 @@
         "base stdev = 2× the next-finer level")))
 
 (deftest tier-multipliers-scale-their-levels
-  ;; the per-tier size sliders: broad scales the base stdev, fine scales the finest,
-  ;; and 1.0 everywhere is a strict identity (the golden above pins that for the
-  ;; whole pipeline). Spacing tracks size, so overlap/coverage is preserved.
+  ;; the per-tier size sliders: mid/fine scale their levels' nominal size directly.
+  ;; BROAD is bokeh-adaptive: it must NOT touch the level's nominal (subject) size —
+  ;; flat regions grow/thin at emission instead — so :ssz for the broad tier is
+  ;; b-independent, and only b<1 densifies its candidate grid.
   (let [img  (gray-img 48 64 (fn [x y] (if (and (> x 16) (< x 32) (> y 20) (< y 44))
                                          0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
         dmap (wavelet/placement-map img (structure/analyze img))
         base (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 1.0 1.0] 4000 48 64)
         wide (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [2.0 1.0 0.5] 4000 48 64)
-        ssz-of (fn [lp lvl] (:ssz (first (filter #(= lvl (:lvl %)) (:levels lp)))))]
-    (is (approx= 1e-9 (* 2.0 (ssz-of base 0)) (ssz-of wide 0)) "broad ×2 doubles the base")
+        down (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [0.5 1.0 1.0] 4000 48 64)
+        lvl-of (fn [lp lvl] (first (filter #(= lvl (:lvl %)) (:levels lp))))
+        ssz-of (fn [lp lvl] (:ssz (lvl-of lp lvl)))]
+    (is (approx= 1e-9 (ssz-of base 0) (ssz-of wide 0)) "broad ×2 leaves the subject-nominal base size alone")
     (is (approx= 1e-9 (ssz-of base 2) (ssz-of wide 2)) "mid unchanged at 1.0")
-    (is (approx= 1e-9 (* 0.5 (ssz-of base 4)) (ssz-of wide 4)) "fine ×0.5 halves the finest")))
+    (is (approx= 1e-9 (* 0.5 (ssz-of base 4)) (ssz-of wide 4)) "fine ×0.5 halves the finest")
+    (is (> (:nx (lvl-of down 0)) (:nx (lvl-of base 0))) "broad <1 densifies the base grid")))
+
+(deftest broad-dial-is-bokeh-adaptive
+  ;; the Broad slider must reshape only LOW-detail regions: a flat half gets fewer,
+  ;; larger daubs (bokeh) while the textured half's strokes stay put. Splats are
+  ;; classified by position (margin off the boundary so tap-smoothed subjectness
+  ;; doesn't blur the halves together).
+  (let [img (gray-img 64 64 (fn [_ y] (if (< y 32) 0.5
+                                        (if (odd? (long (quot y 2))) 0.1 0.9))))
+        fld (fn [b] (:splats (seed/splat-field img {:count 4000 :size 6.0 :detail 0.6
+                                                    :variation 0.0 :size-broad b})))
+        f1 (fld 1.0)
+        f2 (fld 2.5)
+        flat?     (fn [{[_ my] :mean}] (< my 22))   ; margins off the boundary on
+        textured? (fn [{[_ my] :mean}] (> my 42))   ; BOTH sides: grown daubs reach
+        sig    (fn [{[c00 c01 _ c11] :cov}]
+                 (Math/sqrt (Math/sqrt (max 1e-8 (- (* c00 c11) (* c01 c01))))))
+        max-sig (fn [ss] (reduce max 0.0 (map sig ss)))]
+    (is (< (count (filter flat? f2)) (count (filter flat? f1)))
+        "broad ×2.5 thins the flat half (fewer, larger daubs)")
+    (is (> (max-sig (filter flat? f2)) (* 1.5 (max-sig (filter flat? f1))))
+        "broad ×2.5 grows the flat half's daubs")
+    (is (< (max-sig (filter textured? f2)) (* 1.15 (max-sig (filter textured? f1))))
+        "the textured half's stroke sizes are untouched by Broad")))
 
 (deftest contrast-brightens-highlights
   ;; (0.7-0.5)*2.0+0.5 = 0.9

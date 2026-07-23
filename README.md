@@ -53,8 +53,10 @@ Sliders (live):
 
 - **Splats** — stroke budget (higher = finer, more faithful)
 - **Size** — base stroke stdev in px; each finer level halves it
-- **Broad / Mid / Fine** — per-tier size multipliers: loosen the background into a
-  wash while keeping small details tight, or the reverse
+- **Broad** — bokeh dial: loosens only the LOW-detail regions (few large smooth
+  daubs, thinned to keep coverage) while the wavelet-detected subjects keep their
+  tight underpainting — smooth the background without touching the subject
+- **Mid / Fine** — per-tier size multipliers for the mid/fine stroke levels
 - **Detail** — how many finer levels are painted (up to seven)
 - **Variation** — per-stroke size/tone jitter
 - **Curvature** — Perlin bend of stroke traces (gated off on strong edges)
