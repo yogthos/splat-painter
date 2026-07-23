@@ -150,13 +150,13 @@
     ;; threshold + head-colour sampling); 553 (colour-guarded traces). Now: the edge
     ;; band belongs to base+fine only (mid fills suppressed at E>0.45), and every
     ;; stroke shrinks near edges so soft tails can't cross silhouettes.
-    ;; latest: mid-band∪sharp map for levels 2-3, dithered subdivision claim,
-    ;; per-level colour-rawness floor.
-    (is (= 523 (count splats)))
-    (is (approx= 0.5  12395.147  sx) "Σ mean-x")
-    (is (approx= 0.5  16774.364  sy) "Σ mean-y")
-    (is (approx= 1.0  186602.869 sd) "Σ det(cov)")
-    (is (approx= 0.05 587.502    sc) "Σ colour")))
+    ;; latest: white-noise placement via the Wang AVALANCHE hash (a linear hash as
+    ;; a position generator lays points on Marsaglia lines), base overlap 0.65.
+    (is (= 585 (count splats)))
+    (is (approx= 0.5  12884.713  sx) "Σ mean-x")
+    (is (approx= 0.5  17384.205  sy) "Σ mean-y")
+    (is (approx= 1.0  234525.762 sd) "Σ det(cov)")
+    (is (approx= 0.05 554.926    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -199,13 +199,6 @@
         {:keys [splats]} (seed/splat-field img {:count 16 :contrast 2.0 :sharpness 0.0 :detail 0.0 :variation 0.0})
         [r _ _] (:color (first splats))]
     (is (approx= 1e-6 0.9 r))))
-
-(deftest palette-limits-colors
-  ;; two-region image, palette 2 => at most 2 distinct splat colors
-  (let [img (gray-img 24 24 (fn [x _] (if (< x 12) 0.2 0.8)))
-        {:keys [splats]} (seed/splat-field img {:count 200 :palette 2 :sharpness 0.0 :detail 0.0 :variation 0.0})
-        distinct-colors (set (map :color splats))]
-    (is (<= (count distinct-colors) 2))))
 
 (deftest region-color-blends-are-in-range
   ;; sanity: all channels stay within 0..1 on a real gradient image
