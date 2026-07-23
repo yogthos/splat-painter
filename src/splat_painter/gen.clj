@@ -36,7 +36,7 @@ void main(){ v_id = gl_VertexID; }")
 (def ^:private gs-src
   "#version 330 core
 layout(points) in;
-layout(points, max_vertices = 6) out;
+layout(points, max_vertices = 8) out;
 flat in int v_id[];
 
 // captured by transform feedback: 12 floats = 3 RGBA texels per splat, matching the
@@ -47,7 +47,7 @@ out vec4 o_c;
 
 const int   ML      = 7;
 const float MIN_COH = 0.28;
-const int   SEGS    = 6;      // segments per fine-level brush stroke (seed/stroke-segs)
+const int   SEGS    = 8;      // max segments per brush stroke (seed/seg-count liner lines)
 
 // per-level placement (finest-first slots), from seed/layer-params
 uniform int   u_nlev;
@@ -202,6 +202,17 @@ vec2 edgeSnap(float x, float y){
               clamp(y + ny*h*d, 0.0, float(u_W - 1)));
 }
 
+// IMPASTO meeting line (mirror seed/stroke-segments offset): back a bodied liner
+// stroke's centre off the ridge toward its colour-sample side, so the two sides'
+// opaque paints MEET at the edge instead of alternating across it.
+vec2 sideOffset(float x, float y, float side, float mag){
+  if (side == 0.0) return vec2(x, y);
+  vec2 tc = fieldsAt(x, y);
+  float nx = -sin(tc.x), ny = cos(tc.x);
+  return vec2(clamp(x + side*mag*nx, 0.0, float(u_H - 1)),
+              clamp(y + side*mag*ny, 0.0, float(u_W - 1)));
+}
+
 vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (int trunc)
   int xi = clamp(int(x), 0, u_H - 1);
   int yi = clamp(int(y), 0, u_W - 1);
@@ -297,10 +308,12 @@ void main(){
   float Ev = edgeAt(cx, cy);
   if ((lvl == 1 || lvl == 2) && Ev > 0.45
       && hash01(i*53 + lvl, j, 37) < 0.75) return;  // dithered — some mids fill the band
-  float ssz2 = ssz * szf * (1.0 - 0.45 * Ev);
+  // fat strokes shrink near edges so soft tails can't cross the silhouette; the
+  // fine liner strokes (lvl>=4) ARE the edge's own paint and keep their size
+  float ssz2 = ssz * szf * (1.0 - ((lvl <= 3) ? 0.45 : 0.1) * Ev);
   float snoise = 0.0;
   float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5)
-               * ((lvl <= 1) ? 0.25 : (lvl >= 4) ? 0.3 : 1.0);
+               * ((lvl <= 1) ? 0.25 : (lvl >= 4) ? 0.15 : 1.0);
 
   // broad strokes (base + level 1) colour from the HEAVY blur — smoothed at their scale
   float hb = (lvl <= 1) ? 1.0 : 0.0;
@@ -324,6 +337,16 @@ void main(){
   // On-ridge colour is the sides' mix and paints silhouettes as drawn outlines.
   float cpx = x2, cpy = y2;
   if (snapE) { vec2 sp2 = edgeSnap(x2, y2); x2 = sp2.x; y2 = sp2.y; }
+  // which side of the ridge did this seed come from? (mirror seed/stroke-segments)
+  float side = 0.0;
+  if (snapE && lvl >= 4) {
+    vec2 tcs = fieldsAt(x2, y2);
+    float nsx = -sin(tcs.x), nsy = cos(tcs.x);
+    float dd = (cpx - x2)*nsx + (cpy - y2)*nsy;
+    side = (dd > 1e-9) ? 1.0 : (dd < -1e-9) ? -1.0 : 0.0;
+  }
+  vec2 so0 = sideOffset(x2, y2, side, 0.55 * ssz2);
+  x2 = so0.x; y2 = so0.y;
   float px = x2, py = y2, dxp = 0.0, dyp = 0.0;
   // progressive refinement: finer layers GLAZE (translucent touches over the
   // accumulated underpainting) instead of overwriting it; the overlapping fine
@@ -338,13 +361,23 @@ void main(){
       // running dry — instead of breaking dead into gapped dashes
       vec3 cb = sampleRGB(u_blurTex, px, py);
       vec3 dcl = abs(cb - headBlur);
-      if (max(dcl.r, max(dcl.g, dcl.b)) > 0.22) fade *= 0.4;
+      // liner strokes tolerate gradual on-ridge drift; real boundaries still stop them
+      if (max(dcl.r, max(dcl.g, dcl.b)) > ((lvl >= 4) ? 0.3 : 0.22)) fade *= 0.4;
     }
+    vec2 tc = fieldsAt(px, py);
+    // follow the line only while there IS a line (mirror seed/stroke-segments):
+    // when coherence collapses (busy texture, letter junctions) the liner stroke
+    // runs dry fast — long chains wandering through dense detail smear it.
+    if (q > 0 && lvl >= 4 && tc.y < 0.35) fade *= 0.5;
     float tt = float(q) / float(segs - 1);
+    // IMPASTO body (mirror seed/stroke-segments): fine liner strokes on a strong
+    // edge paint nearly opaque — the contour is defined by thin bodied lines whose
+    // soft shoulders blend; off-edge texture strokes keep the light mixing glaze.
+    float body = (lvl >= 4) ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0;
+    float lal2 = lal + (0.9 - lal) * body;
     float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt));  // width tapers to the tip
-    float al = lal * fade * (1.0 - 0.65 * tt * tt);  // taper × glaze × dry-out
+    float al = lal2 * fade * (1.0 - 0.65 * tt * tt); // taper × glaze × dry-out
     emitSplat(px, py, cpx, cpy, sz, D, snoise, tnoise, al, hb, traw);
-    vec2  tc  = fieldsAt(px, py);
     // bend gated by coherence: straight strongly-oriented edges trace straight
     float bend = u_curv * 0.9 * bendf * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
@@ -357,6 +390,8 @@ void main(){
     px = clamp(px + L*dx, 0.0, float(u_H - 1));
     py = clamp(py + L*dy, 0.0, float(u_W - 1));
     if (snapE) { vec2 sp3 = edgeSnap(px, py); px = sp3.x; py = sp3.y; }
+    vec2 so1 = sideOffset(px, py, side, 0.55 * ssz2);
+    px = so1.x; py = so1.y;
     dxp = dx; dyp = dy;
   }
 }")

@@ -119,10 +119,20 @@
 ;; each finer level makes shorter, straighter, more precise marks — and the two
 ;; finest levels read the SHARP fine-band detail map (wavelet/sharp-at), so they
 ;; land on (and preserve) text/eye-scale structure the smoothed aggregate blurs.
-(defn- seg-count "segments per stroke at placement level" [lvl]
-  (let [l (long lvl)] (cond (zero? l) 1 (== l 1) 6 (== l 2) 4 (== l 3) 3 :else 2)))
-(defn- step-frac "step length as a fraction of the level stdev" [lvl]
-  (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 (== l 4) 0.6 (== l 5) 0.5 :else 0.4)))
+(defn- seg-count
+  "segments per stroke at placement level. The fine tier (lvl≥4) traces LONG
+   8-segment liner lines: at a couple-of-pixels stdev a 2-segment chain is a dot,
+   and a contour drawn as dots reads jagged — a clean thin line needs one
+   continuous stroke. Budget-invariant: seed spacing scales with √segs, so the
+   same segment count is arranged into fewer, longer strokes."
+  [lvl]
+  (let [l (long lvl)] (cond (zero? l) 1 (== l 1) 6 (== l 2) 4 (== l 3) 3 :else 8)))
+(defn- step-frac
+  "step length as a fraction of the level stdev. Fine liner strokes step ~0.9σ —
+   close enough that the segment gaussians fuse into a smooth continuous rod, far
+   enough that 8 segments span a real line along the edge."
+  [lvl]
+  (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 (== l 4) 0.9 (== l 5) 0.85 :else 0.8)))
 (defn- bend-frac "how much of the Curvature bend this level keeps" [lvl]
   (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 (== l 4) 0.15 (== l 5) 0.1 :else 0.05)))
 (defn- tier-mul
@@ -192,13 +202,15 @@
         ;; At the default Stroke (2.5) the factor is exactly 1.
         ;; base overlap 0.65 (was 0.72): hash-random placement has gap variance a
         ;; lattice doesn't; slightly tighter spacing keeps coverage airtight.
-        ;; the fine tier (lvl≥4) packs TIGHTER (1.0 vs 1.25): its levels overlap each
-        ;; other AND the mid tier, so detailed areas get many light strokes mixing
-        ;; into one surface instead of a sparse handoff between scales.
+        ;; the fine tier (lvl≥4) packs TIGHTER (0.7 vs 1.25): its levels overlap each
+        ;; other AND the mid tier, so detailed areas get many strokes mixing into one
+        ;; surface — and its liner strokes die early at colour boundaries (dry-out),
+        ;; so seeds must overlap enough that successive lines hand off without the
+        ;; contour breaking into stitched dashes.
         overlap (fn [lvl] (let [l (long lvl)]
                             (cond (zero? l) 0.65
                                   (<= l 3)  (* 1.25 (Math/sqrt (* (double (seg-count lvl)) slen)))
-                                  :else     (Math/sqrt (* (double (seg-count lvl)) slen)))))
+                                  :else     (* 0.7 (Math/sqrt (* (double (seg-count lvl)) slen))))))
         ;; level size ladder: halves per level down to level 4, then decays gently
         ;; (×0.7 per level) with a ~pixel floor — the finest detail lands at a
         ;; couple-of-pixels footprint, never sub-pixel dust the AA clamp fades away.
@@ -335,6 +347,26 @@
           ;; two sides' actual colours and the edge blends like meeting paint.
           cx0 x cy0 y
           [x y] (if snap? (edge-snap dmap nf x y 1.75 hd wd) [x y])
+          ;; IMPASTO meeting line: bodied liner strokes keep to THEIR side of the
+          ;; ridge — the centre backs off ~half a width toward the colour-sample
+          ;; side, so the two sides' opaque paints MEET at the edge instead of
+          ;; alternating across it (on-ridge bodied strokes scalloped every
+          ;; silhouette into light/dark beads). side=0 (no ridge) leaves the
+          ;; stroke untouched.
+          side (if (and snap? (>= (long lvl) 4))
+                 (let [[th0 _] (sample-fields nf x y)
+                       snx (- (Math/sin th0)) sny (Math/cos th0)
+                       d   (+ (* (- cx0 x) snx) (* (- cy0 y) sny))]
+                   (cond (> d 1e-9) 1.0 (< d -1e-9) -1.0 :else 0.0))
+                 0.0)
+          offset (fn [ox oy]
+                   (if (zero? (double side))
+                     [ox oy]
+                     (let [[th0 _] (sample-fields nf ox oy)
+                           snx (- (Math/sin th0)) sny (Math/cos th0)]
+                       [(max 0.0 (min hd (+ ox (* (double side) 0.55 ssz snx))))
+                        (max 0.0 (min wd (+ oy (* (double side) 0.55 ssz sny))))])))
+          [x y] (offset x y)
           [hr hg hb0] (sample-arr blur-px iw ih x y)]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
         (if (or (> k kmax) (< fade 0.15))
@@ -342,16 +374,35 @@
           (let [;; the stroke FADES when the canvas stops matching its brush-load —
                 ;; a brush running dry — instead of breaking dead: abrupt ends left
                 ;; broken dashes with gaps around busy detail (eyes, fur ticking).
+                ;; liner strokes (lvl≥4) tolerate a little more drift (0.3): the
+                ;; on-ridge blur shifts gradually along a lit contour, and killing
+                ;; the line for that stitches the edge into dashes. A real colour
+                ;; boundary still stops the stroke dead in two segments.
                 fade (if (and (pos? k)
                               (let [[br bg bb] (sample-arr blur-px iw ih px py)]
                                 (> (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))
-                                   0.22)))
+                                   (if (>= (long lvl) 4) 0.3 0.22))))
                        (* fade 0.4)
                        fade)
                 [th coh] (sample-fields nf px py)
+                ;; follow the line only while there IS a line: when local coherence
+                ;; collapses (busy texture, letter junctions) the liner stroke runs
+                ;; dry fast — long chains wandering through dense detail smear it.
+                fade (if (and (pos? k) (>= (long lvl) 4) (< coh 0.35))
+                       (* fade 0.5)
+                       fade)
                 t   (/ (double k) (double kmax))
+                ;; IMPASTO body: ON a strong edge the fine liner strokes carry nearly
+                ;; full paint — the contour is defined by opaque thin lines whose soft
+                ;; shoulders blend, not by translucent glazes that let the mixed-colour
+                ;; underpainting bleed through as a halo. Off-edge texture strokes keep
+                ;; the light glaze and mix with the layers beneath.
+                body (if (>= (long lvl) 4)
+                       (min 1.0 (max 0.0 (/ (- (wavelet/edge-at dmap px py) 0.25) 0.45)))
+                       0.0)
+                lal2 (+ lal (* (- 0.9 lal) body))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))))     ; width tapers to the tip
-                al  (* lal fade (- 1.0 (* 0.65 t t)))            ; taper × glaze × dry-out
+                al  (* lal2 fade (- 1.0 (* 0.65 t t)))           ; taper × glaze × dry-out
                 acc (conj acc [px py sz D sn tn al th coh hb cx0 cy0 traw])
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
@@ -373,8 +424,9 @@
                 L  (* ssz (double stepf) (stroke-len-frac stroke))]
             (let [nx0 (max 0.0 (min hd (+ px (* L dx))))
                   ny0 (max 0.0 (min wd (+ py (* L dy))))
-                  [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd) [nx0 ny0])]
-              (recur (inc k) nx1 ny1 dx dy fade acc))))))))
+                  [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd) [nx0 ny0])
+                  [nx2 ny2] (offset nx1 ny1)]
+              (recur (inc k) nx2 ny2 dx dy fade acc))))))))
 
 (defn- layered-means
   "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
@@ -456,12 +508,12 @@
                               ;; as a ghost veil) and base daubs SHRINK so their soft tails
                               ;; can't reach across the silhouette.
                               Ev (wavelet/edge-at dmap cx cy)
-                              ;; tone jitter is scale-relative: broad fills keep 40% (full
-                              ;; jitter banded smooth walls) and the FINEST marks keep 30%
-                              ;; (alternating-tone hard dabs bead edges into pearls) — the
+                              ;; tone jitter is scale-relative: broad fills keep 25% (full
+                              ;; jitter banded smooth walls) and the FINEST marks keep 15%
+                              ;; (alternating-tone bodied lines bead contours) — the
                               ;; visible mid-scale brushwork carries the painterly variety.
                               tn (* (let [l (long lvl)]
-                                      (cond (<= l 1) 0.25 (>= l 4) 0.3 :else 1.0))
+                                      (cond (<= l 1) 0.25 (>= l 4) 0.15 :else 1.0))
                                     (- (hash01 (+ (* i 37) lvl) j 13) 0.5))
                               ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
                               ;; keep centres in-bounds so no budget is wasted off-screen
@@ -471,12 +523,19 @@
                                                ;; dithered: ~75% suppressed — a few mid
                                                ;; strokes still fill the edge band, so
                                                ;; fine contour strokes sit IN paint
-                                               ;; instead of standing alone as outlines
+                                               ;; instead of standing alone as outlines.
+                                               ;; Level 3 stays: it carries text/eye-scale
+                                               ;; features; near edges it shrinks hard
+                                               ;; (below) instead of vanishing.
                                                (< (hash01 (+ (* i 53) lvl) j 37) 0.75))
                                         []
                                         (stroke-segments nf dmap lvl
                                                          (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
-                                                         (* ssz szf (- 1.0 (* 0.45 Ev)))
+                                                         ;; fat strokes shrink near edges so soft
+                                                         ;; tails can't cross the silhouette; the
+                                                         ;; fine liner strokes ARE the edge's own
+                                                         ;; paint and keep their size.
+                                                         (* ssz szf (- 1.0 (* (if (<= (long lvl) 3) 0.45 0.1) Ev)))
                                                          D 0.0 tn ds curvature stroke hd wd
                                                          segs stepf bendf
                                                          (if (<= (long lvl) 1) 1.0 0.0)
