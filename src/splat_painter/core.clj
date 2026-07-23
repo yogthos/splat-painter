@@ -72,6 +72,11 @@
 ;; GLib can't find the GSettings schemas. On Homebrew macOS they live under
 ;; /opt/homebrew/share, which a plain shell launch doesn't have in XDG_DATA_DIRS.
 (ffi/defcfn c-setenv "setenv" [:string :string :int] :int)
+(ffi/defcfn c-getenv "getenv" [:string] :pointer)
+
+(defn- getenv* [name]
+  (let [p (c-getenv name)]
+    (when-not (ffi/null? p) (ffi/ptr->string p))))
 
 (defn- readable? [path]
   (try (do (slurp path) true) (catch Throwable _ false)))
@@ -82,10 +87,19 @@
   (some #(readable? (str % "/glib-2.0/schemas/gschemas.compiled")) schema-dirs))
 
 (defn- ensure-schema-path!
-  "Point GLib at the standard schema locations if the caller's environment didn't
-  (setenv overwrite=0 — an existing XDG_DATA_DIRS wins). Must run before GTK init."
+  "Make GLib find gschemas.compiled at GTK/GSettings init. Must run before GTK init.
+  We can't just set the var when it's empty: a caller that already exports
+  XDG_DATA_DIRS *without* Homebrew's prefix (e.g. some terminals do) would still
+  abort the file dialog even though the schemas are on disk. So PREPEND our dirs
+  (overwrite=1, existing entries preserved) and also set GSETTINGS_SCHEMA_DIR — the
+  direct lever GSettings honours — at the concrete schema dirs."
   []
-  (c-setenv "XDG_DATA_DIRS" (str (clojure.string/join ":" schema-dirs)) 0))
+  (letfn [(prepend! [var dirs]
+            (let [ours (clojure.string/join ":" dirs)
+                  cur  (getenv* var)]
+              (c-setenv var (if (or (nil? cur) (zero? (count cur))) ours (str ours ":" cur)) 1)))]
+    (prepend! "XDG_DATA_DIRS" schema-dirs)
+    (prepend! "GSETTINGS_SCHEMA_DIR" (map #(str % "/glib-2.0/schemas") schema-dirs))))
 
 ;; --- GtkFileDialog save variant -----------------------------------------------
 (ffi/defcfn gtk-file-dialog-save        "gtk_file_dialog_save"
