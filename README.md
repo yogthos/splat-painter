@@ -86,6 +86,33 @@ joltc -M:pin       # print the golden fixture's actual checksums (for re-pinning
 
 Dev/debug entry points live under `test/`; only the app ships from `src/`.
 
+## REPL-driven development
+
+`joltc nrepl-server` (default port 7888, writes `.nrepl-port`) resolves `deps.edn`
+and parks the main thread on a pump, so an eval can start the GTK loop and jolt
+marshals the blocking main loop onto the main thread — the window comes up and the
+launching eval returns, leaving the REPL live. Connect any editor / nREPL client:
+
+```clojure
+(require 'splat-painter.core)
+(splat-painter.core/-main "img/street.jpg")   ; window opens; this returns
+
+;; the control atoms are the sliders — reset! one like a drag:
+(reset! splat-painter.core/broad-atom 2.5)
+;; GTK is single-threaded: marshal the re-render (any widget/GL touch) onto the
+;; main loop. Plain data (the atoms) is fine to touch from the REPL thread.
+(glimmer.core/on-gui #(#'splat-painter.core/request-render!))
+
+;; hot-reload: redefine a fn/def and the next render uses it, no restart —
+(alter-var-root #'splat-painter.seed/splat-budget (constantly 300000))
+(glimmer.core/on-gui #(#'splat-painter.core/request-render!))
+```
+
+`glimmer.core/reload!` re-renders the mounted panel after you redefine the `app`
+component. Quit through the app (close from its own menu / auto-quit) rather than
+destroying the window from the REPL — a raw `gtk_window_destroy` trips a teardown
+abort.
+
 ## Build
 
 A standalone binary (no `joltc` needed to run it) is compiled with `joltc build`:
