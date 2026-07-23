@@ -51,47 +51,43 @@
 ;; ---------------------------------------------------------------------------
 
 (defn gradient-field
-  "3×3 Sobel gradients (edge-replicate) from an image.
-   Returns {:h H :w W :gx ^doubles :gy ^doubles} each length H*W.
-   gx = d/dx (derivative across rows), gy = d/dy (derivative across cols)."
+  "Di Zenzo COLOUR structure-tensor products from 3×3 Sobel gradients per RGB
+   channel (edge-replicate): jxx = Σ_c gx_c², jyy = Σ_c gy_c², jxy = Σ_c gx_c·gy_c.
+   Luma-only gradients are blind to iso-luminant chroma edges — lips against skin,
+   red on green — which then never receive edge-guided strokes and blend into
+   blobs. Each channel is gamma-corrected (1/2.2) so dark regions keep their edge
+   signal. Returns {:h H :w W :jxx ^doubles :jyy ^doubles :jxy ^doubles} (pre-blur)."
   [image]
-  (let [^doubles L  (luma image)
-        H  (:height image)
+  (let [H  (:height image)
         W  (:width image)
+        ^doubles px (:pixels image)
         n  (* H W)
-        ;; Gamma 1/2.2 so gradients are ratio-based (perceptually uniform), not
-        ;; absolute luminance — dark regions keep their edge signal.
-        _  (dotimes [i n] (aset L i (Math/pow (aget L i) 0.4545)))
-        ^doubles gx (double-array n)
-        ^doubles gy (double-array n)]
+        ^doubles C (double-array (* n 3))
+        _  (dotimes [i (* n 3)] (aset C i (Math/pow (aget px i) 0.4545)))
+        ^doubles jxx (double-array n)
+        ^doubles jyy (double-array n)
+        ^doubles jxy (double-array n)]
     (dotimes [x H]
       (dotimes [y W]
         (let [idx (+ (* x W) y)
-              ;; clamped neighbour indices
               xm1 (clamp (dec x) 0 (dec H))
               xp1 (clamp (inc x) 0 (dec H))
               ym1 (clamp (dec y) 0 (dec W))
-              yp1 (clamp (inc y) 0 (dec W))
-              ;; luma values at 9 neighbours
-              L00 (aget L (+ (* xm1 W) ym1))
-              L01 (aget L (+ (* xm1 W) y))
-              L02 (aget L (+ (* xm1 W) yp1))
-              L10 (aget L (+ (* x   W) ym1))
-              L11 (aget L (+ (* x   W) y))
-              L12 (aget L (+ (* x   W) yp1))
-              L20 (aget L (+ (* xp1 W) ym1))
-              L21 (aget L (+ (* xp1 W) y))
-              L22 (aget L (+ (* xp1 W) yp1))]
-          ;; Sobel x: d/dx (row derivative)
-          ;; kx: row-1=[-1 -2 -1], row=[0 0 0], row+1=[1 2 1]
-          (aset gx idx (- (+ L20 (* 2.0 L21) L22)
-                          (+ L00 (* 2.0 L01) L02)))
-          ;; Sobel y: d/dy (col derivative)
-          ;; ky: row-1=[-1 0 1], row=[-2 0 2], row+1=[-1 0 1]
-          (aset gy idx (+ (- L00) L02
+              yp1 (clamp (inc y) 0 (dec W))]
+          (loop [c 0 sxx 0.0 syy 0.0 sxy 0.0]
+            (if (== c 3)
+              (do (aset jxx idx sxx) (aset jyy idx syy) (aset jxy idx sxy))
+              (let [at (fn [xi yi] (aget C (+ (* 3 (+ (* xi W) yi)) c)))
+                    L00 (at xm1 ym1) L01 (at xm1 y) L02 (at xm1 yp1)
+                    L10 (at x   ym1)                 L12 (at x   yp1)
+                    L20 (at xp1 ym1) L21 (at xp1 y) L22 (at xp1 yp1)
+                    gx (- (+ L20 (* 2.0 L21) L22)
+                          (+ L00 (* 2.0 L01) L02))
+                    gy (+ (- L00) L02
                           (* -2.0 L10) (* 2.0 L12)
-                          (- L20) L22)))))
-    {:h H :w W :gx gx :gy gy}))
+                          (- L20) L22)]
+                (recur (inc c) (+ sxx (* gx gx)) (+ syy (* gy gy)) (+ sxy (* gx gy)))))))))
+    {:h H :w W :jxx jxx :jyy jyy :jxy jxy}))
 
 ;; ---------------------------------------------------------------------------
 ;; structure-tensor (separable box-blur)
@@ -148,21 +144,12 @@
    per pixel, box-blurred (separable) over a (2*radius+1)×(2*radius+1) window.
    Returns {:h H :w W :jxx ^doubles :jyy ^doubles :jxy ^doubles}."
   [gfield radius]
-  (let [H (:h gfield) W (:w gfield)
-        ^doubles gx (:gx gfield) ^doubles gy (:gy gfield)
-        n (* H W)
-        ^doubles jxx (double-array n)
-        ^doubles jyy (double-array n)
-        ^doubles jxy (double-array n)]
-    (dotimes [i n]
-      (let [a (aget gx i) b (aget gy i)]
-        (aset jxx i (* a a))
-        (aset jyy i (* b b))
-        (aset jxy i (* a b))))
+  (let [H (:h gfield) W (:w gfield)]
+    ;; gradient-field already returns the colour-tensor products; just smooth them.
     {:h H :w W
-     :jxx (box-blur-2d jxx H W radius)
-     :jyy (box-blur-2d jyy H W radius)
-     :jxy (box-blur-2d jxy H W radius)}))
+     :jxx (box-blur-2d (:jxx gfield) H W radius)
+     :jyy (box-blur-2d (:jyy gfield) H W radius)
+     :jxy (box-blur-2d (:jxy gfield) H W radius)}))
 
 ;; ---------------------------------------------------------------------------
 ;; blur-image — one-time average-colour precompute
@@ -267,7 +254,7 @@
    field is enough to steer splats and cuts the one-time cost sharply. Returns
    {:h Ht :w Wt :jxx :jyy :jxy :gmax :src-h H :src-w W}; orient-at maps
    full-image coords into the tensor grid via :src-h/:src-w."
-  ([image] (analyze image 384))
+  ([image] (analyze image 768))
   ([image max-side]
    (let [H (:height image) W (:width image)
          scale (min 1.0 (/ (double max-side) (double (max H W))))
