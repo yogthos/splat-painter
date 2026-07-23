@@ -15,7 +15,7 @@
    Field textures (uploaded once per image load, all RGBA32F, texelFetch nearest):
      u_detail  W_d×H_d  .r = wavelet detail; normalized by u_dmax
      u_noise   W_n×H_n  .rgba = (theta, coherence, snoise, tnoise) from prep-noise
-     u_blur    W×H      .rgb = smooth base colour
+     u_blur    W×H      .rgb = smooth base colour (light); u_blurH = heavy (broad strokes)
      u_raw     W×H      .rgb = crisp pixel colour
      u_perm    512×1    .r = Perlin permutation (0..255)
    Reduced-res maps (detail/noise) carry their src dims so the shader maps a full-image
@@ -25,7 +25,7 @@
             [splat-painter.noise :as noise]
             [jolt.ffi :as ffi]))
 
-(def ^:private max-levels 5)
+(def ^:private max-levels 6)
 
 ;; --- generation program: vertex + geometry (transform feedback) --------------
 (def ^:private vs-src
@@ -45,7 +45,7 @@ out vec4 o_a;
 out vec4 o_b;
 out vec4 o_c;
 
-const int   ML      = 5;
+const int   ML      = 6;
 const float MIN_COH = 0.28;
 const int   SEGS    = 6;      // segments per fine-level brush stroke (seed/stroke-segs)
 
@@ -83,7 +83,8 @@ uniform vec2  u_detailSrc;   // (src_h, src_w) = image (H, W)
 uniform sampler2D u_noiseTex;
 uniform vec2  u_noiseDim;
 uniform vec2  u_noiseSrc;
-uniform sampler2D u_blurTex;  // W×H
+uniform sampler2D u_blurTex;  // W×H light blur (fine strokes' smooth base)
+uniform sampler2D u_blurHTex; // W×H HEAVY blur (base + broadest level: colour at their scale)
 uniform sampler2D u_rawTex;   // W×H
 uniform sampler2D u_permTex;  // 512×1
 
@@ -166,10 +167,10 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (
 
 // splat-record (mirror seed/splat-record) + emit one captured record. `alpha` is the
 // stroke taper (1.0 for base fills, fading toward a fine stroke's tail).
-void emitSplat(float px, float py, float csz, float D, float sn, float tn, float alpha){
+void emitSplat(float px, float py, float csz, float D, float sn, float tn, float alpha, float hb){
   vec2  tc    = fieldsAt(px, py);
   float theta = tc.x, coh0 = tc.y;
-  vec3  blur = sampleRGB(u_blurTex, px, py);
+  vec3  blur = (hb > 0.5) ? sampleRGB(u_blurHTex, px, py) : sampleRGB(u_blurTex, px, py);
   vec3  raw  = sampleRGB(u_rawTex,  px, py);
   float coh = MIN_COH + (1.0 - MIN_COH) * coh0;
   float e   = 1.0 + u_stroke * coh * (0.25 + 0.75 * D);
@@ -182,7 +183,7 @@ void emitSplat(float px, float py, float csz, float D, float sn, float tn, float
   float c00 = sx2*c*c + sy2*s*s;
   float c01 = (sx2 - sy2)*c*s;
   float c11 = sx2*s*s + sy2*c*c;
-  float t = clamp(0.55 + 0.45 * max(coh0, D), 0.0, 1.0);
+  float t = clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0);
   vec3 color0 = mix(blur, raw, t);
   vec3 colorAc = (u_contrast == 1.0) ? color0 : clamp((color0 - 0.5)*u_contrast + 0.5, 0.0, 1.0);
   float tone = 1.0 + u_variation * 0.15 * (2.0 * tn);
@@ -230,8 +231,10 @@ void main(){
   float snoise = hash01(i*31 + lvl, j, 11) - 0.5;
   float tnoise = hash01(i*37 + lvl, j, 13) - 0.5;
 
+  // broad strokes (base + level 1) colour from the HEAVY blur — smoothed at their scale
+  float hb = (lvl <= 1) ? 1.0 : 0.0;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
-    emitSplat(x2, y2, ssz, D, snoise, tnoise, 1.0);
+    emitSplat(x2, y2, ssz, D, snoise, tnoise, 1.0, hb);
     return;
   }
 
@@ -248,7 +251,7 @@ void main(){
     float tt = float(q) / float(segs - 1);
     float sz = ssz * (1.0 - 0.45 * tt * sqrt(tt));   // width tapers to the tip
     float al = 1.0 - 0.65 * tt * tt;                 // …and the paint thins out
-    emitSplat(px, py, sz, D, snoise, tnoise, al);
+    emitSplat(px, py, sz, D, snoise, tnoise, al, hb);
     vec2  tc  = fieldsAt(px, py);
     float bend = u_curv * 0.9 * bendf * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
@@ -268,7 +271,7 @@ void main(){
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
    "u_segs" "u_stepf" "u_bendf" "u_sharp"
    "u_detailTex" "u_dmax" "u_detailDim" "u_detailSrc"
-   "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_rawTex" "u_permTex"])
+   "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurHTex" "u_rawTex" "u_permTex"])
 
 (defn sources
   "Return {:vs-src :gs-src} — pure, no GL context (for headless inspection/tests)."
@@ -322,6 +325,7 @@ void main(){
   (let [H (long (:height img)) W (long (:width img))
         ^doubles raw (:pixels img)
         ^doubles blur (or (:blur img) (:pixels img))
+        ^doubles blurh (or (:blur-heavy img) blur)
         dmap (:detail img)
         Hd (long (:h dmap)) Wd (long (:w dmap))
         ^doubles dd (:detail dmap)
@@ -329,15 +333,16 @@ void main(){
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
         ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
-        detail-t (new-tex) noise-t (new-tex) blur-t (new-tex) raw-t (new-tex)]
+        detail-t (new-tex) noise-t (new-tex) blur-t (new-tex) blurh-t (new-tex) raw-t (new-tex)]
     ;; .r = aggregate placement map, .g = sharp fine-band map (finest levels read it)
     (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) (aget ds i) 0.0 1.0])))
     ;; orientation as double-angle components (cos2θ, sin2θ) + coherence — the GS
     ;; bilinearly blends the components (fieldsAt), never the raw angle.
     (upload-rgba! noise-t  Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget c2 i) (aget s2 i) (aget co i) 0.0])))
     (upload-rgba! blur-t   W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blur b) (aget blur (+ b 1)) (aget blur (+ b 2)) 1.0]))))
+    (upload-rgba! blurh-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurh b) (aget blurh (+ b 1)) (aget blurh (+ b 2)) 1.0]))))
     (upload-rgba! raw-t    W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget raw b) (aget raw (+ b 1)) (aget raw (+ b 2)) 1.0]))))
-    {:detail detail-t :noise noise-t :blur blur-t :raw raw-t :perm perm-tex
+    {:detail detail-t :noise noise-t :blur blur-t :blur-heavy blurh-t :raw raw-t :perm perm-tex
      :dmap dmap                              ; the CPU detail map, for layer-params' budget
      :dmax (double (:dmax dmap))
      :detail-dim [(double Hd) (double Wd)] :detail-src [(double H) (double W)]
@@ -444,6 +449,7 @@ void main(){
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 3)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:blur fields))   (gl/gl-uniform-1i (:u_blurTex locs) 3)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 4)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:raw fields))    (gl/gl-uniform-1i (:u_rawTex locs) 4)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 5)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:perm fields))   (gl/gl-uniform-1i (:u_permTex locs) 5)
+    (gl/gl-active-texture (+ gl/GL-TEXTURE0 6)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:blur-heavy fields)) (gl/gl-uniform-1i (:u_blurHTex locs) 6)
     (gl/gl-uniform-1f (:u_dmax locs) (double (:dmax fields)))
     (gl/gl-uniform-2f (:u_detailDim locs) (double (nth (:detail-dim fields) 0)) (double (nth (:detail-dim fields) 1)))
     (gl/gl-uniform-2f (:u_detailSrc locs) (double (nth (:detail-src fields) 0)) (double (nth (:detail-src fields) 1)))

@@ -115,7 +115,8 @@
 (deftest splat-record-spec
   ;; the pure per-splat math the GPU generation shader must reproduce; pin it directly so the
   ;; CPU/GPU spec is guarded independently of placement + field sampling.
-  ;; coh=0.64, e=2 → √e; s0=5 (snoise 0); t=0.775; contrast 1, tone 1 (tnoise 0).
+  ;; coh=0.64, e=2 → √e; s0=5 (snoise 0); t=0.15+0.85·0.5=0.575 (blur-leaning — smooth away
+  ;; from edges); contrast 1, tone 1 (tnoise 0).
   (let [{:keys [mean cov color]}
         (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0)
         [c00 c01 _ c11] cov
@@ -124,9 +125,9 @@
     (is (approx= 1e-6 50.0    c00))   ; sx² = (s0·√e)², e=2 ⇒ 50
     (is (approx= 1e-6 0.0     c01))   ; θ=0 ⇒ axis-aligned
     (is (approx= 1e-6 12.5    c11))   ; sy² = (s0/√e)² = 12.5
-    (is (approx= 1e-6 0.71    cr))    ; 0.4·0.225 + 0.8·0.775
-    (is (approx= 1e-6 0.245   cg))
-    (is (approx= 1e-6 0.1675  cb))))
+    (is (approx= 1e-6 0.63    cr))    ; 0.4·0.425 + 0.8·0.575
+    (is (approx= 1e-6 0.285   cg))
+    (is (approx= 1e-6 0.2275  cb))))
 
 (deftest splat-field-golden
   ;; whole-generation regression guard (placement + covariance + colour). Pins the splat count
@@ -140,14 +141,14 @@
         [sx sy sd sc] (reduce (fn [[sx sy sd sc] {[mx my] :mean [c00 c01 _ c11] :cov [cr cg cb] :color}]
                                 [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc cr cg cb)])
                               [0.0 0.0 0.0 0.0] splats)]
-    ;; older: count=254 (pre placement-map); 497 (dabs); 516 (uniform 6-seg strokes).
-    ;; Now stroke behaviour is scale-relative (segs/step/bend per level) and the finest
-    ;; levels place against the sharp fine-band map.
-    (is (= 488 (count splats)))
-    (is (approx= 0.5  13015.793  sx) "Σ mean-x")
-    (is (approx= 0.5  15294.527  sy) "Σ mean-y")
-    (is (approx= 1.0  278698.397 sd) "Σ det(cov)")
-    (is (approx= 0.05 483.365    sc) "Σ colour")))
+    ;; older: count=254 (pre placement-map); 497 (dabs); 516 (uniform 6-seg strokes);
+    ;; 488 (scale-relative strokes). Now: 6-level pyramid (detail 0.6 → 4 levels) and
+    ;; the blur-leaning colour blend (t = 0.15+0.85·max — smooth away from edges).
+    (is (= 584 (count splats)))
+    (is (approx= 0.5  15028.601  sx) "Σ mean-x")
+    (is (approx= 0.5  17863.025  sy) "Σ mean-y")
+    (is (approx= 1.0  278719.334 sd) "Σ det(cov)")
+    (is (approx= 0.05 676.034    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -172,16 +173,17 @@
         dmap   (wavelet/placement-map img sfield)
         {:keys [nlev levels total warp]} (seed/layer-params dmap 0.6 6.0 0.5 0.5 4000 48 64)
         cells (map (fn [l] (* (:nx l) (:ny l))) levels)]
-    (is (= 3 nlev) "detail 0.6 -> 1+round(1.8) = 3 levels")
-    (is (= 3 (count levels)))
-    (is (= 2 (:lvl (first levels))) "finest level first")
+    (is (= 4 nlev) "detail 0.6 -> 1+round(3.0) = 4 levels")
+    (is (= 4 (count levels)))
+    (is (= 3 (:lvl (first levels))) "finest level first")
     (is (= 0 (:lvl (last levels)))  "base level last")
     (is (= -1.0 (:th (last levels))) "base keeps all cells")
     (is (= 0 (:offset (first levels))))
     (is (= (map :offset levels) (reductions + 0 (butlast cells))) "cumulative finest-first offsets")
     (is (= total (reduce + cells)) "total = Σ candidate cells")
     (is (approx= 1e-9 0.475 warp) "warp = 0.95 * curvature")
-    (is (approx= 1e-6 (:ssz (last levels)) (* 2.0 (:ssz (nth levels 1)))) "base stdev = 2× next-finer")))
+    (is (approx= 1e-6 (:ssz (last levels)) (* 2.0 (:ssz (nth levels (- (count levels) 2)))))
+        "base stdev = 2× the next-finer level")))
 
 (deftest contrast-brightens-highlights
   ;; (0.7-0.5)*2.0+0.5 = 0.9

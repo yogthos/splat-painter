@@ -20,7 +20,8 @@
         [sfield an-ms] (once-ms #(structure/analyze img0))
         [dmap d-ms]    (once-ms #(wavelet/placement-map img0 sfield))
         [blur b-ms]    (once-ms #(structure/blur-image img0 2))
-        img (assoc img0 :structure sfield :detail dmap :blur blur :noise-fields (seed/prep-noise sfield))
+        [blurh bh-ms]  (once-ms #(structure/blur-image img0 (max 6 (quot (:height img0) 80))))
+        img (assoc img0 :structure sfield :detail dmap :blur blur :blur-heavy blurh :noise-fields (seed/prep-noise sfield))
         _ (println (format "ONE-TIME load: analyze %.0f  detail %.0f  blur %.0f ms"
                            an-ms d-ms b-ms))
         H  (double (:height img))
