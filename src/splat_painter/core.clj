@@ -163,10 +163,18 @@
           ;; the Perlin flow fields. Placement is coarse-to-fine layers (splat-painter.seed),
           ;; no deforming grid.
           sfield (structure/analyze img0)
-          light  (structure/blur-image img0 2)
+          ;; EDGE-AWARE light blur: smooth within a shade region, no mixing across
+          ;; boundaries — the box blur fed strokes near edges contaminated colours
+          ;; (pale splotches in dark areas, smudges on smooth skin)
+          light  (structure/bilateral-blur img0 3)
+          ;; the drift/dry-out probes keep a FORGIVING box blur: on the razor-sharp
+          ;; bilateral field any probe wobble across a boundary trips the lift
+          ;; threshold instantly and fragments contour chains into bead dashes
+          drift  (structure/blur-image img0 2)
           heavy  (structure/blur-image img0 (max 6 (quot (:height img0) 80)))
           img    (assoc img0 :structure sfield
                              :blur   light
+                             :blur-drift drift
                              ;; heavy blur = the smooth colour field broad strokes paint with;
                              ;; edge-preserving so silhouettes don't halo
                              :blur-heavy (structure/edge-preserving-blur img0 light heavy)

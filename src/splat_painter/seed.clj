@@ -419,7 +419,7 @@
    edge strokes alternate the two sides' colours as centres jittered across the
    contour — a bright/dark bead necklace along every silhouette).
    Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
-  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih lth melt mkind gainv]
+  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih lth melt mkind gainv blurd-px]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
       ;; melted bokeh daubs ROUND OFF (coherence → 0 kills the elongation and pulls
@@ -495,7 +495,10 @@
                               dm (max (Math/abs (- rm r0)) (Math/abs (- gm g0)) (Math/abs (- bm b0)))
                               sidec (if (< dp dm) 1.0 -1.0)]
                           [(* sidec 0.7 ssz nx0) (* sidec 0.7 ssz ny0)])))
-          [hr hg hb0] (sample-arr blur-px iw ih (+ cx0 bax) (+ cy0 bay))]
+          ;; the drift reference + probes read the FORGIVING box field (blurd-px):
+          ;; on the razor-sharp bilateral paint field any probe wobble across a
+          ;; boundary trips the lift instantly and dashes contour chains into beads
+          [hr hg hb0] (sample-arr blurd-px iw ih (+ cx0 bax) (+ cy0 bay))]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
         (if (or (> k kmax) (< fade 0.15))
           acc
@@ -514,7 +517,7 @@
                 ;; (the pale ghost lump over the crown), so coverage strokes never
                 ;; carry paint across a boundary; smooth gradients stay under 0.18.
                 fade (if (pos? k)
-                       (let [[br bg bb] (sample-arr blur-px iw ih (+ px bax) (+ py bay))
+                       (let [[br bg bb] (sample-arr blurd-px iw ih (+ px bax) (+ py bay))
                              dmx (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))]
                          (cond (> dmx (if (<= (long lvl) 1) 0.18 0.45)) 0.0
                                (> dmx (if liner? 0.3 0.22)) (* fade 0.4)
@@ -646,7 +649,7 @@
    the surviving seed, then hand it to `stroke-segments` (base fill vs traced brush stroke).
    Emits [x y size D sn tn alpha theta coherence] per SEGMENT (D = effective detail 0..1;
    sn/tn = per-seed size/tone jitter hashes in [-0.5,0.5])."
-  [dmap nf detail size variation curvature stroke tier-muls count H W blur-px]
+  [dmap nf detail size variation curvature stroke tier-muls count H W blur-px blurd-px]
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
         iw   (long W) ih (long H)
         deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
@@ -842,7 +845,7 @@
                                                            (* traw (+ 0.6 (* 0.4 sgate)))
                                                            traw)
                                                          sgate blur-px iw ih th melt
-                                                         map-kind gain))]
+                                                         map-kind gain blurd-px))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         (map-indexed vector levels)))))
@@ -1010,10 +1013,11 @@
         ^doubles raw-px  pixels
         ^doubles blur-px (or (:blur image) pixels)
         ^doubles blurh-px (or (:blur-heavy image) blur-px)
+        ^doubles blurd-px (or (:blur-drift image) blur-px)
         nf         (or (:noise-fields image) (prep-noise sfield))
         segments   (layered-means dmap nf detail size variation curvature stroke
                                   [(double size-broad) (double size-mid) (double size-fine)]
-                                  n height width blur-px)
+                                  n height width blur-px blurd-px)
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
