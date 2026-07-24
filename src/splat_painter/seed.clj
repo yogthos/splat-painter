@@ -137,11 +137,13 @@
 ;; finest levels read the SHARP fine-band detail map (wavelet/sharp-at), so they
 ;; land on (and preserve) text/eye-scale structure the smoothed aggregate blurs.
 (defn- seg-count
-  "segments per stroke at placement level. The fine tier (lvl≥4) traces LONG
-   8-segment liner lines: at a couple-of-pixels stdev a 2-segment chain is a dot,
-   and a contour drawn as dots reads jagged — a clean thin line needs one
-   continuous stroke. Budget-invariant: seed spacing scales with √segs, so the
-   same segment count is arranged into fewer, longer strokes."
+  "segments per stroke at placement level — the FALLBACK table for NON-liner
+   levels (broad/mid at large Size, where the chains are coverage strokes, not
+   thin contour liners). LINER levels (nominal size < 3.5px, lvl≥2) override this
+   via layer-params' segs-of with a span-targeted count (up to 32), so a small-σ
+   level traces one long continuous line instead of the short stitched dashes this
+   3-8 table lays down (the contour thatch). Budget-invariant: seed spacing scales
+   with √segs, so the same segment count is arranged into fewer, longer strokes."
   [lvl]
   (let [l (long lvl)] (cond (zero? l) 1 (== l 1) 6 (== l 2) 4 (== l 3) 3 :else 8)))
 (defn- step-frac
@@ -220,28 +222,6 @@
         area    (double (* (long H) (long W)))
         nlev    (long (max 1 (min 7 (inc (Math/round (* (double detail) 6.0))))))
         thresh  (fn [lvl] (if (zero? (long lvl)) -1.0 (min 0.9 (* 0.26 (double lvl)))))
-        ;; base layer overlaps heavily (spacing 0.72×stdev ⇒ full coverage); finer layers are
-        ;; sparser accents (the base fills behind them, so gaps between fine strokes don't
-        ;; matter). Overlap is FIXED, so coverage never depends on the budget. Fine seeds are
-        ;; √segs(lvl) sparser than dabs: each seed traces a segs(lvl)-segment stroke that
-        ;; COVERS the along-edge span, so the total segment count (and thus the budget scale —
-        ;; the stroke WIDTH) stays what single dabs cost. Without this the ×segs budget term
-        ;; would fatten every stroke and smear the detail the chains exist for.
-        ;; fine spacing also scales with √(stroke length): the seed grid assumes each
-        ;; chain spans ~segs·step of edge — short strokes (low Stroke) must pack
-        ;; denser or they render as sparse isolated pearls; long strokes space out.
-        ;; At the default Stroke (2.5) the factor is exactly 1.
-        ;; base overlap 0.65 (was 0.72): hash-random placement has gap variance a
-        ;; lattice doesn't; slightly tighter spacing keeps coverage airtight.
-        ;; the fine tier (lvl≥4) packs TIGHTER (0.7 vs 1.25): its levels overlap each
-        ;; other AND the mid tier, so detailed areas get many strokes mixing into one
-        ;; surface — and its liner strokes die early at colour boundaries (dry-out),
-        ;; so seeds must overlap enough that successive lines hand off without the
-        ;; contour breaking into stitched dashes.
-        overlap (fn [lvl] (let [l (long lvl)]
-                            (cond (zero? l) 0.65
-                                  (<= l 3)  (* 1.25 (Math/sqrt (* (double (seg-count lvl)) slen)))
-                                  :else     (* 0.7 (Math/sqrt (* (double (seg-count lvl)) slen))))))
         ;; level size ladder: halves per level down to level 4, then decays gently
         ;; (×0.7 per level) with a ~pixel floor — the finest detail lands at a
         ;; couple-of-pixels footprint, never sub-pixel dust the AA clamp fades away.
@@ -264,6 +244,59 @@
         ;; dusted mid/fine layers punch the gradation ladder out of the painting and
         ;; leave raw base-to-line transitions (Mid/Fine turned left looked worse).
         nsize   (fn [lvl] (max 0.7 (* (smul lvl) (lsize lvl))))
+        ;; LINER-SCALE classification (mirrors the per-chain liner? in stroke-segments:
+        ;; the same 3.5px NOMINAL-size test with the lvl≥2 floor — lvl 0 is the base
+        ;; fill, lvl 1 the broad coverage tier, neither is ever a liner). At small
+        ;; Stroke/Size the mid levels (2-3) drop below the threshold and join the fine
+        ;; liners (4+). Nominal (pre-budget-scale) so it is deterministic and identical
+        ;; CPU/GPU (both receive these maps as uniforms).
+        liner?  (fn [lvl] (and (>= (long lvl) 2) (< (nsize lvl) 3.5)))
+        ;; LINER chains trace one long continuous line instead of the short stitched
+        ;; dashes a small-σ grid of 3-8-segment chains lays down (the contour thatch):
+        ;; ~28px span target at the default Stroke, scaled BY Stroke so the slider
+        ;; extends the LINE not the gaps; clamped 8..32 (32 = the GS vertex cap) and
+        ;; computed from NOMINAL size so budget scale never perturbs it.
+        segs-of (fn [lvl] (if (liner? lvl)
+                            (let [span (* 28.0 slen)
+                                  step (* (step-frac lvl) (nsize lvl))]
+                              (long (max 8 (min 32 (Math/round (/ span step))))))
+                            (seg-count lvl)))
+        ;; stepf is FINAL here (Stroke folded in): liner levels carry no Stroke factor
+        ;; (the slider acts through segs/span instead), broad/mid carry slen. Both
+        ;; trace loops consume stepf as-is — no in-loop stroke-length multiplication.
+        stepf-of (fn [lvl] (* (step-frac lvl) (if (liner? lvl) 1.0 slen)))
+        ;; base layer overlaps heavily (~0.65×stdev ⇒ full coverage); finer layers are
+        ;; sparser accents (the base fills behind them). Overlap is FIXED, so coverage
+        ;; never depends on the budget. Fine seeds are √segs sparser than dabs — each
+        ;; seed traces a segs-segment stroke that COVERS the along-edge span, so the
+        ;; total segment count (and thus the budget scale — the stroke WIDTH) stays what
+        ;; single dabs cost: the ×segs term and the √segs spacing cancel
+        ;; (k = segs·f·area/sp², sp² ∝ segs ⇒ k ∝ f/size², segs-invariant).
+        ;; LINER levels trace LONG continuous chains (segs-of, up to 32) instead of the
+        ;; short stitched dashes that thatch small-σ contours; their spacing keeps the
+        ;; level's OWN tier coefficient (1.25 mid / 0.7 fine) scaled by √segs with NO
+        ;; slen factor (Stroke is folded into segs/span). Keeping the tier coefficient —
+        ;; not forcing 0.7 onto reclassified mid levels — is what holds the invariant:
+        ;; forcing 0.7 raised a mid level's k ≈(1.25/0.7)²≈3.2× and inflated the shared
+        ;; scale, which damped the Broad slider's bokeh growth below its test ratio.
+        ;; Non-liner (broad/mid coverage) stays √(seg-count·slen): short strokes (low
+        ;; Stroke) pack denser or they pearl-string; at default Stroke (slen 1) = 1.
+        ;; base overlap 0.65 (was 0.72): hash-random placement has gap variance a
+        ;; lattice doesn't; slightly tighter spacing keeps coverage airtight.
+        ;; liner spacing scales with √min(segs,14), NOT the full nominal span: chains
+        ;; on busy or tightly curved contours die to dry-out well short of their span
+        ;; target, and spacing the seeds for the NOMINAL span left the survivors'
+        ;; actual coverage below overlap — contour bands broke into sparse hard
+        ;; dashes (the detached ring around the avatar's eyes). Seeds spaced for a
+        ;; ~14-segment survivor keep the band continuous; chains that DO reach full
+        ;; span simply overlap more, which is the handoff continuity we want. The
+        ;; extra k this costs at long segs flows into scale-f like any other demand.
+        overlap (fn [lvl] (let [l (long lvl)
+                                cnt (if (liner? lvl) (min (segs-of lvl) 14) (seg-count lvl))
+                                stf (if (liner? lvl) 1.0 slen)]
+                            (cond (zero? l) 0.65
+                                  (<= l 3)  (* 1.25 (Math/sqrt (* (double cnt) stf)))
+                                  :else     (* 0.7  (Math/sqrt (* (double cnt) stf))))))
         ;; tier multipliers scale size AND spacing together (constant overlap), so
         ;; each tier's density rebalances through the budget automatically.
         sp-of   (fn [lvl scale] (* (overlap lvl) scale
@@ -299,7 +332,7 @@
                                                    (max 0.0 (- (lvl-frac lvl) (lvl-frac (inc (long lvl)))))
                          :else                     (lvl-frac lvl))
                      sp (sp-of lvl 1.0)]
-                 (/ (* (double (seg-count lvl)) f area) (* sp sp))))
+                 (/ (* (double (segs-of lvl)) f area) (* sp sp))))
         Kc (reduce + 0.0 (map k-of (range 0 (min nlev 4))))
         Kf (if (> nlev 4) (reduce + 0.0 (map k-of (range 4 nlev))) 0.0)
         scale-c (max 1.0 (Math/sqrt (/ Kc budget)))
@@ -329,7 +362,7 @@
                      (recur (dec lvl) (+ off (* nx ny))
                             (conj out {:lvl lvl :ssz ssz :sp sp :th (thresh lvl)
                                        :nx nx :ny ny :offset off
-                                       :segs (seg-count lvl) :stepf (step-frac lvl)
+                                       :segs (segs-of lvl) :stepf (stepf-of lvl)
                                        :bendf (bend-frac lvl) :map-kind (level-map-kind lvl)
                                        :traw (raw-floor lvl)})))))]
     {:nlev nlev :warp warp :scale scale :levels levels
@@ -536,11 +569,16 @@
                 ;; escaped segment paints a huge wrong-colour cloud past a silhouette
                 ;; (the pale ghost lump over the crown), so coverage strokes never
                 ;; carry paint across a boundary; smooth gradients stay under 0.18.
+                ;; LINER chains lift HARD at 0.32: a long chain escaping a dark
+                ;; contour onto light ground reads the r2-blurred drift field a
+                ;; step or two late, and at the old 0.45 threshold each escape
+                ;; painted several bodied dark segments (the scribbles around
+                ;; tightly curved contours once chains got long).
                 fade (if (pos? k)
                        (let [[br bg bb] (sample-arr blurd-px iw ih (+ px bax) (+ py bay))
                              dmx (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))]
-                         (cond (> dmx (if (<= (long lvl) 1) 0.18 0.45)) 0.0
-                               (> dmx (if liner? 0.3 0.22)) (* fade 0.4)
+                         (cond (> dmx (cond (<= (long lvl) 1) 0.18 liner? 0.32 :else 0.45)) 0.0
+                               (> dmx (if liner? 0.2 0.22)) (* fade (if liner? 0.35 0.4))
                                :else fade))
                        fade)
                 [th coh] (sample-fields nf px py)
@@ -651,9 +689,20 @@
                                 ml (Math/sqrt (+ (* mx mx) (* my my)))]
                             (if (> ml 1e-6) [(/ mx ml) (/ my ml)] [dx dy]))
                           [dx dy])
-                ;; the Stroke slider is stroke LENGTH: it scales the chain step (the
-                ;; curve-following extent), not the segment ellipse. 2.5 (default) = 1.
-                L  (* ssz (double stepf) (stroke-len-frac stroke))]
+                ;; the Stroke slider acts through layer-params now: on LINER levels it
+                ;; extends the chain SPAN (segs), on broad/mid it scales the STEP (stepf
+                ;; already carries slen). Both loops consume stepf as-is.
+                L  (* ssz (double stepf))
+                ;; TURN-KILL: when the field wants to turn sharper than a liner can
+                ;; follow (|dot| of the field direction with the previous step under
+                ;; cos ~35°), the chain has hit a CORNER or junction — long chains
+                ;; that plowed through on momentum flew off tangentially at every
+                ;; pointed contour (eye corners) and scribbled their dark load onto
+                ;; the ground. A draughtsman lifts at corners; the brush dries fast.
+                fade (if (and liner? (pos? k)
+                              (< (Math/abs (+ (* dx0 dxp) (* dy0 dyp))) 0.82))
+                       (* fade 0.3)
+                       fade)]
             (let [nx0 (max 0.0 (min hd (+ px (* L dx))))
                   ny0 (max 0.0 (min wd (+ py (* L dy))))
                   [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd sgain) [nx0 ny0])
