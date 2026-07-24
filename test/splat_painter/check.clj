@@ -77,15 +77,17 @@
     (assert-contains fs-src-quad "vec3  col = clamp(base * bright, 0.0, 1.0);" "quad paint-texture colour")
     (assert-contains fs-src-quad "frag = vec4(col * a, a);" "quad premultiplied output"))
 
-  ;; the base-layer blit (opaque underpaint drawn under the splat pass once a layer
-  ;; is active): attribute-less, same letterbox rect as the quad VS, alpha forced to 1
+  ;; the layer blit (alpha-aware: each committed pass composited src-over at its
+  ;; stored opacity under/over the live splat pass): attribute-less, same letterbox
+  ;; rect as the quad VS, premultiplied content scaled by u_alpha
   (let [{:keys [vs-src-blit fs-src-blit]} (shader/sources)]
-    (println "render (base-layer blit variant):")
+    (println "render (layer blit variant):")
     (assert-contains vs-src-blit "int corner = gl_VertexID;" "blit attribute-less (gl_VertexID only)")
     (assert-contains vs-src-blit "float scale = min(u_viewport.x / u_image.x, u_viewport.y / u_image.y);" "blit letterbox mapping")
     (assert-contains vs-src-blit "v_uv = (pane - org) / (u_image * scale);" "blit texcoord from letterbox rect")
     (assert-contains fs-src-blit "uniform sampler2D u_layer;" "blit u_layer sampler")
-    (assert-contains fs-src-blit "frag = vec4(c.rgb, 1.0);" "blit opaque (alpha forced to 1) base output"))
+    (assert-contains fs-src-blit "uniform float u_alpha;" "blit per-blit opacity gain")
+    (assert-contains fs-src-blit "frag = vec4(c.rgb * u_alpha, c.a * u_alpha);" "blit alpha-aware premultiplied output"))
 
   ;; the GPU generation shader must MIRROR seed/splat-record + layered-means + noise
   (let [{:keys [vs-src gs-src]} (gen/sources)]

@@ -1,6 +1,6 @@
 (ns splat-painter.layer-test
   (:require [clojure.test :refer [deftest is testing]]
-            [splat-painter.core :refer [rgba->image]]
+            [splat-painter.core :as core :refer [rgba->image]]
             [jolt.ffi :as ffi]))
 
 ;; rgba->image consumes a raw RGBA byte buffer exactly as glReadPixels returns it
@@ -45,3 +45,62 @@
         ;; index 3*(0*2+1)+1 = 4, and it reads 200/255
         (is (< (Math/abs (- (px img 0 1 1) (/ 200.0 255.0))) 1e-9)))
       (ffi/free buf))))
+
+;; --- layer stack: the pure vector + settings helpers --------------------------
+;; The GL capture/commit fns can't run headless, but the index bookkeeping they
+;; share (insert-at-active, remove-at-j, snapshot/restore of every slider) is
+;; exercised here against dummy entries and the real control atoms.
+
+(deftest settings-snapshot-round-trip
+  (testing "snapshot then restore reproduces every control atom exactly"
+    (let [saved (core/snapshot-settings)]
+      (is (= 14 (count saved)))                  ; count size broad mid fine detail
+      (core/restore-settings! (vec (repeat 14 0.37))) ; variation curvature stroke contrast
+      (is (every? #(== 0.37 %) (core/snapshot-settings))) ; hardness tex-streak/grain/edge
+      (core/restore-settings! saved)
+      (is (= saved (core/snapshot-settings))))))
+
+(deftest insert-layer-appends-at-top-inserts-in-middle
+  (let [e (fn [x] {:tex x})]
+    (is (= [(e :a)]             (core/insert-layer [] 0 (e :a))))          ; append on empty
+    (is (= [(e :a) (e :b)]      (core/insert-layer [(e :a)] 1 (e :b))))    ; append at top
+    (is (= [(e :a) (e :x) (e :b)]
+          (core/insert-layer [(e :a) (e :b)] 1 (e :x))))))                 ; insert middle
+
+(deftest remove-layer-drops-index-j
+  (let [e (fn [x] {:tex x})]
+    (is (= [(e :b)]               (core/remove-layer [(e :a) (e :b)] 0)))
+    (is (= [(e :a)]               (core/remove-layer [(e :a) (e :b)] 1)))
+    (is (= [(e :a) (e :c)]        (core/remove-layer [(e :a) (e :b) (e :c)] 1)))))
+
+(deftest layer-stack-navigation
+  (testing "add commits under the live top; select swaps live with layers[j]"
+    ;; index convention (documented once in core/commit-active!): with N committed
+    ;; layers and active in [0,N], the live pass sits between layers[active-1] and
+    ;; layers[active]; below = layers[0..active), above = layers[active..N).
+    (let [insert   core/insert-layer
+          remove   core/remove-layer
+          commit   (fn [id] {:tex id :opacity 0.6 :settings [id]})
+          v (atom []) a (atom 0)
+          tex      (fn [coll] (vec (map :tex coll)))]
+      ;; three add-layer! operations: commit the live pass at `active`, then push
+      ;; active to the new top (count).
+      (swap! v insert @a (commit :c0)) (reset! a (count @v))   ; v=[c0] a=1
+      (swap! v insert @a (commit :c1)) (reset! a (count @v))   ; v=[c0,c1] a=2
+      (swap! v insert @a (commit :c2)) (reset! a (count @v))   ; v=[c0,c1,c2] a=3
+      (is (= [:c0 :c1 :c2] (tex @v)))
+      (is (= 3 @a))
+      ;; select-layer! 1: commit at active(==count)=append, then drop index 1.
+      (swap! v insert @a (commit :c3))                          ; v=[c0,c1,c2,c3]
+      (swap! v remove 1)                                        ; v=[c0,c2,c3]
+      (reset! a 1)
+      (is (= [:c0 :c2 :c3] (tex @v)))                           ; below=[c0] above=[c2,c3]
+      (is (= [:c0] (tex (subvec @v 0 @a))))
+      (is (= [:c2 :c3] (tex (subvec @v @a))))
+      ;; select-layer! 0: commit at active(1)=INSERT MIDDLE, then drop index 0.
+      (swap! v insert @a (commit :c4))                          ; insert@1 -> [c0,c4,c2,c3]
+      (is (= [:c0 :c4 :c2 :c3] (tex @v)))
+      (swap! v remove 0)                                        ; [c4,c2,c3]
+      (reset! a 0)
+      (is (= [:c4 :c2 :c3] (tex @v)))                           ; below=[] above=[c4,c2,c3]
+      (is (= 0 @a)))))
