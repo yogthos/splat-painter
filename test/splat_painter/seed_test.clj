@@ -180,11 +180,17 @@
     ;; stdev, not the level index — small mid-tier chains inherit it — and the
     ;; mid placement map fuses E² so mid strokes hug edge cores instead of
     ;; seeding across the whole tensor-blur band.
-    (is (= 743 (count splats)))
-    (is (approx= 0.5  15818.174  sx) "Σ mean-x")
-    (is (approx= 0.5  21852.901  sy) "Σ mean-y")
-    (is (approx= 1.0  219780.193 sd) "Σ det(cov)")
-    (is (approx= 0.05 850.262    sc) "Σ colour")))
+    ;; (743→769) boundary-side brush-load: chains near a colour BOUNDARY sample
+    ;; their paint ~0.7σ across the tangent on their own side (thin LINE features
+    ;; keep on-ridge colour) — chains parallel to a boundary no longer alternate
+    ;; sides per seed, which tiled every contour into colour capsules (the
+    ;; regular wavy scallops). The dry-out probe moves with the sample, so a few
+    ;; more boundary chains survive.
+    (is (= 769 (count splats)))
+    (is (approx= 0.5  16379.842  sx) "Σ mean-x")
+    (is (approx= 0.5  22437.124  sy) "Σ mean-y")
+    (is (approx= 1.0  219783.599 sd) "Σ det(cov)")
+    (is (approx= 0.05 879.861    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
