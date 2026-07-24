@@ -150,8 +150,13 @@
    enough that 8 segments span a real line along the edge."
   [lvl]
   (let [l (long lvl)] (cond (== l 1) 1.1 (== l 2) 0.9 (== l 3) 0.75 (== l 4) 0.9 (== l 5) 0.85 :else 0.8)))
-(defn- bend-frac "how much of the Curvature bend this level keeps" [lvl]
-  (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 (== l 4) 0.15 (== l 5) 0.1 :else 0.05)))
+(defn- bend-frac
+  "How much of the Curvature Perlin bend this level keeps. The LINER tier (lvl≥4)
+   keeps NONE: Perlin gives large/medium strokes their natural brush-vector
+   variation, but fine strokes exist to follow the original detail exactly —
+   any noise wobble at that scale reads as jaggedness, not character."
+  [lvl]
+  (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 :else 0.0)))
 (defn- tier-mul
   "Per-tier size multiplier from [broad mid fine] — the user's independent control
    of each resolution band: loosen/blur the background (broad up) while keeping
@@ -642,7 +647,25 @@
                               ;; made Broad growth/thinning/melt inert exactly where
                               ;; they exist to act.
                               sabs  (wavelet/subject-abs-at dmap cx cy)
-                              mloc  (+ 1.0 (* (- bmul 1.0) (- 1.0 sabs)))
+                              ;; the Broad growth is gated by the whole GROWN FOOTPRINT,
+                              ;; not just the centre: a daub centred 25px out in the bokeh
+                              ;; reads flat there, grows ×2.5, and its body reaches back
+                              ;; across the silhouette — a wash veil over the subject's rim
+                              ;; that gets worse the higher Broad goes. The subject map is
+                              ;; wide (box-blurred), so 8 sparse taps at the grown radius
+                              ;; can't miss a nearby subject the way thin edge-band taps do.
+                              sfoot (if (and (<= (long lvl) 1) (> bmul 1.0))
+                                      (let [m0 (+ 1.0 (* (- bmul 1.0) (- 1.0 sabs)))
+                                            d  (* 1.2 ssz m0)
+                                            dd (* 0.7071 d)
+                                            sa (fn [x y] (wavelet/subject-abs-at dmap x y))]
+                                        (max sabs
+                                             (sa (+ cx d) cy) (sa (- cx d) cy)
+                                             (sa cx (+ cy d)) (sa cx (- cy d))
+                                             (sa (+ cx dd) (+ cy dd)) (sa (- cx dd) (- cy dd))
+                                             (sa (+ cx dd) (- cy dd)) (sa (- cx dd) (+ cy dd))))
+                                      sabs)
+                              mloc  (+ 1.0 (* (- bmul 1.0) (- 1.0 sfoot)))
                               ;; broad tier: flat regions thin candidates by (bmin/m)² as
                               ;; the kept seeds grow ×m — few LARGE daubs = smooth bokeh;
                               ;; at full subjectness m=1 and the Broad dial has no effect.
@@ -689,8 +712,10 @@
                               x  cx y cy
                               D  (deff dv)
                               ;; flat-region Perlin warp breaks any residual level lattice;
-                              ;; detail strokes (D≈1) stay put → faithful edges.
-                              aw (* warp (- 1.0 D) ssz)
+                              ;; detail strokes (D≈1) stay put → faithful edges. The liner
+                              ;; tier gets NO warp at all — fine seeds must land exactly on
+                              ;; the detail they trace (see bend-frac).
+                              aw (if (>= (long lvl) 4) 0.0 (* warp (- 1.0 D) ssz))
                               x2 (if (< aw 0.2) x
                                    (+ x (* aw (noise/noise2 (* 0.06 x) (* 0.06 y)))))
                               y2 (if (< aw 0.2) y
@@ -719,9 +744,11 @@
                               ;; are the wanted effect) and only where subjectness is low —
                               ;; the Broad slider at max makes bokeh strokes invisible while
                               ;; detailed regions keep their brushwork untouched.
+                              ;; melt keys on the footprint too: strokes touching a subject
+                              ;; keep their identity; only fully-flat ones sink into the wash.
                               melt (if (<= (long lvl) 1)
                                      (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
-                                        (- 1.0 sabs))
+                                        (- 1.0 sfoot))
                                      0.0)
                               ;; tone jitter is scale-relative: broad fills keep 25% (full
                               ;; jitter banded smooth walls) and the FINEST marks keep 15%
