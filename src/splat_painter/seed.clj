@@ -419,7 +419,7 @@
    edge strokes alternate the two sides' colours as centres jittered across the
    contour — a bright/dark bead necklace along every silhouette).
    Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
-  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih lth melt]
+  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih lth melt mkind gainv]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
       ;; melted bokeh daubs ROUND OFF (coherence → 0 kills the elongation and pulls
@@ -432,8 +432,14 @@
           ;; (predictor: tangent step; corrector: ridge snap) — the stroke GLUES to
           ;; the line it is painting instead of braiding beside it.
           snap? (>= (long lvl) 2)
+          ;; LINER discipline keys on the PHYSICAL stroke size, not the level index:
+          ;; which level paints "fine detail" depends on the sliders (Mid at 0.6
+          ;; makes levels 2-3 smaller than the lvl-4 liners at Fine 1.0). Any small
+          ;; accent chain must follow the original detail exactly — momentum,
+          ;; gentle ridge snap, line-hold, no Perlin — or it reads as waviness.
+          liner? (or (>= (long lvl) 4) (and (>= (long lvl) 2) (< (double ssz) 3.5)))
           ;; liner chains correct gently mid-stroke (see edge-snap's gain doc)
-          sgain (if (>= (long lvl) 4) 0.35 0.65)
+          sgain (if liner? 0.35 0.65)
           ;; the GEOMETRY snaps to the ridge, but the COLOUR samples the pre-snap
           ;; position: on-ridge colour is the two sides' mix — darker than either —
           ;; and painted along a silhouette it reads as a drawn OUTLINE. Pre-snap
@@ -488,7 +494,7 @@
                        (let [[br bg bb] (sample-arr blur-px iw ih px py)
                              dmx (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))]
                          (cond (> dmx (if (<= (long lvl) 1) 0.18 0.45)) 0.0
-                               (> dmx (if (>= (long lvl) 4) 0.3 0.22)) (* fade 0.4)
+                               (> dmx (if liner? 0.3 0.22)) (* fade 0.4)
                                :else fade))
                        fade)
                 [th coh] (sample-fields nf px py)
@@ -498,19 +504,20 @@
                 ;; …but a strong edge under the brush keeps the line alive: real
                 ;; ink lines push THROUGH junctions (glasses frame crossing a brow),
                 ;; where coherence dips while edge energy stays high.
-                fade (if (and (pos? k) (>= (long lvl) 4) (< coh 0.35)
+                fade (if (and (pos? k) liner? (< coh 0.35)
                               (< (wavelet/edge-at dmap px py) 0.5))
                        (* fade 0.5)
                        fade)
                 ;; LINE-HOLD: a liner stroke exists to trace the fine structure it
-                ;; was seeded on. When the sharp fine-band map under the brush falls
+                ;; was seeded on. When ITS OWN placement map under the brush falls
                 ;; below the level's own placement threshold, the stroke has WALKED
                 ;; OFF its line — a chain escaping a silhouette tangentially would
                 ;; drag its bodied paint into the featureless background (the ghost
                 ;; tendrils around every contour) — so the painter lifts the brush.
-                fade (if (and (pos? k) (>= (long lvl) 4))
-                       (let [mv (* (wavelet/sharp-at dmap px py)
-                                   (+ 0.25 (* 0.75 (double sgate))))]
+                ;; `gainv` is the level's full placement gain (subject gate × Broad
+                ;; bokeh gate), so hold matches placement exactly.
+                fade (if (and (pos? k) liner?)
+                       (let [mv (* (map-at dmap mkind px py) (double gainv))]
                          (cond (< mv (* 0.35 (double lth))) 0.0
                                (< mv (* 0.7  (double lth))) (* fade 0.5)
                                :else fade))
@@ -540,9 +547,9 @@
                 ;; off, and strong per-chain taper turns the handoffs into a lumpy
                 ;; string of tadpoles instead of one continuous rod.
                 hw  (let [u (min 1.0 (/ t 0.18)) s (* u u (- 3.0 (* 2.0 u)))]
-                      (if (>= (long lvl) 4) (+ 0.8 (* 0.2 s)) (+ 0.55 (* 0.45 s))))
+                      (if liner? (+ 0.8 (* 0.2 s)) (+ 0.55 (* 0.45 s))))
                 ha  (let [u (min 1.0 (/ t 0.15)) s (* u u (- 3.0 (* 2.0 u)))]
-                      (if (>= (long lvl) 4) (+ 0.75 (* 0.25 s)) (+ 0.5 (* 0.5 s))))
+                      (if liner? (+ 0.75 (* 0.25 s)) (+ 0.5 (* 0.5 s))))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))) hw)  ; width tapers at both ends
                 al  (* lal2 fade (- 1.0 (* 0.65 t t)) ha)        ; alpha: lift-on × glaze × dry-out
                 ;; the brush-load RE-MIXES with the canvas as the stroke travels:
@@ -553,7 +560,7 @@
                 ;; re-mix much harder — a long chain carrying one brush-load across
                 ;; a smooth gradient reads as a feathery streak on the wash; melted
                 ;; strokes keep re-loading the local colour and disappear into it.
-                wsl (cond (>= (long lvl) 4)       (* 0.35 t)
+                wsl (cond liner?                  (* 0.35 t)
                           (pos? (double melt))    (* 0.85 (double melt) t)
                           :else                   0.0)
                 acc (conj acc [px py sz D sn tn al th (* coh (- 1.0 (double melt))) hb
@@ -564,8 +571,12 @@
                 ;; broad strokes curl freely, fine marks stay faithful to the edge.
                 ;; the Perlin bend is GATED by coherence: a straight, strongly
                 ;; oriented edge (coh→1) is traced straight — wobble belongs to
-                ;; flow regions, not to lines.
-                bend (* (double curvature) 0.9 (double bendf) (- 1.0 (* 0.7 coh))
+                ;; flow regions, not to lines. It is ALSO gated by physical size
+                ;; (zero below 2.5px, full past 5px): small strokes follow the
+                ;; original detail exactly, whichever level painted them.
+                bend (* (double curvature) 0.9 (double bendf)
+                        (min 1.0 (max 0.0 (/ (- (double ssz) 2.5) 2.5)))
+                        (- 1.0 (* 0.7 coh))
                         (- (noise/noise2 (* 0.05 px) (* 0.05 py)) 0.5))
                 cb (Math/cos bend) sb (Math/sin bend)
                 dx0 (Math/cos th) dy0 (Math/sin th)
@@ -578,7 +589,7 @@
                 ;; direction from the noisy field every step turns thin traced lines
                 ;; wavy. Liner strokes carry 65% of the previous step's direction and
                 ;; plow straight through junctions where the field goes incoherent.
-                [dx dy] (if (and (>= (long lvl) 4) (pos? k))
+                [dx dy] (if (and liner? (pos? k))
                           (let [mx (+ (* 0.35 dx) (* 0.65 dxp))
                                 my (+ (* 0.35 dy) (* 0.65 dyp))
                                 ml (Math/sqrt (+ (* mx mx) (* my my)))]
@@ -679,9 +690,18 @@
                               ;; marks out of truly flat regions (isolated dark flecks
                               ;; on a melted wash), leaving them at Broad ≤ 1 where
                               ;; visible strokes are the wanted effect.
-                              bgate (- 1.0 (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
-                                              (- 1.0 (min 1.0 (/ sabs 0.35)))))
-                              gain  (if (>= (long lvl) 2) (* (+ 0.25 (* 0.75 sgate)) bgate) 1.0)
+                              ;; SQUARED: the linear form bottomed out around 0.55 — never
+                              ;; enough to actually stop accents whose locally-normalized
+                              ;; maps light up on bokeh noise. Squaring lets the gate reach
+                              ;; blocking strength as Broad rises while staying exactly 1 at
+                              ;; Broad ≤ 1. It also gates LEVEL 1 now: the level-1 chains
+                              ;; were the fibrous filament texture covering empty regions.
+                              bgate (let [g (- 1.0 (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
+                                                      (- 1.0 (min 1.0 (/ sabs 0.35)))))]
+                                      (* g g))
+                              gain  (cond (>= (long lvl) 2) (* (+ 0.25 (* 0.75 sgate)) bgate)
+                                          (== (long lvl) 1) bgate
+                                          :else 1.0)
                               ;; each level reads the map matched to ITS scale: the finest
                               ;; levels use the sharp fine-band map so they land on (and
                               ;; preserve) small structure the smoothed aggregate blurs away.
@@ -721,16 +741,26 @@
                               y2 (if (< aw 0.2) y
                                    (+ y (* aw (noise/noise2 (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))
                               sn0 (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
+                              ;; MELT: how much a flat-region broad stroke should sink into
+                              ;; the wash. Grows only past Broad 1.0 (below that, strokes
+                              ;; are the wanted effect) and only where FOOTPRINT subjectness
+                              ;; is low: strokes touching a subject keep their identity.
+                              melt (if (<= (long lvl) 1)
+                                     (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
+                                        (- 1.0 sfoot))
+                                     0.0)
                               ;; size jitter applies at SEED level to the whole chain —
                               ;; segment size AND step together — so chains stay
                               ;; self-overlapping at any Variation (per-segment size
                               ;; jitter with a fixed step beaded strokes into dotted
-                              ;; pearls). Broad levels keep 40% (base coverage).
+                              ;; pearls). Broad levels keep 40% (base coverage), muted
+                              ;; further by melt — a wash has no per-stroke identity.
                               ;; the shrink side is CLAMPED at 0.75: strokes jittered far
                               ;; below their level's size land at the bottom of the
                               ;; hardness ramp and render as isolated hard pearls along
                               ;; edges — variety comes from growing, not vanishing.
-                              szf (max 0.75 (+ 1.0 (* variation sn0 (if (<= (long lvl) 1) 0.4 1.0))))
+                              szf (max 0.75 (+ 1.0 (* variation sn0
+                                                      (if (<= (long lvl) 1) (* 0.4 (- 1.0 melt)) 1.0))))
                               ;; near a strong edge the mid fill levels don't paint (their
                               ;; boundary-band chains ribbon mixed colour along silhouettes
                               ;; as a ghost veil) and base daubs SHRINK so their soft tails
@@ -739,25 +769,27 @@
                               Ev (if (<= (long lvl) 3)
                                    (edge-near dmap cx cy (* 0.75 ssz))
                                    (wavelet/edge-at dmap cx cy))
-                              ;; MELT: how much a flat-region broad stroke should sink into
-                              ;; the wash. Grows only past Broad 1.0 (below that, strokes
-                              ;; are the wanted effect) and only where subjectness is low —
-                              ;; the Broad slider at max makes bokeh strokes invisible while
-                              ;; detailed regions keep their brushwork untouched.
-                              ;; melt keys on the footprint too: strokes touching a subject
-                              ;; keep their identity; only fully-flat ones sink into the wash.
-                              melt (if (<= (long lvl) 1)
-                                     (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
-                                        (- 1.0 sfoot))
-                                     0.0)
-                              ;; tone jitter is scale-relative: broad fills keep 25% (full
-                              ;; jitter banded smooth walls) and the FINEST marks keep 15%
-                              ;; (alternating-tone bodied lines bead contours) — the
-                              ;; visible mid-scale brushwork carries the painterly variety.
-                              ;; Melted bokeh strokes mute it further: a wash has no
-                              ;; per-stroke tone identity to show.
+                              ;; the chain's FINAL stdev: seed jitter × the σ-aware
+                              ;; near-edge shrink (small strokes keep the gentle old
+                              ;; coefficients — base coverage still reaches the boundary —
+                              ;; but past ~8px a daub centred on a thin bright feature
+                              ;; shrinks toward the feature scale instead of ghosting
+                              ;; its colour across the silhouette, capped 0.7).
+                              cssz (* ssz szf (- 1.0 (* (min 0.7
+                                                             (* (cond (zero? (long lvl)) 0.25
+                                                                      (<= (long lvl) 3) 0.45
+                                                                      :else 0.1)
+                                                                (max 1.0 (/ (* ssz szf) 8.0))))
+                                                        Ev)))
+                              ;; tone jitter follows the PHYSICAL stroke scale, not the
+                              ;; level index: broad fills keep 25% (melt-muted), and any
+                              ;; small mark keeps 15% regardless of which level painted it
+                              ;; — which level is "fine" depends on the sliders, and full
+                              ;; jitter on small strokes beads contours into speckle.
                               tn (* (let [l (long lvl)]
-                                      (cond (<= l 1) (* 0.25 (- 1.0 melt)) (>= l 4) 0.15 :else 1.0))
+                                      (cond (<= l 1) (* 0.25 (- 1.0 melt))
+                                            (>= l 4) 0.15
+                                            :else (+ 0.15 (* 0.85 (min 1.0 (max 0.0 (/ (- cssz 2.5) 2.5)))))))
                                     (- (hash01 (+ (* i 37) lvl) j 13) 0.5))
                               ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
                               ;; keep centres in-bounds so no budget is wasted off-screen
@@ -776,25 +808,7 @@
                                         []
                                         (stroke-segments nf dmap lvl
                                                          (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
-                                                         ;; fat strokes shrink near edges so soft
-                                                         ;; tails can't cross the silhouette; the
-                                                         ;; fine liner strokes ARE the edge's own
-                                                         ;; paint and keep their size. The shrink is
-                                                         ;; σ-AWARE: at small sizes it keeps the old
-                                                         ;; gentle coefficients (base ≥0.75× — the
-                                                         ;; coverage layer must reach the boundary),
-                                                         ;; but a LOW-BUDGET fat daub centred on a
-                                                         ;; thin bright feature (a backlit rim) would
-                                                         ;; smear that feature's colour 20px past the
-                                                         ;; silhouette as an opaque ghost cloud — so
-                                                         ;; past ~8px stdev the shrink strengthens
-                                                         ;; toward the feature scale (capped 0.7).
-                                                         (* ssz szf (- 1.0 (* (min 0.7
-                                                                                   (* (cond (zero? (long lvl)) 0.25
-                                                                                            (<= (long lvl) 3) 0.45
-                                                                                            :else 0.1)
-                                                                                      (max 1.0 (/ (* ssz szf) 8.0))))
-                                                                              Ev)))
+                                                         cssz
                                                          D 0.0 tn ds curvature stroke hd wd
                                                          segs stepf bendf
                                                          (if (<= (long lvl) 1) 1.0 0.0)
@@ -804,7 +818,8 @@
                                                          (if (>= (long lvl) 4)
                                                            (* traw (+ 0.6 (* 0.4 sgate)))
                                                            traw)
-                                                         sgate blur-px iw ih th melt))]
+                                                         sgate blur-px iw ih th melt
+                                                         map-kind gain))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         (map-indexed vector levels)))))

@@ -175,11 +175,16 @@
     ;; (Σmean −0.8/−0.1) the liner tier dropped its Perlin bend + position warp:
     ;; fine strokes follow the original detail exactly — noise variation belongs
     ;; to the large/medium brushwork.
-    (is (= 760 (count splats)))
-    (is (approx= 0.5  16379.618  sx) "Σ mean-x")
-    (is (approx= 0.5  22416.520  sy) "Σ mean-y")
-    (is (approx= 1.0  219761.674 sd) "Σ det(cov)")
-    (is (approx= 0.05 888.894    sc) "Σ colour")))
+    ;; (760→743) scale-keyed discipline: liner behaviour (momentum, gentle snap,
+    ;; line-hold, muted taper/jitter, no Perlin) now keys on the PHYSICAL stroke
+    ;; stdev, not the level index — small mid-tier chains inherit it — and the
+    ;; mid placement map fuses E² so mid strokes hug edge cores instead of
+    ;; seeding across the whole tensor-blur band.
+    (is (= 743 (count splats)))
+    (is (approx= 0.5  15818.174  sx) "Σ mean-x")
+    (is (approx= 0.5  21852.901  sy) "Σ mean-y")
+    (is (approx= 1.0  219780.193 sd) "Σ det(cov)")
+    (is (approx= 0.05 850.262    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments

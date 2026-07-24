@@ -186,8 +186,11 @@
          ;; sharp: fine bands only, minimal smoothing, E² — text/eye-scale structure
          ;; survives and fine strokes hug the edge cores
          Ps (fuse acc-fine 1 1 true)
-         ;; mid: bands 2-3, light smoothing, plain E — the map the mid levels place by
-         Pm (fuse acc-mid (max 1 (quot (min sh sw) 60)) 1 false)
+         ;; mid: bands 2-3, light smoothing — the map the mid levels place by.
+         ;; E² like the sharp map: plain E seeded mid strokes across the whole
+         ;; tensor-blur band around every silhouette, and they painted the rim's
+         ;; pale colour as a wide speckled halo hugging each contour.
+         Pm (fuse acc-mid (max 1 (quot (min sh sw) 60)) 1 true)
          ;; ABSOLUTE subjectness: is there real structure here at all? The fused
          ;; placement maps normalize LOCALLY so dark low-contrast texture still
          ;; receives strokes — but that same normalization lights smooth bokeh up
@@ -201,7 +204,30 @@
                 (dotimes [i n]
                   (aset out i (min 1.0 (max (/ (aget af i) 0.35)
                                             (/ (aget E-arr i) 0.30)))))
-                (structure/box-blur out sh sw (max 2 (quot (min sh sw) 24))))]
+                (structure/box-blur out sh sw (max 2 (quot (min sh sw) 24))))
+         ;; DILATE (separable sliding max): a SUBJECT is not just where detail
+         ;; sits, but everything within reach of it — smooth skin between the
+         ;; eyes and the hair has as little raw fine energy as bokeh, and
+         ;; without the dilation the whole face read as background: Broad up
+         ;; melted the subject itself. Bokeh far from any detail stays 0.
+         subj (let [r (max 4 (quot (min sh sw) 12))
+                    ^doubles src subj
+                    tmp (double-array n)
+                    out (double-array n)]
+                (dotimes [x sh]
+                  (let [row (* x sw)]
+                    (dotimes [y sw]
+                      (let [lo (max 0 (- y r)) hi (min (dec sw) (+ y r))]
+                        (aset tmp (+ row y)
+                              (loop [j lo m 0.0]
+                                (if (> j hi) m (recur (inc j) (max m (aget src (+ row j)))))))))))
+                (dotimes [x sh]
+                  (dotimes [y sw]
+                    (let [lo (max 0 (- x r)) hi (min (dec sh) (+ x r))]
+                      (aset out (+ (* x sw) y)
+                            (loop [i lo m 0.0]
+                              (if (> i hi) m (recur (inc i) (max m (aget tmp (+ (* i sw) y))))))))))
+                (structure/box-blur out sh sw (max 2 (quot (min sh sw) 30))))]
      {:h sh :w sw :detail P :sharp Ps :mid Pm :edge E-arr :subject subj
       :dmax 1.0 :src-h H :src-w W})))
 
