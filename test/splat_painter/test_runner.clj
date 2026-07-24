@@ -3,6 +3,7 @@
   runs clojure.test against it; exits non-zero if anything failed."
   (:require [clojure.test :as t]
             [splat-painter.gaussian-test]
+            [splat-painter.layer-test]
             [splat-painter.seed-test]
             [splat-painter.image-test]
             [splat-painter.structure-test]
@@ -21,6 +22,7 @@
 
 (defn -main [& _]
   (let [results (t/run-tests 'splat-painter.gaussian-test
+                             'splat-painter.layer-test
                              'splat-painter.seed-test
                              'splat-painter.image-test
                              'splat-painter.structure-test

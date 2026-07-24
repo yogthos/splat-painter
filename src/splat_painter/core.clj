@@ -45,6 +45,12 @@
 (defonce tex-grain-atom  (r/atom 0.10)) ; canvas-tooth brightness+chroma mottle
 (defonce tex-edge-atom   (r/atom 0.25)) ; edge raggedness (contour breaks up)
 (defonce status-atom   (r/atom "no image loaded — click Open Image…"))
+;; layered repainting (splat-painter-tbf): once add-layer! runs, the current
+;; composite becomes the next pass's source image and is blitted as an opaque
+;; underpaint; the new strokes thin by the per-layer opacity so the underpaint
+;; shows through like a glaze. layer-count 1 == single pass (no blit).
+(defonce layer-count-atom    (r/atom 1))   ; number of passes composed so far (1 = none yet)
+(defonce layer-opacity-atom  (r/atom 0.6)) ; glaze strength of the active pass over its base
 
 ;; --- non-reactive image / GL state -------------------------------------------
 ;; Need a sized internal-format for macOS core-profile FBO completeness.
@@ -138,6 +144,7 @@
 (defn- cur-tex-streak [] (or (some-> (System/getenv "GA_PAINTER_TEX_STREAK") Double/parseDouble) @tex-streak-atom))
 (defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
 (defn- cur-tex-edge   [] (or (some-> (System/getenv "GA_PAINTER_TEX_EDGE")   Double/parseDouble) @tex-edge-atom))
+(defn- cur-layer-opacity [] (or (some-> (System/getenv "GA_PAINTER_LAYER_OPACITY") Double/parseDouble) @layer-opacity-atom))
 
 (defn- field-for-current-controls []
   (when-let [img @image-atom]
@@ -155,31 +162,39 @@
 (defn- request-render! []
   (when-let [a @area-atom] (glx/gtk-gl-area-queue-render a)))
 
+(defn- prepare-image
+  "Attach the precomputed placement fields to a loaded image map (edge-orientation
+  tensor, light + heavy blurs, the wavelet detail map, the Perlin flow fields) so
+  live slider drags don't recompute them. Returns the assoc'd map. Reused by
+  on-image-loaded (from a file) and add-layer! (from a captured render), so both
+  paths build identical fields."
+  [img0]
+  (let [;; precomputed once so live slider drags don't recompute: edge-orientation
+        ;; tensor, a light blur (smooth average colour), the wavelet detail map, and
+        ;; the Perlin flow fields. Placement is coarse-to-fine layers (splat-painter.seed),
+        ;; no deforming grid.
+        sfield (structure/analyze img0)
+        ;; EDGE-AWARE light blur: smooth within a shade region, no mixing across
+        ;; boundaries — the box blur fed strokes near edges contaminated colours
+        ;; (pale splotches in dark areas, smudges on smooth skin)
+        light  (structure/bilateral-blur img0 3)
+        ;; the drift/dry-out probes keep a FORGIVING box blur: on the razor-sharp
+        ;; bilateral field any probe wobble across a boundary trips the lift
+        ;; threshold instantly and fragments contour chains into bead dashes
+        drift  (structure/blur-image img0 2)
+        heavy  (structure/blur-image img0 (max 6 (quot (:height img0) 80)))]
+    (assoc img0 :structure sfield
+                :blur   light
+                :blur-drift drift
+                ;; heavy blur = the smooth colour field broad strokes paint with;
+                ;; edge-preserving so silhouettes don't halo
+                :blur-heavy (structure/edge-preserving-blur img0 light heavy)
+                :detail (wavelet/placement-map img0 sfield)
+                :noise-fields (seed/prep-noise sfield))))
+
 (defn- on-image-loaded [path]
   (try
-    (let [img0   (image/load-image path 1024)
-          ;; precomputed once so live slider drags don't recompute: edge-orientation
-          ;; tensor, a light blur (smooth average colour), the wavelet detail map, and
-          ;; the Perlin flow fields. Placement is coarse-to-fine layers (splat-painter.seed),
-          ;; no deforming grid.
-          sfield (structure/analyze img0)
-          ;; EDGE-AWARE light blur: smooth within a shade region, no mixing across
-          ;; boundaries — the box blur fed strokes near edges contaminated colours
-          ;; (pale splotches in dark areas, smudges on smooth skin)
-          light  (structure/bilateral-blur img0 3)
-          ;; the drift/dry-out probes keep a FORGIVING box blur: on the razor-sharp
-          ;; bilateral field any probe wobble across a boundary trips the lift
-          ;; threshold instantly and fragments contour chains into bead dashes
-          drift  (structure/blur-image img0 2)
-          heavy  (structure/blur-image img0 (max 6 (quot (:height img0) 80)))
-          img    (assoc img0 :structure sfield
-                             :blur   light
-                             :blur-drift drift
-                             ;; heavy blur = the smooth colour field broad strokes paint with;
-                             ;; edge-preserving so silhouettes don't halo
-                             :blur-heavy (structure/edge-preserving-blur img0 light heavy)
-                             :detail (wavelet/placement-map img0 sfield)
-                             :noise-fields (seed/prep-noise sfield))]
+    (let [img (prepare-image (image/load-image path 1024))]
       (reset! image-atom img)
       (reset! image-path-atom path)
       ;; Size is the base (flat-region) stroke stdev; detail shrinks it locally. Seed
@@ -399,6 +414,7 @@
                 {:gen     (gen/build-gen-program)
                  :render  (shader/build-program-buf)
                  :quad    (shader/build-program-quad)
+                 :blit    (shader/build-program-blit)
                  :perm    (gen/upload-perm!)
                  :tf-buf  tf-buf
                  :query   (gl/gen-one gl/gl-gen-queries)
@@ -419,7 +435,7 @@
    GA_PAINTER_LOOP_RENDER to force the old per-pixel loop shader for A/B compares.
    Returns {:count survivors :total candidates :n rendered}."
   [area vw vh iw ih]
-  (let [{:keys [gen render quad fields tf-buf query gen-vao buf-tex]} (ensure-gpu! area)
+  (let [{:keys [gen render quad blit fields tf-buf query gen-vao buf-tex]} (ensure-gpu! area)
         {:keys [count total sig-min sig-max]}
         (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw})
         n (min count shader/max-splats)]
@@ -460,13 +476,20 @@
       (let [locs (:locs quad)
             scale (min (/ (double vw) iw) (/ (double vh) ih))
             dw (long (Math/ceil (* iw scale))) dh (long (Math/ceil (* ih scale)))
-            ox (long (Math/floor (* 0.5 (- vw dw)))) oy (long (Math/floor (* 0.5 (- vh dh))))]
+            ox (long (Math/floor (* 0.5 (- vw dw)))) oy (long (Math/floor (* 0.5 (- vh dh))))
+            ;; a base layer is active once add-layer! has captured a composite
+            ;; (layer-count > 1): the blit draws it opaque UNDER the new strokes, and
+            ;; this pass is a glaze — its stroke alpha thins (×cur-layer-opacity) so the
+            ;; underpaint shows through. Pass 1 stays 0.9 (bit-identical single pass).
+            ltex         (get-in @gl-state [area :layer-tex])
+            layer-active (and (> @layer-count-atom 1) (some? ltex))]
         (gl/gl-use-program (:program quad))
         (gl/gl-uniform-1i (:u_splats locs) 0)
         (gl/gl-uniform-1i (:u_count locs) (int n))
         (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
         (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
-        (gl/gl-uniform-1f (:u_opacity locs) 0.9)   ; fixed stroke alpha (slider removed)
+        (gl/gl-uniform-1f (:u_opacity locs)
+                          (if layer-active (* 0.9 (cur-layer-opacity)) 0.9))
         (gl/gl-uniform-1f (:u_hard_sharp locs)
                           ;; short-stroke regimes render fine marks as SOFT dabs — hard
                           ;; plateau-edged dots don't merge and bead contours into pearls
@@ -478,11 +501,29 @@
         (gl/gl-uniform-1f (:u_tex_streak locs) (double (cur-tex-streak)))
         (gl/gl-uniform-1f (:u_tex_grain locs)  (double (cur-tex-grain)))
         (gl/gl-uniform-1f (:u_tex_edge locs)   (double (cur-tex-edge)))
-        (gl/gl-enable gl/GL-BLEND)
-        (gl/gl-blend-func gl/GL-ONE-FACTOR gl/GL-ONE-MINUS-SRC-ALPHA)
         (gl/gl-enable gl/GL-SCISSOR-TEST)
         (gl/gl-scissor (int ox) (int oy) (int dw) (int dh))
-        (gl/gl-bind-vertex-array gen-vao)          ; no enabled attribs — gl_VertexID only
+        ;; opaque base layer UNDER the strokes (no blend). One scissor block covers
+        ;; base + splats so neither can bleed into the letterbox bars.
+        (when layer-active
+          (let [blocs (:locs blit)]
+            (gl/gl-disable gl/GL-BLEND)
+            (gl/gl-active-texture (+ gl/GL-TEXTURE0 9))
+            (gl/gl-bind-texture gl/GL-TEXTURE-2D ltex)
+            (gl/gl-use-program (:program blit))
+            (gl/gl-uniform-1i (:u_layer blocs) 9)
+            (gl/gl-uniform-2f (:u_viewport blocs) (double vw) (double vh))
+            (gl/gl-uniform-2f (:u_image blocs) (double iw) (double ih))
+            (gl/gl-bind-vertex-array gen-vao)        ; no enabled attribs — gl_VertexID only
+            (gl/gl-draw-arrays gl/GL-TRIANGLES 0 6)
+            ;; restore unit-0 buf-tex + the splat program (the blit left TEXTURE9 active)
+            (gl/gl-active-texture gl/GL-TEXTURE0)
+            (gl/gl-bind-texture gl/GL-TEXTURE-BUFFER buf-tex)
+            (gl/gl-tex-buffer gl/GL-TEXTURE-BUFFER gl/GL-RGBA32F tf-buf)
+            (gl/gl-use-program (:program quad))))
+        (gl/gl-enable gl/GL-BLEND)
+        (gl/gl-blend-func gl/GL-ONE-FACTOR gl/GL-ONE-MINUS-SRC-ALPHA)
+        (gl/gl-bind-vertex-array gen-vao)            ; no enabled attribs — gl_VertexID only
         (gl/gl-draw-arrays gl/GL-TRIANGLES 0 (int (* 6 n)))
         (gl/gl-disable gl/GL-SCISSOR-TEST)
         (gl/gl-disable gl/GL-BLEND)))
@@ -547,6 +588,26 @@
                            (double (ffi/read buf :uint8 (+ o 2))))))))
     (jolt.png/write pimg iw ih path)))
 
+(defn rgba->image
+  "Convert an RGBA byte buffer (as glReadPixels returns it — origin BOTTOM-left,
+  iw*ih*4 bytes) into an image map {:height ih :width iw :channels 3 :pixels} whose
+  :pixels is a flat H*W*3 double-array, row-major top-down, values 0..1. Image row x
+  (top-down) is read from buffer row (ih-1-x) — the bottom-up flip — and channels RGB
+  are taken from the RGBA texels and divided by 255. `buf` is a raw pointer read with
+  the unsigned :uint8 byte API, so a byte of 200 decodes to 200/255 (not -56). Pure,
+  no GL. add-layer! feeds the captured render through this into prepare-image."
+  [buf iw ih]
+  (let [pixels (double-array (* ih iw 3))]
+    (dotimes [x ih]
+      (let [src (* 4 (* (- ih 1 x) iw))]   ; buffer row (ih-1-x) = top-down image row x
+        (dotimes [y iw]
+          (let [o    (+ src (* 4 y))
+                base (* 3 (+ (* x iw) y))] ; flat base 3*(row*W + col)
+            (aset-double pixels base       (/ (double (ffi/read buf :uint8 o))       255.0))
+            (aset-double pixels (+ base 1) (/ (double (ffi/read buf :uint8 (+ o 1))) 255.0))
+            (aset-double pixels (+ base 2) (/ (double (ffi/read buf :uint8 (+ o 2))) 255.0))))))
+    {:height ih :width iw :channels 3 :pixels pixels}))
+
 (defn- gpu-save-png! [area path]
   (when-let [img @image-atom]
     (let [iw (int (:width img)) ih (int (:height img))
@@ -564,6 +625,62 @@
         (ffi/free buf))
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h)))))
+
+(defn- ensure-layer-tex! [area]
+  "Lazily create the per-area base-layer texture (RGBA8, LINEAR, CLAMP_TO_EDGE) and
+  cache its id in gl-state. Reused/re-uploaded on every add-layer!."
+  (let [tex (or (:layer-tex (get @gl-state area)) (gl/gen-one gl/gl-gen-textures))]
+    (swap! gl-state assoc-in [area :layer-tex] tex)
+    tex))
+
+(defn add-layer!
+  "Capture the current composite (every layer below) offscreen at native resolution,
+  upload it as the opaque base-layer texture, and make that capture the source image
+  for the next generation pass — so repainting smooths the shapes while the per-layer
+  opacity lets the pass below show through like a glaze. GUI-thread only (it captures
+  into the area's GL context); also the headless multi-pass driver (GA_PAINTER_PASSES)."
+  []
+  (if-not (and @image-atom @area-atom (get @gl-state @area-atom))
+    (reset! status-atom "load an image first")
+    (let [area     @area-atom
+          img      @image-atom
+          iw       (int (:width img)) ih (int (:height img))
+          prev-fbo (read-fbo-binding)]
+      (glx/make-current area)
+      (ensure-export-targets! area iw ih)
+      (gl/gl-viewport 0 0 iw ih)
+      (let [_   (gpu-draw! area iw ih iw ih)        ; render the existing composite at 1:1
+            buf (ffi/alloc (* iw ih 4))]
+        (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
+        ;; upload the capture as the opaque base layer (matches the blit's u_layer)
+        (let [tex (ensure-layer-tex! area)]
+          (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
+          (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 GL-RGBA8 iw ih 0
+                              gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
+          (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MIN-FILTER gl/GL-LINEAR)
+          (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MAG-FILTER gl/GL-LINEAR)
+          (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-S gl/GL-CLAMP-TO-EDGE)
+          (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-T gl/GL-CLAMP-TO-EDGE))
+        ;; the capture becomes the source image for the next pass (fields rebuilt via
+        ;; prepare-image). size-atom + image-path-atom are left alone: the user's slider
+        ;; tuning stands, and the original path is kept for reset-layers!.
+        (reset! image-atom (prepare-image (rgba->image buf iw ih)))
+        (ffi/free buf))
+      (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
+      (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))
+      (swap! layer-count-atom inc)
+      (reset! status-atom (format "layer %d — repainting from render" @layer-count-atom))
+      (request-render!))))
+
+(defn- reset-layers!
+  "Drop every added layer: restore single-pass mode (layer-count 1, so gpu-draw! stops
+  blitting the base) and reload the original image from disk (rebuilt fields, fresh
+  render). The layer texture object is simply abandoned (gated out, not deleted)."
+  []
+  (if (<= @layer-count-atom 1)
+    (reset! status-atom "no layers to reset")
+    (do (reset! layer-count-atom 1)
+        (when @image-path-atom (on-image-loaded @image-path-atom)))))
 
 ;; Build the per-GLArea GL objects once on realize. Kept shallow (one let) so the
 ;; closer count is obvious.
@@ -616,6 +733,12 @@
       (when-let [p (System/getenv "GA_PAINTER_SAVE_PNG")]
         (when (and (not @saved?-atom) img)
           (reset! saved?-atom true)
+          ;; layered repainting: compose N passes before saving. Each add-layer!
+          ;; captures the current composite offscreen and makes it the next pass's
+          ;; source, so (dec passes) of them stack under the final gpu-save-png!.
+          ;; GA_PAINTER_PASSES unset/1 == the original single-pass save (bit-identical).
+          (let [passes (or (some-> (System/getenv "GA_PAINTER_PASSES") Integer/parseInt) 1)]
+            (dotimes [_ (dec passes)] (add-layer!)))
           (gpu-save-png! area p))))))
 
 (defn on-render [area]
@@ -684,8 +807,10 @@
 (defn- control-panel []
   [:vbox {:spacing 6 :margin 8 :width-request 180}
    [:hbox {:spacing 6}
-    [:button {:label "Open Image…" :on-click open-image-dialog!}]
-    [:button {:label "Save PNG…"   :on-click save-image-dialog!}]]
+    [:button {:label "Open Image…"  :on-click open-image-dialog!}]
+    [:button {:label "Save PNG…"    :on-click save-image-dialog!}]
+    [:button {:label "Add Layer"    :on-click add-layer!}]
+    [:button {:label "Reset Layers" :on-click reset-layers!}]]
    ;; cap the path so the label can't widen the sidebar; ellipsize the tail
    [:label {:label @status-atom :xalign 0.0 :halign :start
             :max-width-chars 22 :ellipsize :end}]
@@ -704,7 +829,9 @@
    [:separator {}]
    [slider "Streak"    0.0  0.6   0.02  tex-streak-atom]  ; bristle tonal grooves along the drag
    [slider "Grain"     0.0  0.5   0.02  tex-grain-atom]   ; canvas-tooth brightness/colour mottle
-   [slider "EdgeTex"   0.0  0.7   0.02  tex-edge-atom]])  ; edge raggedness (contour breaks up)
+   [slider "EdgeTex"   0.0  0.7   0.02  tex-edge-atom]  ; edge raggedness (contour breaks up)
+   [:separator {}]
+   [slider "Layer Op"  0.05 1.0   0.05  layer-opacity-atom]]) ; glaze: how much the pass below shows through
 
 (defn app []
   [:hbox {:spacing 0}
