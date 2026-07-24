@@ -470,7 +470,31 @@ void main(){
   // tier glazes lightest so stacked strokes MIX (mirror seed/level-alpha)
   float lal = (lvl <= 1) ? 1.0 : (lvl <= 3) ? 0.85 : (lvl <= 5) ? 0.65 : 0.55;
   float fade = 1.0;
-  vec3 headBlur = sampleRGB(u_blurTex, x2, y2);
+  // BOUNDARY-SIDE BRUSH-LOAD (mirror seed/stroke-segments): where the two sides
+  // across the tangent genuinely differ (a boundary, not a thin LINE feature),
+  // the brush-load samples ~0.7 sigma on the stroke's OWN colour side — chains
+  // parallel to a boundary otherwise alternate sides per seed and tile the
+  // contour into colour capsules (the regular wavy scallops).
+  float bax = 0.0, bay = 0.0;
+  {
+    vec2 tc0 = fieldsAt(cpx, cpy);
+    float nx0 = -sin(tc0.x), ny0 = cos(tc0.x);
+    float hbs = max(1.75, 0.8 * ssz2);
+    vec3 c0  = sampleRGB(u_blurTex, cpx, cpy);
+    vec3 cpl = sampleRGB(u_blurTex, cpx + nx0*hbs, cpy + ny0*hbs);
+    vec3 cmn = sampleRGB(u_blurTex, cpx - nx0*hbs, cpy - ny0*hbs);
+    vec3 dsv = abs(cpl - cmn);
+    if (max(dsv.r, max(dsv.g, dsv.b)) >= 0.15) {
+      vec3 dp3 = abs(cpl - c0);
+      vec3 dm3 = abs(cmn - c0);
+      float dp = max(dp3.r, max(dp3.g, dp3.b));
+      float dm = max(dm3.r, max(dm3.g, dm3.b));
+      float sidec = (dp < dm) ? 1.0 : -1.0;
+      bax = sidec * 0.7 * ssz2 * nx0;
+      bay = sidec * 0.7 * ssz2 * ny0;
+    }
+  }
+  vec3 headBlur = sampleRGB(u_blurTex, cpx + bax, cpy + bay);
   for (int q = 0; q < SEGS; q++) {
     if (q >= segs || fade < 0.15) break;
     if (q > 0) {
@@ -481,7 +505,7 @@ void main(){
       // the broad tier lifts IMMEDIATELY on any real colour change (0.18): its
       // opaque underpainting chains at the largest sizes must never carry paint
       // across a boundary (one escaped segment = a huge wrong-colour ghost cloud)
-      vec3 cb = sampleRGB(u_blurTex, px, py);
+      vec3 cb = sampleRGB(u_blurTex, px + bax, py + bay);
       vec3 dcl = abs(cb - headBlur);
       float dmx = max(dcl.r, max(dcl.g, dcl.b));
       if (dmx > ((lvl <= 1) ? 0.18 : 0.45)) fade = 0.0;
@@ -528,7 +552,7 @@ void main(){
     // MELTED broad chains re-mix much harder — one brush-load carried across a
     // smooth gradient reads as a feathery streak on the wash.
     float wsl = liner ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0);
-    emitSplat(px, py, cpx + wsl*(px - cpx), cpy + wsl*(py - cpy), sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt);
+    emitSplat(px, py, cpx + bax + wsl*(px - cpx), cpy + bay + wsl*(py - cpy), sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt);
     // bend gated by coherence AND physical size (mirror seed): straight
     // strongly-oriented edges trace straight; small strokes never wobble
     float bend = u_curv * 0.9 * bendf * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)
