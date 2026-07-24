@@ -77,6 +77,16 @@
     (assert-contains fs-src-quad "vec3  col = clamp(base * bright, 0.0, 1.0);" "quad paint-texture colour")
     (assert-contains fs-src-quad "frag = vec4(col * a, a);" "quad premultiplied output"))
 
+  ;; the base-layer blit (opaque underpaint drawn under the splat pass once a layer
+  ;; is active): attribute-less, same letterbox rect as the quad VS, alpha forced to 1
+  (let [{:keys [vs-src-blit fs-src-blit]} (shader/sources)]
+    (println "render (base-layer blit variant):")
+    (assert-contains vs-src-blit "int corner = gl_VertexID;" "blit attribute-less (gl_VertexID only)")
+    (assert-contains vs-src-blit "float scale = min(u_viewport.x / u_image.x, u_viewport.y / u_image.y);" "blit letterbox mapping")
+    (assert-contains vs-src-blit "v_uv = (pane - org) / (u_image * scale);" "blit texcoord from letterbox rect")
+    (assert-contains fs-src-blit "uniform sampler2D u_layer;" "blit u_layer sampler")
+    (assert-contains fs-src-blit "frag = vec4(c.rgb, 1.0);" "blit opaque (alpha forced to 1) base output"))
+
   ;; the GPU generation shader must MIRROR seed/splat-record + layered-means + noise
   (let [{:keys [vs-src gs-src]} (gen/sources)]
     (println "generation (vertex + geometry, transform feedback):")
