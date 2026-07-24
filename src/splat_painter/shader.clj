@@ -212,7 +212,14 @@ void main(){
   // Bristle streaks run along this; the ragged edge and tonal grooves are keyed to it.
   float disc = sqrt(max(0.25 * (c00 - c11) * (c00 - c11) + c01 * c01, 0.0));
   float l1   = 0.5 * (c00 + c11) + disc;             // major eigenvalue
-  v_major = disc < 1e-6 ? vec2(1.0, 0.0) : normalize(vec2(l1 - c11, c01));
+  // ROBUST eigenvector: for an exactly axis-aligned stroke the float covariance
+  // has c01 == 0.0, and with c11 > c00 the first eigenvector form (l1-c11, c01)
+  // is exactly (0,0) - normalize((0,0)) is NaN, and one NaN fragment poisons its
+  // whole pixel black forever under blending (the black rectangle artifacts on
+  // flat image borders). Fall back to the second form, then to the x axis.
+  vec2 ev = vec2(l1 - c11, c01);
+  if (dot(ev, ev) < 1e-12) ev = vec2(c01, l1 - c00);
+  v_major = (disc < 1e-6 || dot(ev, ev) < 1e-12) ? vec2(1.0, 0.0) : normalize(ev);
   float sig = sqrt(sqrt(det));
   float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
   ts = ts * ts * (3.0 - 2.0 * ts);
