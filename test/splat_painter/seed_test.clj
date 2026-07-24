@@ -217,11 +217,17 @@
     ;; noise); chains riding a clean contour (~0.04/span) stay stable and keep
     ;; their full span. Fewer surviving liner segments drop Σmean/Σcolour; Σdet is
     ;; near-unchanged (the survivors' geometry is the same, just truncated tails).
-    (is (= 846 (count splats)))
-    (is (approx= 0.5  16742.792  sx) "Σ mean-x")
-    (is (approx= 0.5  25243.934  sy) "Σ mean-y")
-    (is (approx= 1.0  219942.931 sd) "Σ det(cov)")
-    (is (approx= 0.05 980.882   sc) "Σ colour")))
+    ;; (846→838) physical-σ liner span: emitted segs/stepf/spacing derive from the
+    ;; budget-scaled stdev with the trace's own liner test, and the ~28px span
+    ;; target is absolute pixels ramped by thinness (full ≤1.4σ, seg-count table by
+    ;; 2.6σ). At this image's scale the liner level drops 32→31 segs and spacing
+    ;; tightens marginally — a small survivor shift, no behavioural change here
+    ;; (the fix targets low-budget fat-liner regimes).
+    (is (= 838 (count splats)))
+    (is (approx= 0.5  16594.301  sx) "Σ mean-x")
+    (is (approx= 0.5  25193.786  sy) "Σ mean-y")
+    (is (approx= 1.0  219920.071 sd) "Σ det(cov)")
+    (is (approx= 0.05 978.926   sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -459,11 +465,11 @@
         hd (double (dec H)) wd (double (dec W)) iw W ih H
         rr (/ (double H) 24.0)
         lp      (seed/layer-params dmap detail size variation curvature stroke tier-muls cnt H W)
-        ;; the liner level: lvl≥2, nominal size < 3.5px, segs clamped at the GS cap
-        liner   (first (filter #(and (>= (:lvl %) 2)
-                                     (< (:ssz %) 3.5)
-                                     (= (:segs %) 32))
-                               (:levels lp)))
+        ;; the liner level: lvl≥2, ACTUAL size < 3.5px, longest chains (the span is
+        ;; thinness-ramped off the physical stdev now, so exact segs vary with σ)
+        liner   (let [cands (filter #(and (>= (:lvl %) 2) (< (:ssz %) 3.5))
+                                    (:levels lp))]
+                  (when (seq cands) (apply max-key :segs cands)))
         {:keys [lvl ssz segs stepf bendf th map-kind traw]} liner
         bmul    (double (nth tier-muls 0))                ; 0.4 → bgate is identically 1 below Broad 1
         deff    (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
@@ -494,8 +500,8 @@
                       (count (stroke-segments nf dmap lvl cx cy cssz D 0.0 tn ds curvature stroke
                                               hd wd segs stepf bendf hb traw* sgate blur-px iw ih
                                               th 0.0 map-kind gain blurd-px bph))))]
-    (is liner "settings must yield a liner level (lvl≥2, ssz<3.5, segs=32)")
-    (is (= 32 segs))
+    (is liner "settings must yield a liner level (lvl≥2, ssz<3.5)")
+    (is (>= segs 24) "thin liners keep the long span")
     (is (< ssz 3.5))
     (let [contour (keep-indexed (fn [i x] (chain-len i x 40.0)) (range 12 152 7))   ; ~20 seeds ON the line (col 40)
           texture (for [[i [x y]] (map-indexed vector
@@ -506,3 +512,59 @@
       (is (<= tmed 8)    (str "texture chains should dry out; median=" tmed " of " (count texture)))
       (is (>= cmed (* 2.0 tmed))
           (str "contour median (" cmed ") must be ≥ 2× texture median (" tmed ")")))))
+
+;; --- physical-sigma liner span (thinness ramp) ---------------------------------
+
+(deftest liner-span-follows-physical-size
+  ;; Liner-ness, chain span and step are decided from the BUDGET-SCALED stdev with
+  ;; the exact per-chain discipline test the trace loops apply. Two bugs this pins:
+  ;; the ~28px span target used to be computed from NOMINAL size but traced at
+  ;; ACTUAL sigma (at budget scale s the real span was 28*slen*s px — 51px worms at
+  ;; low budgets), and a level could classify liner by nominal size while the trace
+  ;; denied it liner discipline by actual sigma (fat 13-seg chains with no
+  ;; momentum/line-hold — the wavy S-lines on soft-focus contours). Now the span is
+  ;; ABSOLUTE pixels, ramped by thinness: full ~28px only for genuinely thin
+  ;; strokes (sigma<=1.4), back on the short seg-count table by sigma 2.6.
+  (let [img  {:height 128 :width 128 :channels 3
+              :pixels (double-array
+                       (mapcat (fn [x]
+                                 (mapcat (fn [y]
+                                           (let [g (if (odd? (+ (quot x 3) (quot y 3))) 0.35 0.65)]
+                                             [g g g]))
+                                         (range 128)))
+                               (range 128)))}
+        dmap (wavelet/placement-map img (structure/analyze img))
+        seg-count #'splat-painter.seed/seg-count
+        step-frac #'splat-painter.seed/step-frac
+        stroke-len-frac #'splat-painter.seed/stroke-len-frac
+        stroke 2.05
+        slen  (double (stroke-len-frac stroke))
+        check (fn [cnt]
+                (let [p (seed/layer-params dmap 0.45 10.0 0.38 0.38 stroke [0.85 0.85 0.85] cnt 128 128)]
+                  (doseq [{:keys [lvl ssz segs stepf]} (:levels p)
+                          :let [lvl (long lvl) ssz (double ssz)
+                                liner? (or (>= lvl 4) (and (>= lvl 2) (< ssz 3.5)))]]
+                    (when (and (>= lvl 2) (not liner?))
+                      (is (= (long (seg-count lvl)) (long segs))
+                          (str "budget " cnt " lvl " lvl " ssz " ssz
+                               ": no liner span without liner discipline")))
+                    (when (and (>= lvl 2) liner? (>= ssz 2.6))
+                      (is (= (long (seg-count lvl)) (long segs))
+                          (str "budget " cnt " lvl " lvl " ssz " ssz
+                               ": ramp floor — fat liners stay on the table")))
+                    (when (and (>= lvl 2) liner? (<= ssz 1.4))
+                      (is (>= (long segs) 24)
+                          (str "budget " cnt " lvl " lvl " ssz " ssz
+                               ": thin liners keep the long span")))
+                    (when liner?
+                      (is (<= (* (double segs) (double stepf) ssz)
+                              (* 1.15 28.0 slen))
+                          (str "budget " cnt " lvl " lvl " ssz " ssz " segs " segs
+                               ": liner span must be capped in ABSOLUTE px"))))
+                  p))]
+    (check 600000)
+    (let [p (check 3000)]
+      ;; the low budget must actually exercise the fat regime (scale inflates
+      ;; lvl>=2 stdevs past the ramp floor) or the conditional asserts are vacuous
+      (is (some #(and (>= (long (:lvl %)) 2) (> (double (:ssz %)) 2.6)) (:levels p))
+          "low budget must produce a fat (ssz>2.6) lvl>=2 level"))))
