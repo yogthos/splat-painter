@@ -60,6 +60,13 @@
 (defonce viewport   (atom [800 600]))
 (defonce area-atom  (atom nil))   ; the GLArea widget, for queue-render / dialog parent
 (defonce image-path-atom (atom nil)) ; source path of the loaded image (dialog-free save)
+;; GtkFileDialog's async callbacks are :collect-safe foreign-callables. GTK holds
+;; only the raw pointer, so we must keep a Clojure reference alive or GC (triggered
+;; by e.g. the save path's big pixel-buffer alloc) reclaims the trampoline mid-call
+;; and the callback faults on return — "invalid memory reference". One slot per
+;; dialog kind, overwritten on the next open (the prior callback has already run).
+(defonce ^:private open-cb-atom (atom nil))
+(defonce ^:private save-cb-atom (atom nil))
 
 ;; --- GtkFileDialog (GTK4 async file picker) ----------------------------------
 (ffi/defcfn gtk-file-dialog-new        "gtk_file_dialog_new"        [] :pointer)
@@ -182,7 +189,11 @@
         gfile   (gtk-file-dialog-open-finish dialog res errslot)]
     (if (ffi/null? gfile)
       (when-let [ep (ffi/read errslot :pointer 0)]
-        (let [mp (ffi/read ep :pointer 16)]
+        ;; GError is { GQuark domain(4); gint code(4); gchar *message; } — message is
+        ;; at offset 8 on LP64, NOT 16. Reading 16 fetched a garbage pointer 8 bytes
+        ;; past the struct; ptr->string on it faulted ("invalid memory reference") on
+        ;; the error/cancel branch — the crash when a file dialog was dismissed.
+        (let [mp (ffi/read ep :pointer 8)]
           (when-not (ffi/null? mp)
             (reset! status-atom (str "open failed: " (ffi/ptr->string mp))))
           (g-error-free ep)))
@@ -201,6 +212,7 @@
       (let [cb (ffi/foreign-callable
                  (fn [src res _ud] (handle-open-result src res))
                  [:pointer :pointer :pointer] :void :collect-safe)]
+        (reset! open-cb-atom cb)   ; retain past the async callback (see the atom's docstring)
         (gtk-file-dialog-open dialog root ffi/null cb ffi/null)))))
 
 ;; --- save (offscreen render → glReadPixels → PNG) ----------------------------
@@ -289,7 +301,11 @@
         gfile   (gtk-file-dialog-save-finish dialog res errslot)]
     (if (ffi/null? gfile)
       (when-let [ep (ffi/read errslot :pointer 0)]
-        (let [mp (ffi/read ep :pointer 16)]
+        ;; GError is { GQuark domain(4); gint code(4); gchar *message; } — message is
+        ;; at offset 8 on LP64, NOT 16. Reading 16 fetched a garbage pointer 8 bytes
+        ;; past the struct; ptr->string on it faulted ("invalid memory reference") on
+        ;; the error/cancel branch — the crash when a file dialog was dismissed.
+        (let [mp (ffi/read ep :pointer 8)]
           (when-not (ffi/null? mp)
             (reset! status-atom (str "save canceled/failed: " (ffi/ptr->string mp))))
           (g-error-free ep)))
@@ -323,6 +339,7 @@
       (let [cb (ffi/foreign-callable
                  (fn [src res _ud] (handle-save-result src res))
                  [:pointer :pointer :pointer] :void :collect-safe)]
+        (reset! save-cb-atom cb)   ; retain past the async callback (see the atom's docstring)
         (gtk-file-dialog-save dialog root ffi/null cb ffi/null)))))
 
 ;; --- GL plumbing -------------------------------------------------------------
