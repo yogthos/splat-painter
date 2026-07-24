@@ -337,14 +337,16 @@ void main(){
    frag = vec4(col * a, a);        // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
 }")
 
-;; --- base-layer blit (layered repainting) -------------------------------------
+;; --- layer blit (layered repainting) ------------------------------------------
 ;; Attribute-less, like vs-src-quad: 6 GL_TRIANGLES from gl_VertexID cover the
-;; letterboxed image rect, and the FS just samples the previous render captured by
-;; glReadPixels. Drawn with blending DISABLED so it lands as an OPAQUE underpaint —
-;; the next pass's strokes then composite over it (a glaze). The layer texture is
-;; uploaded verbatim from a bottom-up readback, so texcoord V rises with image-up
-;; (v=0 = image bottom = framebuffer row 0) and the blit overlays the capture
-;; exactly upright (see gpu-draw!: v_uv = (pane - org) / (u_image * scale)).
+;; letterboxed image rect, and the FS samples a committed pass captured by
+;; glReadPixels (a solo render over a transparent clear = premultiplied RGBA).
+;; Drawn with blending ENABLED (src-over, ONE/ONE_MINUS_SRC_ALPHA): each layer's
+;; premultiplied content is scaled by u_alpha (its glaze opacity) and composited
+;; over whatever is below it. The layer texture is uploaded verbatim from a
+;; bottom-up readback, so texcoord V rises with image-up (v=0 = image bottom =
+;; framebuffer row 0) and the blit overlays the capture exactly upright
+;; (see gpu-draw!: v_uv = (pane - org) / (u_image * scale)).
 (def ^:private vs-src-blit
   "#version 330 core
 uniform vec2 u_viewport;        // framebuffer pixels (vw, vh)
@@ -366,12 +368,13 @@ void main(){
 
 (def ^:private fs-src-blit
   "#version 330 core
-uniform sampler2D u_layer;      // the previous render, captured bottom-up via glReadPixels
+uniform sampler2D u_layer;      // a committed pass, captured bottom-up via glReadPixels
+uniform float u_alpha;          // per-blit opacity gain (the layer glaze strength)
 in vec2 v_uv;
 out vec4 frag;
 void main(){
   vec4 c = texture(u_layer, v_uv);
-  frag = vec4(c.rgb, 1.0);      // opaque base — the new strokes composite over it
+  frag = vec4(c.rgb * u_alpha, c.a * u_alpha);   // premultiplied content scaled by layer opacity
 }")
 
 (defn build-program-quad
@@ -396,17 +399,19 @@ void main(){
             :u_tex_edge   (gl/gl-get-uniform-location prog "u_tex_edge")}}))
 
 (defn build-program-blit
-  "Compile + link the attribute-less base-layer blit (needs a current GL context).
-  Draws 6 GL_TRIANGLES covering the letterboxed image rect and samples u_layer with
-  alpha forced to 1.0 — an opaque underpaint the splat pass composites over. Draw
-  with blending DISABLED, reusing any VAO that has no enabled attribs (gen-vao).
+  "Compile + link the attribute-less layer blit (needs a current GL context).
+  Draws 6 GL_TRIANGLES covering the letterboxed image rect and samples u_layer,
+  scaling its premultiplied RGBA by u_alpha (the layer's glaze opacity). Draw with
+  blending ENABLED (src-over, ONE/ONE_MINUS_SRC_ALPHA) so committed layers composite
+  over the base. Reuse any VAO with no enabled attribs (gen-vao).
   Returns {:program :locs} or nil."
   []
   (when-let [prog (gl/make-program vs-src-blit fs-src-blit)]
     {:program prog
      :locs {:u_viewport (gl/gl-get-uniform-location prog "u_viewport")
             :u_image    (gl/gl-get-uniform-location prog "u_image")
-            :u_layer    (gl/gl-get-uniform-location prog "u_layer")}}))
+            :u_layer    (gl/gl-get-uniform-location prog "u_layer")
+            :u_alpha    (gl/gl-get-uniform-location prog "u_alpha")}}))
 
 (defn- render-uniform-locs [prog]
   {:u_splats   (gl/gl-get-uniform-location prog "u_splats")
