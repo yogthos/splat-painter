@@ -45,11 +45,17 @@
 (defonce tex-grain-atom  (r/atom 0.10)) ; canvas-tooth brightness+chroma mottle
 (defonce tex-edge-atom   (r/atom 0.25)) ; edge raggedness (contour breaks up)
 (defonce status-atom   (r/atom "no image loaded — click Open Image…"))
-;; layered repainting (splat-painter-tbf): once add-layer! runs, the current
-;; composite becomes the next pass's source image and is blitted as an opaque
-;; underpaint; the new strokes thin by the per-layer opacity so the underpaint
-;; shows through like a glaze. layer-count 1 == single pass (no blit).
-(defonce layer-count-atom    (r/atom 1))   ; number of passes composed so far (1 = none yet)
+;; layered repainting: layers-atom is the committed stack (bottom-first). Each
+;; entry {:tex <GL id> :opacity <double> :settings <14-vector>} holds a layer's
+;; SOLO render — its own full splat pass captured over a TRANSPARENT clear, so the
+;; texture is premultiplied RGBA the alpha-aware blit composites directly.
+;; active-layer-atom is the index [0..(count layers)] where the LIVE pass sits: it
+;; is NOT stored, it is regenerated every frame from image-atom + the current
+;; sliders. Layers below `active` blit UNDER the live pass, layers above blit OVER
+;; it (see gpu-draw! for the compositing order). Empty stack + active 0 == today's
+;; single-pass render (bit-identical — no blits, splats at the fixed 0.9).
+(defonce layers-atom         (r/atom []))
+(defonce active-layer-atom   (r/atom 0))    ; live pass index: 0 == bottom (single pass)
 (defonce layer-opacity-atom  (r/atom 0.6)) ; glaze strength of the active pass over its base
 
 ;; --- non-reactive image / GL state -------------------------------------------
@@ -427,20 +433,62 @@
     (swap! gl-state assoc-in [area :gpu] gpu)
     gpu))
 
+(defn- blit-layers!
+  "Composite committed layers[lo..hi) src-over (premultiplied) into the current FBO,
+  then restore unit-0 buf-tex + the quad program (the blit leaves TEXTURE9 + the blit
+  program bound). When base-opaque?, the bottom layer (vector index 0) is forced to
+  u_alpha 1.0 — it is the original opaque underpaint; only the BELOW range ever
+  contains it. Otherwise every layer uses its stored glaze opacity. No-op when lo >= hi."
+  [blit quad gen-vao buf-tex tf-buf layers lo hi base-opaque? vw vh iw ih]
+  (when (< lo hi)
+    (let [blocs (:locs blit)]
+      (gl/gl-enable gl/GL-BLEND)
+      (gl/gl-blend-func gl/GL-ONE-FACTOR gl/GL-ONE-MINUS-SRC-ALPHA)
+      (gl/gl-use-program (:program blit))
+      (doseq [i (range lo hi)
+              :let [{:keys [tex opacity]} (layers i)]]
+        (gl/gl-active-texture (+ gl/GL-TEXTURE0 9))
+        (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
+        (gl/gl-uniform-1i (:u_layer blocs) 9)
+        (gl/gl-uniform-1f (:u_alpha blocs)
+                          (double (if (and base-opaque? (zero? i)) 1.0 opacity)))
+        (gl/gl-uniform-2f (:u_viewport blocs) (double vw) (double vh))
+        (gl/gl-uniform-2f (:u_image blocs) (double iw) (double ih))
+        (gl/gl-bind-vertex-array gen-vao)            ; no attribs — gl_VertexID only
+        (gl/gl-draw-arrays gl/GL-TRIANGLES 0 6))
+      (gl/gl-active-texture gl/GL-TEXTURE0)
+      (gl/gl-bind-texture gl/GL-TEXTURE-BUFFER buf-tex)
+      (gl/gl-tex-buffer gl/GL-TEXTURE-BUFFER gl/GL-RGBA32F tf-buf)
+      (gl/gl-use-program (:program quad)))))
+
 (defn- gpu-draw!
   "Generate the splat field on the GPU and composite it into the currently-bound
    framebuffer. `vw/vh` = framebuffer viewport pixels (letterbox target), `iw/ih` =
    image pixels. Renders one blended quad per splat (Σ quad-areas work — no
    pixels×splats loop, no GPU-watchdog hang at high counts); set
    GA_PAINTER_LOOP_RENDER to force the old per-pixel loop shader for A/B compares.
-   Returns {:count survivors :total candidates :n rendered}."
-  [area vw vh iw ih]
+   Returns {:count survivors :total candidates :n rendered}.
+
+   Optional opts map (trailing arg):
+     nil / {}        full composite — committed layers below `active` blit under the
+                     live splat pass, committed layers above blit over it (all src-over,
+                     premultiplied), opaque-black clear. The on-screen + save path.
+     {:solo true}    capture the live pass ALONE: transparent clear, NO blits, splats
+                     at the fixed 0.9. Used by commit-active! to grab a layer's solo
+                     texture (premultiplied RGBA over the transparent clear).
+     {:blits-below true} composite ONLY the layers under `active` over opaque black
+                     (no splats) — select-layer! rebuilds the live pass's source image
+                     from this below-composite."
+  [area vw vh iw ih & [opts]]
   (let [{:keys [gen render quad blit fields tf-buf query gen-vao buf-tex]} (ensure-gpu! area)
+        {:keys [solo blits-below] :or {solo false blits-below false}} opts
         {:keys [count total sig-min sig-max]}
-        (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw})
+        (if blits-below
+          {:count 0 :total 0 :sig-min 0.0 :sig-max 0.0}   ; no splats drawn — skip gen
+          (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw}))
         n (min count shader/max-splats)]
     (gl/gl-finish)   ; make the transform-feedback writes visible to the texelFetch below
-    (when (System/getenv "GA_PAINTER_GPU_TIME")
+    (when (and (not blits-below) (System/getenv "GA_PAINTER_GPU_TIME"))
       (dotimes [_ 3] (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw}) (gl/gl-finish))
       (let [t1 (System/nanoTime) reps 8]
         (dotimes [_ reps] (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw}) (gl/gl-finish))
@@ -449,12 +497,14 @@
     ;; the background fills the whole pane (the loop shader painted u_bg outside the
     ;; image rect too), so clear to it, then scissor the splat quads to the image rect
     ;; so stroke tails can't bleed into the letterbox bars.
-    (gl/gl-clear-color 0.0 0.0 0.0 1.0)
+    (if solo
+      (gl/gl-clear-color 0.0 0.0 0.0 0.0)   ; solo capture: transparent — premultiplied splats accumulate correct dst alpha
+      (gl/gl-clear-color 0.0 0.0 0.0 1.0))  ; opaque black (single-pass + composite base)
     (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
     (gl/gl-active-texture gl/GL-TEXTURE0)
     (gl/gl-bind-texture gl/GL-TEXTURE-BUFFER buf-tex)
     (gl/gl-tex-buffer gl/GL-TEXTURE-BUFFER gl/GL-RGBA32F tf-buf)
-    (if (System/getenv "GA_PAINTER_LOOP_RENDER")
+    (if (and (System/getenv "GA_PAINTER_LOOP_RENDER") (not solo) (not blits-below))
       (let [locs (:locs render)]
         (gl/gl-use-program (:program render))
         (gl/gl-uniform-1i (:u_splats locs) 0)
@@ -473,23 +523,22 @@
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
         (gl/gl-bind-vertex-array (:vao (get @gl-state area)))
         (gl/gl-draw-arrays gl/GL-TRIANGLE-STRIP 0 4))
-      (let [locs (:locs quad)
-            scale (min (/ (double vw) iw) (/ (double vh) ih))
-            dw (long (Math/ceil (* iw scale))) dh (long (Math/ceil (* ih scale)))
-            ox (long (Math/floor (* 0.5 (- vw dw)))) oy (long (Math/floor (* 0.5 (- vh dh))))
-            ;; a base layer is active once add-layer! has captured a composite
-            ;; (layer-count > 1): the blit draws it opaque UNDER the new strokes, and
-            ;; this pass is a glaze — its stroke alpha thins (×cur-layer-opacity) so the
-            ;; underpaint shows through. Pass 1 stays 0.9 (bit-identical single pass).
-            ltex         (get-in @gl-state [area :layer-tex])
-            layer-active (and (> @layer-count-atom 1) (some? ltex))]
+      (let [locs    (:locs quad)
+            scale   (min (/ (double vw) iw) (/ (double vh) ih))
+            dw      (long (Math/ceil (* iw scale))) dh (long (Math/ceil (* ih scale)))
+            ox      (long (Math/floor (* 0.5 (- vw dw)))) oy (long (Math/floor (* 0.5 (- vh dh))))
+            active  (long @active-layer-atom)
+            layers  @layers-atom
+            nlayers (clojure.core/count layers)]   ; `count` below is the shadowed splat count
         (gl/gl-use-program (:program quad))
         (gl/gl-uniform-1i (:u_splats locs) 0)
         (gl/gl-uniform-1i (:u_count locs) (int n))
         (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
         (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
+        ;; the live pass: full 0.9 for the bottom (active 0) or a solo capture; else
+        ;; a cur-layer-opacity glaze — a live preview of this pass's stored opacity.
         (gl/gl-uniform-1f (:u_opacity locs)
-                          (if layer-active (* 0.9 (cur-layer-opacity)) 0.9))
+                          (cond solo 0.9 (zero? active) 0.9 :else (* 0.9 (cur-layer-opacity))))
         (gl/gl-uniform-1f (:u_hard_sharp locs)
                           ;; short-stroke regimes render fine marks as SOFT dabs — hard
                           ;; plateau-edged dots don't merge and bead contours into pearls
@@ -503,28 +552,23 @@
         (gl/gl-uniform-1f (:u_tex_edge locs)   (double (cur-tex-edge)))
         (gl/gl-enable gl/GL-SCISSOR-TEST)
         (gl/gl-scissor (int ox) (int oy) (int dw) (int dh))
-        ;; opaque base layer UNDER the strokes (no blend). One scissor block covers
-        ;; base + splats so neither can bleed into the letterbox bars.
-        (when layer-active
-          (let [blocs (:locs blit)]
-            (gl/gl-disable gl/GL-BLEND)
-            (gl/gl-active-texture (+ gl/GL-TEXTURE0 9))
-            (gl/gl-bind-texture gl/GL-TEXTURE-2D ltex)
-            (gl/gl-use-program (:program blit))
-            (gl/gl-uniform-1i (:u_layer blocs) 9)
-            (gl/gl-uniform-2f (:u_viewport blocs) (double vw) (double vh))
-            (gl/gl-uniform-2f (:u_image blocs) (double iw) (double ih))
-            (gl/gl-bind-vertex-array gen-vao)        ; no enabled attribs — gl_VertexID only
-            (gl/gl-draw-arrays gl/GL-TRIANGLES 0 6)
-            ;; restore unit-0 buf-tex + the splat program (the blit left TEXTURE9 active)
-            (gl/gl-active-texture gl/GL-TEXTURE0)
-            (gl/gl-bind-texture gl/GL-TEXTURE-BUFFER buf-tex)
-            (gl/gl-tex-buffer gl/GL-TEXTURE-BUFFER gl/GL-RGBA32F tf-buf)
-            (gl/gl-use-program (:program quad))))
-        (gl/gl-enable gl/GL-BLEND)
-        (gl/gl-blend-func gl/GL-ONE-FACTOR gl/GL-ONE-MINUS-SRC-ALPHA)
-        (gl/gl-bind-vertex-array gen-vao)            ; no enabled attribs — gl_VertexID only
-        (gl/gl-draw-arrays gl/GL-TRIANGLES 0 (int (* 6 n)))
+        ;; COMPOSITING ORDER — all src-over, premultiplied, one scissor block so no
+        ;; committed layer nor the live splats bleed into the letterbox bars:
+        ;;  1. committed layers UNDER the live pass  (layers[0..active)); the bottom
+        ;;     layer (index 0 = the original opaque pass) is forced to u_alpha 1.0.
+        (when-not solo
+          (blit-layers! blit quad gen-vao buf-tex tf-buf layers 0 active true vw vh iw ih))
+        ;;  2. the live splat pass (skipped in the blits-below source rebuild).
+        (when-not blits-below
+          (gl/gl-enable gl/GL-BLEND)
+          (gl/gl-blend-func gl/GL-ONE-FACTOR gl/GL-ONE-MINUS-SRC-ALPHA)
+          (gl/gl-use-program (:program quad))
+          (gl/gl-bind-vertex-array gen-vao)            ; no attribs — gl_VertexID only
+          (gl/gl-draw-arrays gl/GL-TRIANGLES 0 (int (* 6 n))))
+        ;;  3. committed layers OVER the live pass  (layers[active..nlayers)); each at
+        ;;     its own stored opacity (the i==0 base rule is for the BELOW range only).
+        (when (and (not solo) (not blits-below))
+          (blit-layers! blit quad gen-vao buf-tex tf-buf layers active nlayers false vw vh iw ih))
         (gl/gl-disable gl/GL-SCISSOR-TEST)
         (gl/gl-disable gl/GL-BLEND)))
     {:count count :total total :n n}))
@@ -626,19 +670,86 @@
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h)))))
 
-(defn- ensure-layer-tex! [area]
-  "Lazily create the per-area base-layer texture (RGBA8, LINEAR, CLAMP_TO_EDGE) and
-  cache its id in gl-state. Reused/re-uploaded on every add-layer!."
-  (let [tex (or (:layer-tex (get @gl-state area)) (gl/gen-one gl/gl-gen-textures))]
-    (swap! gl-state assoc-in [area :layer-tex] tex)
-    tex))
+;; --- layer stack: pure helpers (testable, no GL/atoms beyond the slider reset) ---
+;; A committed layer is {:tex <GL id> :opacity <double> :settings <14-vector>}. The
+;; index convention (documented here, the single source of truth): with N committed
+;; layers and active in [0,N], the LIVE pass sits between layers[active-1] and
+;; layers[active] — compositing blits layers[0..active) UNDER it and
+;; layers[active..N) OVER it. insert-at-active keeps that invariant on commit.
+
+(def ^:private settings-atoms
+  "The slider atoms a committed layer must snapshot so re-selecting it reproduces the
+   pass deterministically. Positional — snapshot-settings / restore-settings! use the
+   same order. (count size broad mid fine detail variation curvature stroke contrast
+   hardness tex-streak tex-grain tex-edge.)"
+  [count-atom size-atom broad-atom mid-atom fine-atom detail-atom variation-atom
+   curvature-atom stroke-atom contrast-atom hardness-atom
+   tex-streak-atom tex-grain-atom tex-edge-atom])
+
+(defn snapshot-settings
+  "Snapshot every placement slider atom into a 14-vector. Stored on a committed layer
+   so re-selecting it restores the exact field that generated it."
+  []
+  (vec (for [a settings-atoms] @a)))
+
+(defn restore-settings!
+  "Reset every placement slider atom from a snapshot-settings vector."
+  [snap]
+  (dotimes [i (count settings-atoms)]
+    (reset! (settings-atoms i) (snap i))))
+
+(defn insert-layer
+  "Insert entry into the committed-layers vector at index `active` (append when active
+   is past the end, else splice in place). Pure — no GL, no atoms."
+  [layers active entry]
+  (if (= active (count layers))
+    (conj layers entry)
+    (vec (concat (subvec layers 0 active) [entry] (subvec layers active)))))
+
+(defn remove-layer
+  "Drop the entry at index j from the committed-layers vector. Pure."
+  [layers j]
+  (vec (concat (subvec layers 0 j) (subvec layers (inc j)))))
+
+(defn- commit-active!
+  "Capture the live splat pass ALONE (:solo — transparent clear, no blits, splats at the
+   fixed 0.9) offscreen at native res, upload it to a fresh RGBA8/LINEAR/CLAMP texture,
+   and insert {:tex :opacity :settings} into layers-atom at the active index (append
+   when active is a new top layer). The :settings snapshot reproduces the pass from
+   image-atom + the sliders. GUI-thread only (GL context)."
+  []
+  (let [area    @area-atom
+        img     @image-atom
+        iw      (int (:width img)) ih (int (:height img))
+        prev-fbo (read-fbo-binding)]
+    (glx/make-current area)
+    (ensure-export-targets! area iw ih)
+    (gl/gl-viewport 0 0 iw ih)
+    (gpu-draw! area iw ih iw ih {:solo true})
+    (let [buf (ffi/alloc (* iw ih 4))
+          tex (gl/gen-one gl/gl-gen-textures)]
+      (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
+      (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
+      (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 GL-RGBA8 iw ih 0 gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
+      (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MIN-FILTER gl/GL-LINEAR)
+      (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MAG-FILTER gl/GL-LINEAR)
+      (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-S gl/GL-CLAMP-TO-EDGE)
+      (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-T gl/GL-CLAMP-TO-EDGE)
+      (ffi/free buf)
+      (let [active (long @active-layer-atom)
+            entry  {:tex      tex
+                    :opacity  (if (zero? active) 1.0 (cur-layer-opacity))
+                    :settings (snapshot-settings)}]
+        (swap! layers-atom insert-layer active entry)))
+    (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
+    (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))))
 
 (defn add-layer!
-  "Capture the current composite (every layer below) offscreen at native resolution,
-  upload it as the opaque base-layer texture, and make that capture the source image
-  for the next generation pass — so repainting smooths the shapes while the per-layer
-  opacity lets the pass below show through like a glaze. GUI-thread only (it captures
-  into the area's GL context); also the headless multi-pass driver (GA_PAINTER_PASSES)."
+  "Commit the live pass into the stack (commit-active!), then capture the FULL composite
+   (a normal non-solo 1:1 draw) and make it the next pass's source image — so repainting
+   smooths the shapes while the per-layer opacity lets the pass below show through like
+   a glaze. Active moves to the new top; sliders are left as-is. GUI-thread only (GL
+   context); also the headless multi-pass driver (GA_PAINTER_PASSES)."
   []
   (if-not (and @image-atom @area-atom (get @gl-state @area-atom))
     (reset! status-atom "load an image first")
@@ -647,39 +758,74 @@
           iw       (int (:width img)) ih (int (:height img))
           prev-fbo (read-fbo-binding)]
       (glx/make-current area)
+      (commit-active!)
       (ensure-export-targets! area iw ih)
       (gl/gl-viewport 0 0 iw ih)
-      (let [_   (gpu-draw! area iw ih iw ih)        ; render the existing composite at 1:1
-            buf (ffi/alloc (* iw ih 4))]
+      (gpu-draw! area iw ih iw ih)               ; the full composite (below + live + above)
+      (let [buf (ffi/alloc (* iw ih 4))]
         (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
-        ;; upload the capture as the opaque base layer (matches the blit's u_layer)
-        (let [tex (ensure-layer-tex! area)]
-          (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
-          (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 GL-RGBA8 iw ih 0
-                              gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
-          (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MIN-FILTER gl/GL-LINEAR)
-          (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MAG-FILTER gl/GL-LINEAR)
-          (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-S gl/GL-CLAMP-TO-EDGE)
-          (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-T gl/GL-CLAMP-TO-EDGE))
-        ;; the capture becomes the source image for the next pass (fields rebuilt via
-        ;; prepare-image). size-atom + image-path-atom are left alone: the user's slider
-        ;; tuning stands, and the original path is kept for reset-layers!.
         (reset! image-atom (prepare-image (rgba->image buf iw ih)))
         (ffi/free buf))
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))
-      (swap! layer-count-atom inc)
-      (reset! status-atom (format "layer %d — repainting from render" @layer-count-atom))
+      (reset! active-layer-atom (count @layers-atom))
+      (reset! status-atom (format "layer %d — repainting from render" (inc (count @layers-atom))))
       (request-render!))))
 
+(defn select-layer!
+  "Make committed layer j (0-indexed) the active layer to re-edit. Saves the current
+   live pass back into the stack (commit-active!), restores layers[j]'s settings +
+   opacity, removes its stored solo render (the live regen with restored settings
+   reproduces it), and rebuilds the live pass's source image — the composite of layers
+   below j (or the original file when j == 0). No-op if j == active or j is out of
+   [0, (count layers)]. GUI-thread only (GL context)."
+  [j]
+  (let [layers @layers-atom
+        active (long @active-layer-atom)]
+    (when (and (integer? j) (<= 0 j (count layers)) (not= j active))
+      (let [area @area-atom]
+        (glx/make-current area)
+        ;; 1. save the current live pass + its settings back into the stack. The live is
+        ;;    committed at `active`, so indices >= active shift up one — the entry at the
+        ;;    post-commit index j is the layer to make live.
+        (commit-active!)
+        ;; 2. layers[j] becomes the live pass: restore its settings + opacity, drop it.
+        (let [target (@layers-atom j)
+              {:keys [settings opacity]} target]
+          (restore-settings! settings)
+          (reset! layer-opacity-atom (or opacity 0.6))
+          (swap! layers-atom remove-layer j)
+          (reset! active-layer-atom j)
+          ;; 3. rebuild the live pass's SOURCE image = everything painted below it.
+          (if (zero? j)
+            ;; bottom layer: source is the original file (reload fields, but do NOT touch
+            ;; the slider atoms — on-image-loaded would reset size-atom).
+            (when @image-path-atom
+              (reset! image-atom (prepare-image (image/load-image @image-path-atom 1024))))
+            ;; else: composite the layers below j over opaque black, read it back.
+            (let [iw      (int (:width @image-atom)) ih (int (:height @image-atom))
+                  prev-fbo (read-fbo-binding)]
+              (ensure-export-targets! area iw ih)
+              (gl/gl-viewport 0 0 iw ih)
+              (gpu-draw! area iw ih iw ih {:blits-below true})
+              (let [buf (ffi/alloc (* iw ih 4))]
+                (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
+                (reset! image-atom (prepare-image (rgba->image buf iw ih)))
+                (ffi/free buf))
+              (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
+              (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))))
+          (reset! status-atom (format "layer %d of %d (editing)" (inc j) (inc (count @layers-atom))))
+          (request-render!))))))
+
 (defn- reset-layers!
-  "Drop every added layer: restore single-pass mode (layer-count 1, so gpu-draw! stops
-  blitting the base) and reload the original image from disk (rebuilt fields, fresh
-  render). The layer texture object is simply abandoned (gated out, not deleted)."
+  "Drop every committed layer (texture objects are abandoned — gated out, not deleted),
+   reset the active index to 0, and reload the original image from disk (rebuilt fields,
+   fresh single-pass render)."
   []
-  (if (<= @layer-count-atom 1)
+  (if (empty? @layers-atom)
     (reset! status-atom "no layers to reset")
-    (do (reset! layer-count-atom 1)
+    (do (reset! layers-atom [])
+        (reset! active-layer-atom 0)
         (when @image-path-atom (on-image-loaded @image-path-atom)))))
 
 ;; Build the per-GLArea GL objects once on realize. Kept shallow (one let) so the
@@ -815,6 +961,9 @@
    [:button {:label "Save PNG…"    :on-click save-image-dialog!}]
    [:button {:label "Add Layer"    :on-click add-layer!}]
    [:button {:label "Reset Layers" :on-click reset-layers!}]
+   [:button {:label "◀" :on-click #(select-layer! (dec @active-layer-atom))}]
+   [:label {:label (format "layer %d/%d" (inc @active-layer-atom) (inc (count @layers-atom)))}]
+   [:button {:label "▶" :on-click #(select-layer! (inc @active-layer-atom))}]
    [:label {:label @status-atom :xalign 0.0 :halign :start :ellipsize :end}]])
 
 (defn- control-panel []
