@@ -472,7 +472,30 @@
           ;; (−dy,dx) reproduces the head offset — and stays consistent through
           ;; field sign flips that would wobble a per-step θ resample.
           sidem (* (double side) (double dirsign))
-          [hr hg hb0] (sample-arr blur-px iw ih x y)]
+          ;; BOUNDARY-SIDE BRUSH-LOAD: a chain running PARALLEL to a colour
+          ;; boundary carries one brush-load for its whole span, and which side's
+          ;; colour it grabbed is decided by where its head happened to land —
+          ;; adjacent chains alternate sides, and the painted boundary becomes a
+          ;; tiling of chain-length colour capsules: the REGULAR wavy scallops
+          ;; along every contour, wavelength = the level's chain span. Where the
+          ;; two sides genuinely differ (a boundary, not a thin LINE feature —
+          ;; lines keep their on-ridge colour), the brush-load samples ~0.7σ
+          ;; across the tangent on the stroke's OWN colour side, so the meeting
+          ;; line is drawn by stroke geometry, not by per-seed colour luck.
+          [bax bay] (let [[th0 _] (sample-fields nf cx0 cy0)
+                          nx0 (- (Math/sin th0)) ny0 (Math/cos th0)
+                          hh  (max 1.75 (* 0.8 ssz))
+                          [r0 g0 b0] (sample-arr blur-px iw ih cx0 cy0)
+                          [rp gp bp] (sample-arr blur-px iw ih (+ cx0 (* nx0 hh)) (+ cy0 (* ny0 hh)))
+                          [rm gm bm] (sample-arr blur-px iw ih (- cx0 (* nx0 hh)) (- cy0 (* ny0 hh)))
+                          dsides (max (Math/abs (- rp rm)) (Math/abs (- gp gm)) (Math/abs (- bp bm)))]
+                      (if (< dsides 0.15)
+                        [0.0 0.0]
+                        (let [dp (max (Math/abs (- rp r0)) (Math/abs (- gp g0)) (Math/abs (- bp b0)))
+                              dm (max (Math/abs (- rm r0)) (Math/abs (- gm g0)) (Math/abs (- bm b0)))
+                              sidec (if (< dp dm) 1.0 -1.0)]
+                          [(* sidec 0.7 ssz nx0) (* sidec 0.7 ssz ny0)])))
+          [hr hg hb0] (sample-arr blur-px iw ih (+ cx0 bax) (+ cy0 bay))]
       (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
         (if (or (> k kmax) (< fade 0.15))
           acc
@@ -491,7 +514,7 @@
                 ;; (the pale ghost lump over the crown), so coverage strokes never
                 ;; carry paint across a boundary; smooth gradients stay under 0.18.
                 fade (if (pos? k)
-                       (let [[br bg bb] (sample-arr blur-px iw ih px py)
+                       (let [[br bg bb] (sample-arr blur-px iw ih (+ px bax) (+ py bay))
                              dmx (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))]
                          (cond (> dmx (if (<= (long lvl) 1) 0.18 0.45)) 0.0
                                (> dmx (if liner? 0.3 0.22)) (* fade 0.4)
@@ -564,7 +587,7 @@
                           (pos? (double melt))    (* 0.85 (double melt) t)
                           :else                   0.0)
                 acc (conj acc [px py sz D sn tn al th (* coh (- 1.0 (double melt))) hb
-                               (+ cx0 (* wsl (- px cx0))) (+ cy0 (* wsl (- py cy0)))
+                               (+ cx0 bax (* wsl (- px cx0))) (+ cy0 bay (* wsl (- py cy0)))
                                traw (spec-cap lvl)])
                 ;; step: along the local tangent, sign-continuous with the previous step,
                 ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
