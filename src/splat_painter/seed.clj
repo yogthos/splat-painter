@@ -636,6 +636,20 @@
                                (max 0.0 (min wd (+ ny1 (* sidem 0.55 ssz dx))))])]
               (recur (inc k) nx2 ny2 dx dy fade acc))))))))))
 
+(defn- stub-glaze
+  "MEASURE-THEN-EMIT: judge a traced chain by its final length. An accent chain
+   (lvl≥2) that died to colour drift after 1-2 segments is a STUB — a tap of the
+   brush, not a stroke — yet it used to slap its head segments down at
+   near-opaque alpha: the isolated bead-dashes along glasses frames and strap
+   edges. Stubs paint at glaze alpha (×0.5); dense contour handoffs still build
+   opacity by overlap. A standalone helper (NOT a let-wrap around the trace loop
+   inside stroke-segments — demoting that giant loop out of tail position sent
+   the jolt compiler pathological: minutes instead of seconds)."
+  [lvl rows]
+  (if (and (>= (long lvl) 2) (< (count rows) 3))
+    (mapv (fn [r] (assoc r 6 (* 0.5 (double (nth r 6))))) rows)
+    rows))
+
 (defn- layered-means
   "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
    spacing < stdev ⇒ heavy overlap, so the (black) background can never show through — then
@@ -832,7 +846,8 @@
                                                (< (hash01 (+ (* i 53) lvl) j 37)
                                                   (if (== (long lvl) 1) 0.9 0.75)))
                                         []
-                                        (stroke-segments nf dmap lvl
+                                        (stub-glaze lvl
+                                         (stroke-segments nf dmap lvl
                                                          (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
                                                          cssz
                                                          D 0.0 tn ds curvature stroke hd wd
@@ -845,7 +860,7 @@
                                                            (* traw (+ 0.6 (* 0.4 sgate)))
                                                            traw)
                                                          sgate blur-px iw ih th melt
-                                                         map-kind gain blurd-px))]
+                                                         map-kind gain blurd-px)))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         (map-indexed vector levels)))))

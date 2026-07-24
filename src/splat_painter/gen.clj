@@ -499,6 +499,16 @@ void main(){
   // razor-sharp bilateral paint field any probe wobble across a boundary trips
   // the lift instantly and dashes contour chains into beads
   vec3 headBlur = sampleRGB(u_blurDTex, cpx + bax, cpy + bay);
+  // MEASURE-THEN-EMIT (mirror seed/stroke-segments): phase 0 traces the whole
+  // chain without emitting to count its segments; an accent chain that dies to
+  // colour drift under 3 segments is a STUB — a tap, not a stroke — and phase 1
+  // emits it at glaze alpha instead of slapping near-opaque bead-dashes along
+  // glasses frames and strap edges. The walk is fully deterministic, so both
+  // phases trace identical paths.
+  float ascale = 1.0;
+  for (int phase = 0; phase < 2; phase++) {
+  px = x2; py = y2; dxp = 0.0; dyp = 0.0; fade = 1.0;
+  int emitted = 0;
   for (int q = 0; q < SEGS; q++) {
     if (q >= segs || fade < 0.15) break;
     if (q > 0) {
@@ -556,7 +566,8 @@ void main(){
     // MELTED broad chains re-mix much harder — one brush-load carried across a
     // smooth gradient reads as a feathery streak on the wash.
     float wsl = liner ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0);
-    emitSplat(px, py, cpx + bax + wsl*(px - cpx), cpy + bay + wsl*(py - cpy), sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt);
+    if (phase == 1) emitSplat(px, py, cpx + bax + wsl*(px - cpx), cpy + bay + wsl*(py - cpy), sz, D, snoise, tnoise, al * ascale, hb, traw, tcap, 1.0 - melt);
+    emitted++;
     // bend gated by coherence AND physical size (mirror seed): straight
     // strongly-oriented edges trace straight; small strokes never wobble
     float bend = u_curv * 0.9 * bendf * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)
@@ -585,6 +596,8 @@ void main(){
       py = clamp(py + sidem * 0.55 * ssz2 * ( dx), 0.0, float(u_W - 1));
     }
     dxp = dx; dyp = dy;
+  }
+  if (phase == 0) ascale = (lvl >= 2 && emitted < 3) ? 0.5 : 1.0;
   }
 }")
 
