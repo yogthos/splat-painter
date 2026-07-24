@@ -172,9 +172,12 @@
     ;; direction momentum (0.65) keep chains on their line, so fewer die to colour
     ;; drift; the new line-hold (sharp-map dry-out) + reduced liner taper reshape
     ;; the fine tier. Broad-tier melt is inert here (size-broad = 1).
+    ;; (Σmean −0.8/−0.1) the liner tier dropped its Perlin bend + position warp:
+    ;; fine strokes follow the original detail exactly — noise variation belongs
+    ;; to the large/medium brushwork.
     (is (= 760 (count splats)))
-    (is (approx= 0.5  16380.419  sx) "Σ mean-x")
-    (is (approx= 0.5  22416.621  sy) "Σ mean-y")
+    (is (approx= 0.5  16379.618  sx) "Σ mean-x")
+    (is (approx= 0.5  22416.520  sy) "Σ mean-y")
     (is (approx= 1.0  219761.674 sd) "Σ det(cov)")
     (is (approx= 0.05 888.894    sc) "Σ colour")))
 
