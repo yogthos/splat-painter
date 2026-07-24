@@ -278,8 +278,11 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   float c01 = (sx2 - sy2)*c*s;
   float c11 = sx2*s*s + sy2*c*c;
   // floored by the level's rawness (traw), ceilinged by its specificity cap
-  // (tcap) — progressive colour: broad averaged, fine specific (mirror seed)
-  float t = min(tcap, max(traw, clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0)));
+  // (tcap) — progressive colour: broad averaged, fine specific (mirror seed).
+  // The cap also follows the BRUSH SIZE: a fat brush cannot place a
+  // pixel-specific highlight — past ~4px stdev the ceiling eases to averaged.
+  float tcap2 = min(tcap, 0.3 + 0.7 * min(1.0, 3.0 / max(csz, 1e-6)));
+  float t = min(tcap2, max(traw, clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0)));
   vec3 color0 = mix(blur, raw, t);
   vec3 colorAc = (u_contrast == 1.0) ? color0 : clamp((color0 - 0.5)*u_contrast + 0.5, 0.0, 1.0);
   float tone = 1.0 + u_variation * 0.15 * (2.0 * tn);
@@ -379,7 +382,11 @@ void main(){
   // fine liner strokes (lvl>=4) ARE the edge's own paint and keep their size.
   // The BASE is the COVERAGE layer: it shrinks gently (>=0.75x, spacing still
   // seals) so paint always reaches the boundary — no unpainted moat.
-  float ssz2 = ssz * szf * (1.0 - ((lvl == 0) ? 0.25 : (lvl <= 3) ? 0.45 : 0.1) * Ev);
+  // σ-aware (mirror seed): small strokes keep the gentle coefficients, but a fat
+  // low-budget daub centred on a thin bright feature would smear it 20px past the
+  // silhouette as an opaque ghost cloud — past ~8px stdev the shrink strengthens.
+  float ssz2 = ssz * szf * (1.0 - min(0.7, ((lvl == 0) ? 0.25 : (lvl <= 3) ? 0.45 : 0.1)
+                                           * max(1.0, ssz * szf / 8.0)) * Ev);
   float snoise = 0.0;
   // MELT (mirror seed/layered-means): how much a flat-region broad stroke should
   // sink into the wash — grows only past Broad 1.0 and only where subjectness is
@@ -444,10 +451,13 @@ void main(){
       // a LARGE mismatch (>0.45) means the stroke EXITED its colour region — a
       // chain escaping a curved silhouette would paint its dark brush-load into
       // the background — so the painter LIFTS the brush and emits nothing.
+      // the broad tier lifts IMMEDIATELY on any real colour change (0.18): its
+      // opaque underpainting chains at the largest sizes must never carry paint
+      // across a boundary (one escaped segment = a huge wrong-colour ghost cloud)
       vec3 cb = sampleRGB(u_blurTex, px, py);
       vec3 dcl = abs(cb - headBlur);
       float dmx = max(dcl.r, max(dcl.g, dcl.b));
-      if (dmx > 0.45) fade = 0.0;
+      if (dmx > ((lvl <= 1) ? 0.18 : 0.45)) fade = 0.0;
       else if (dmx > ((lvl >= 4) ? 0.3 : 0.22)) fade *= 0.4;
     }
     vec2 tc = fieldsAt(px, py);

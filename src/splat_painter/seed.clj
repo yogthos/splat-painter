@@ -474,10 +474,15 @@
                 ;; background (the halo of black lines hovering over hair) — so
                 ;; the painter LIFTS the brush: fade 0, and the guard below stops
                 ;; the chain BEFORE this segment is emitted.
+                ;; the broad tier lifts IMMEDIATELY on any real colour change (0.18):
+                ;; its chains are opaque underpainting at the largest sizes — one
+                ;; escaped segment paints a huge wrong-colour cloud past a silhouette
+                ;; (the pale ghost lump over the crown), so coverage strokes never
+                ;; carry paint across a boundary; smooth gradients stay under 0.18.
                 fade (if (pos? k)
                        (let [[br bg bb] (sample-arr blur-px iw ih px py)
                              dmx (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))]
-                         (cond (> dmx 0.45) 0.0
+                         (cond (> dmx (if (<= (long lvl) 1) 0.18 0.45)) 0.0
                                (> dmx (if (>= (long lvl) 4) 0.3 0.22)) (* fade 0.4)
                                :else fade))
                        fade)
@@ -747,15 +752,21 @@
                                                          ;; fat strokes shrink near edges so soft
                                                          ;; tails can't cross the silhouette; the
                                                          ;; fine liner strokes ARE the edge's own
-                                                         ;; paint and keep their size. The BASE is
-                                                         ;; the COVERAGE layer: it shrinks gently
-                                                         ;; (≥0.75×, spacing still seals) so paint
-                                                         ;; always reaches the boundary — turning
-                                                         ;; detail down falls back to soft averaged
-                                                         ;; edges, never to an unpainted moat.
-                                                         (* ssz szf (- 1.0 (* (cond (zero? (long lvl)) 0.25
-                                                                                    (<= (long lvl) 3) 0.45
-                                                                                    :else 0.1)
+                                                         ;; paint and keep their size. The shrink is
+                                                         ;; σ-AWARE: at small sizes it keeps the old
+                                                         ;; gentle coefficients (base ≥0.75× — the
+                                                         ;; coverage layer must reach the boundary),
+                                                         ;; but a LOW-BUDGET fat daub centred on a
+                                                         ;; thin bright feature (a backlit rim) would
+                                                         ;; smear that feature's colour 20px past the
+                                                         ;; silhouette as an opaque ghost cloud — so
+                                                         ;; past ~8px stdev the shrink strengthens
+                                                         ;; toward the feature scale (capped 0.7).
+                                                         (* ssz szf (- 1.0 (* (min 0.7
+                                                                                   (* (cond (zero? (long lvl)) 0.25
+                                                                                            (<= (long lvl) 3) 0.45
+                                                                                            :else 0.1)
+                                                                                      (max 1.0 (/ (* ssz szf) 8.0))))
                                                                               Ev)))
                                                          D 0.0 tn ds curvature stroke hd wd
                                                          segs stepf bendf
@@ -882,7 +893,14 @@
         ;; t is FLOORED by the level's rawness (traw) and CEILINGED by its
         ;; specificity cap (tcap) — the progressive colour ladder: broad layers
         ;; averaged, fine layers specific, whatever coherence says.
-        t   (min (double tcap)
+        ;; the cap also follows the BRUSH SIZE: a fat brush cannot place a
+        ;; pixel-specific highlight — as the stroke stdev grows past ~4px the
+        ;; ceiling eases to fully-averaged (0.35). At high budgets (small mid
+        ;; strokes) this is a no-op; at low budgets it stops fat mid dabs from
+        ;; stamping raw bright speckles over the surface they sit on.
+        tcap2 (min (double tcap)
+                   (+ 0.3 (* 0.7 (min 1.0 (/ 3.0 (max csz 1e-6))))))
+        t   (min tcap2
                  (max (double traw)
                       (min 1.0 (max 0.0 (+ 0.15 (* 0.85 (max coherence (double dlev))))))))
         [br bg bb] blur-rgb [rr rg rb] raw-rgb
