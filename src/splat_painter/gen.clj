@@ -350,8 +350,12 @@ void main(){
   // past 1.0 it thins mid/fine marks out of truly flat regions — isolated dark
   // flecks on a melted wash — leaving them at Broad <= 1 where strokes are the
   // wanted effect.
-  float bgate = 1.0 - clamp((u_broad - 1.0) / 1.5, 0.0, 1.0) * (1.0 - min(1.0, sabs / 0.35));
-  float gain = (lvl >= 2) ? (0.25 + 0.75 * sgate) * bgate : 1.0;
+  // SQUARED (mirror seed): the linear form bottomed out too weak to ever block
+  // accents whose locally-normalized maps light on bokeh noise. Gates LEVEL 1
+  // too — its chains were the fibrous filament texture over empty regions.
+  float bg0 = 1.0 - clamp((u_broad - 1.0) / 1.5, 0.0, 1.0) * (1.0 - min(1.0, sabs / 0.35));
+  float bgate = bg0 * bg0;
+  float gain = (lvl >= 2) ? (0.25 + 0.75 * sgate) * bgate : (lvl == 1) ? bgate : 1.0;
   // each level reads the map matched to ITS scale (mirror of seed/layered-means).
   // The cutoff is DITHERED ±25% per seed: a hard threshold on a map that oscillates
   // around it dashes contours into bead necklaces; dithering turns the knife edge
@@ -384,7 +388,11 @@ void main(){
   // Size jitter applies at SEED level to the whole chain (size AND step) so chains
   // stay self-overlapping at any Variation; broad levels keep 40% of both jitters.
   float sn0 = hash01(i*31 + lvl, j, 11) - 0.5;
-  float szf = max(0.75, 1.0 + u_variation * sn0 * ((lvl <= 1) ? 0.4 : 1.0));
+  // MELT (mirror seed): how much a flat-region broad stroke sinks into the wash;
+  // footprint-gated so strokes touching a subject keep their identity. Computed
+  // here so the size jitter below can mute with it.
+  float melt = (lvl <= 1) ? clamp((u_broad - 1.0) / 1.5, 0.0, 1.0) * (1.0 - sfoot) : 0.0;
+  float szf = max(0.75, 1.0 + u_variation * sn0 * ((lvl <= 1) ? 0.4 * (1.0 - melt) : 1.0));
   // near a strong edge: the mid fill levels don't paint at all (their boundary-band
   // chains ribbon mixed colour along silhouettes as a ghost veil — the edge belongs
   // to base coverage below and fine strokes above), and base daubs SHRINK so their
@@ -404,13 +412,12 @@ void main(){
   float ssz2 = ssz * szf * (1.0 - min(0.7, ((lvl == 0) ? 0.25 : (lvl <= 3) ? 0.45 : 0.1)
                                            * max(1.0, ssz * szf / 8.0)) * Ev);
   float snoise = 0.0;
-  // MELT (mirror seed/layered-means): how much a flat-region broad stroke should
-  // sink into the wash — grows only past Broad 1.0 and only where subjectness is
-  // low, so Broad at max makes bokeh strokes invisible while detailed regions
-  // keep their brushwork. Mutes the tone jitter and drives the chain re-mix.
-  float melt = (lvl <= 1) ? clamp((u_broad - 1.0) / 1.5, 0.0, 1.0) * (1.0 - sfoot) : 0.0;
+  // tone jitter follows the PHYSICAL stroke scale (mirror seed): any small mark
+  // keeps 15% regardless of which level painted it — full jitter on small
+  // strokes beads contours into speckle.
   float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5)
-               * ((lvl <= 1) ? 0.25 * (1.0 - melt) : (lvl >= 4) ? 0.15 : 1.0);
+               * ((lvl <= 1) ? 0.25 * (1.0 - melt) : (lvl >= 4) ? 0.15
+                  : (0.15 + 0.85 * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)));
 
   // broad strokes (base + level 1) colour from the HEAVY blur — smoothed at their scale
   float hb = (lvl <= 1) ? 1.0 : 0.0;
@@ -436,6 +443,10 @@ void main(){
   float stepf = u_stepf[k];                      // broad levels stroke long and curl,
   float bendf = u_bendf[k];                      // fine levels make short precise marks
   bool snapE = (lvl >= 2);                       // fine strokes glue to the edge ridge
+  // LINER discipline keys on PHYSICAL stroke size, not level index (mirror seed):
+  // which level paints fine detail depends on the sliders — any small accent
+  // chain must follow the original detail exactly or it reads as waviness.
+  bool liner = (lvl >= 4) || (lvl >= 2 && ssz2 < 3.5);
   // colour samples the PRE-snap position (one side of the edge); geometry snaps.
   // On-ridge colour is the sides' mix and paints silhouettes as drawn outlines.
   float cpx = x2, cpy = y2;
@@ -474,7 +485,7 @@ void main(){
       vec3 dcl = abs(cb - headBlur);
       float dmx = max(dcl.r, max(dcl.g, dcl.b));
       if (dmx > ((lvl <= 1) ? 0.18 : 0.45)) fade = 0.0;
-      else if (dmx > ((lvl >= 4) ? 0.3 : 0.22)) fade *= 0.4;
+      else if (dmx > (liner ? 0.3 : 0.22)) fade *= 0.4;
     }
     vec2 tc = fieldsAt(px, py);
     // follow the line only while there IS a line (mirror seed/stroke-segments):
@@ -482,14 +493,15 @@ void main(){
     // runs dry fast — long chains wandering through dense detail smear it.
     // ...but a strong edge under the brush keeps the line alive: real ink lines
     // push THROUGH junctions, where coherence dips while edge energy stays high
-    if (q > 0 && lvl >= 4 && tc.y < 0.35 && edgeAt(px, py) < 0.5) fade *= 0.5;
+    if (q > 0 && liner && tc.y < 0.35 && edgeAt(px, py) < 0.5) fade *= 0.5;
     // LINE-HOLD (mirror seed/stroke-segments): a liner stroke exists to trace the
-    // fine structure it was seeded on. When the sharp fine-band map under the
+    // fine structure it was seeded on. When ITS OWN placement map under the
     // brush falls below the level's own placement threshold, the stroke has
     // WALKED OFF its line — a chain escaping a silhouette tangentially would drag
     // its bodied paint into the featureless background (ghost tendrils) — lift.
-    if (q > 0 && lvl >= 4) {
-      float mv = mapAt(2, px, py) * (0.25 + 0.75 * sgate);
+    // `gain` is the level's full placement gain, so hold matches placement.
+    if (q > 0 && liner) {
+      float mv = mapAt(u_sharp[k], px, py) * gain;
       if (mv < 0.35 * th) fade = 0.0;
       else if (mv < 0.7 * th) fade *= 0.5;
     }
@@ -505,20 +517,22 @@ void main(){
     // of the existing tail dry-out, so the mark tapers at BOTH ends like a real
     // stroke. The LINER tier keeps only a hint (overlapping chains hand off — strong
     // per-chain taper lumps the handoffs into a string of tadpoles).
-    float hw = (lvl >= 4) ? 0.8  + 0.2  * smoothstep(0.0, 0.18, tt)
-                          : 0.55 + 0.45 * smoothstep(0.0, 0.18, tt);
-    float ha = (lvl >= 4) ? 0.75 + 0.25 * smoothstep(0.0, 0.15, tt)
-                          : 0.5  + 0.5  * smoothstep(0.0, 0.15, tt);
+    float hw = liner ? 0.8  + 0.2  * smoothstep(0.0, 0.18, tt)
+                     : 0.55 + 0.45 * smoothstep(0.0, 0.18, tt);
+    float ha = liner ? 0.75 + 0.25 * smoothstep(0.0, 0.15, tt)
+                     : 0.5  + 0.5  * smoothstep(0.0, 0.15, tt);
     float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt)) * hw;  // width tapers at both ends
     float al = lal2 * fade * (1.0 - 0.65 * tt * tt) * ha; // alpha: lift-on × glaze × dry-out
     // the brush-load RE-MIXES with the canvas (mirror seed): the colour-sample
     // point slides up to 35% toward the current position along the stroke.
     // MELTED broad chains re-mix much harder — one brush-load carried across a
     // smooth gradient reads as a feathery streak on the wash.
-    float wsl = (lvl >= 4) ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0);
+    float wsl = liner ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0);
     emitSplat(px, py, cpx + wsl*(px - cpx), cpy + wsl*(py - cpy), sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt);
-    // bend gated by coherence: straight strongly-oriented edges trace straight
-    float bend = u_curv * 0.9 * bendf * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);
+    // bend gated by coherence AND physical size (mirror seed): straight
+    // strongly-oriented edges trace straight; small strokes never wobble
+    float bend = u_curv * 0.9 * bendf * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)
+               * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
     float dx0 = cos(tc.x), dy0 = sin(tc.x);
     float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);
@@ -526,7 +540,7 @@ void main(){
     float dx = cb*dx1 - sb*dy1, dy = sb*dx1 + cb*dy1;
     // DIRECTION MOMENTUM (mirror seed): liner strokes carry 65% of the previous
     // step's direction — a field-noise-driven turn every step waves the line
-    if (lvl >= 4 && q > 0) {
+    if (liner && q > 0) {
       float mx = 0.35*dx + 0.65*dxp, my = 0.35*dy + 0.65*dyp;
       float ml = sqrt(mx*mx + my*my);
       if (ml > 1e-6) { dx = mx/ml; dy = my/ml; }
@@ -535,7 +549,7 @@ void main(){
     float L = ssz2 * stepf * (0.4 + 0.24 * u_stroke);
     px = clamp(px + L*dx, 0.0, float(u_H - 1));
     py = clamp(py + L*dy, 0.0, float(u_W - 1));
-    if (snapE) { vec2 sp3 = edgeSnap(px, py, (lvl >= 4) ? 0.35 : 0.65); px = sp3.x; py = sp3.y; }
+    if (snapE) { vec2 sp3 = edgeSnap(px, py, liner ? 0.35 : 0.65); px = sp3.x; py = sp3.y; }
     // side offset along the stroke's OWN motion perpendicular (mirror seed) —
     // the path is a stable frame; a per-step theta resample wobbled the line
     if (side != 0.0) {
