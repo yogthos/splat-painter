@@ -168,11 +168,15 @@
     ;; (sd 221525→219753) both-ends taper: the brush now lifts ON at the head too
     ;; (a quick width/alpha ramp over the first ~18%) on top of the tail dry-out,
     ;; so traced strokes taper at BOTH ends — the width envelope shrinks Σdet a touch.
-    (is (= 689 (count splats)))
-    (is (approx= 0.5  14942.719  sx) "Σ mean-x")
-    (is (approx= 0.5  20285.148  sy) "Σ mean-y")
-    (is (approx= 1.0  219752.666 sd) "Σ det(cov)")
-    (is (approx= 0.05 748.184    sc) "Σ colour")))
+    ;; (689→760) smooth liner traces: gentler per-step ridge snap (0.35) + stronger
+    ;; direction momentum (0.65) keep chains on their line, so fewer die to colour
+    ;; drift; the new line-hold (sharp-map dry-out) + reduced liner taper reshape
+    ;; the fine tier. Broad-tier melt is inert here (size-broad = 1).
+    (is (= 760 (count splats)))
+    (is (approx= 0.5  16380.419  sx) "Σ mean-x")
+    (is (approx= 0.5  22416.621  sy) "Σ mean-y")
+    (is (approx= 1.0  219761.674 sd) "Σ det(cov)")
+    (is (approx= 0.05 888.894    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments

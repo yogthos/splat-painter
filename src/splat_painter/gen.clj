@@ -78,6 +78,7 @@ uniform float u_broad;    // Broad slider — bokeh-adaptive broad-tier multipli
 
 // fields
 uniform sampler2D u_detailTex;
+uniform sampler2D u_subjTex;  // absolute subjectness (dmap grid, .r)
 uniform float u_dmax;
 uniform vec2  u_detailDim;   // (H_d, W_d)
 uniform vec2  u_detailSrc;   // (src_h, src_w) = image (H, W)
@@ -168,6 +169,13 @@ float mapAt(int sel, float x, float y){
 float edgeAt(float x, float y){
   return texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0).b;
 }
+// ABSOLUTE subjectness (mirror wavelet/subject-abs-at): raw globally-scaled
+// fine-band energy + edge strength — 0 in bokeh, high on real structure. Drives
+// the broad tier's bokeh adaptation; the locally-normalized maps (which light
+// bokeh up to full 'detail') keep driving fine-stroke placement.
+float subjAbsAt(float x, float y){
+  return min(1.0, texelFetch(u_subjTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0).r);
+}
 // MAX edge strength over centre + 4 diagonal taps at radius d (mirror seed/edge-near):
 // a stroke answers for edges anywhere under its BODY — centre-sampled Ev let daubs
 // seeded just off a silhouette ribbon mixed colour along it (the ghost veil).
@@ -211,7 +219,10 @@ vec2 fieldsAt(float x, float y){
 // mirror of seed/edge-snap: move a fine-stroke position onto the local edge ridge
 // (parabolic peak of edge strength sampled across the tangent). Without it, seeds
 // scattered across a thin line braid parallel wobbly strands beside it.
-vec2 edgeSnap(float x, float y){
+// `gain` damps the corrector (mirror seed): the SEED snap converges at 0.65;
+// liner-chain steps correct gently — a strong per-step lateral corrector fought
+// the direction momentum and scalloped thin traced lines into wobble.
+vec2 edgeSnap(float x, float y, float gain){
   vec2 tc = fieldsAt(x, y);
   float nx = -sin(tc.x), ny = cos(tc.x);
   float h = 1.75;
@@ -221,10 +232,8 @@ vec2 edgeSnap(float x, float y){
   if (max(e0, max(ep, em)) < 0.12) return vec2(x, y);
   float den = (em + ep) - 2.0*e0;
   float d = (abs(den) < 1e-9) ? 0.0 : clamp((em - ep) / (2.0*den), -1.0, 1.0);
-  // damped corrector (mirror seed): partial correction filters texel-quantization
-  // wobble out of the traced line; repeated per-step snaps still converge
-  return vec2(clamp(x + nx*h*d*0.65, 0.0, float(u_H - 1)),
-              clamp(y + ny*h*d*0.65, 0.0, float(u_W - 1)));
+  return vec2(clamp(x + nx*h*d*gain, 0.0, float(u_H - 1)),
+              clamp(y + ny*h*d*gain, 0.0, float(u_W - 1)));
 }
 
 // IMPASTO meeting line (mirror seed/stroke-segments offset): back a bodied liner
@@ -249,9 +258,12 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (
 // (hx,hy) = the chain HEAD's position — the colour-sample point for EVERY segment:
 // one stroke = one brush-load of paint (per-segment sampling alternated the two
 // sides' colours along contours into a bead necklace).
-void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap){
+// `cohmul` rounds MELTED bokeh strokes off (coherence → 0 kills the elongation
+// and pulls the colour toward the smooth blur): an elongated needle on a soft
+// gradient always reads as a directional streak, however faithful its colour.
+void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap, float cohmul){
   vec2  tc    = fieldsAt(px, py);
-  float theta = tc.x, coh0 = tc.y;
+  float theta = tc.x, coh0 = tc.y * cohmul;
   vec3  blur = (hb > 0.5) ? sampleRGB(u_blurHTex, hx, hy) : sampleRGB(u_blurTex, hx, hy);
   vec3  raw  = sampleRGB(u_rawTex,  hx, hy);
   float coh = MIN_COH + (1.0 - MIN_COH) * coh0;
@@ -301,10 +313,13 @@ void main(){
   // aperiodic — any lattice's row frequency reads as parallel stripes.
   float cx = float(u_H) * poshash(i, lvl, 29);
   float cy = float(u_W) * poshash(i, lvl, 31);
-  // wavelet subjectness (mirror of seed/layered-means): drives the bokeh-adaptive
-  // broad tier and gates mid/fine placement — splat size follows detail density.
+  // wavelet subjectness (mirror of seed/layered-means): the LOCAL-relative gate
+  // for mid/fine placement, and the ABSOLUTE gate for the bokeh-adaptive broad
+  // tier (the local-relative one saturates to 1 on smooth bokeh, which made
+  // Broad growth/thinning/melt inert exactly where they exist to act).
   float sgate = subjectAt(cx, cy);
-  float mloc  = 1.0 + (u_broad - 1.0) * (1.0 - sgate);
+  float sabs  = subjAbsAt(cx, cy);
+  float mloc  = 1.0 + (u_broad - 1.0) * (1.0 - sabs);
   // broad tier: flat regions thin candidates by (bmin/m)² as the kept seeds grow
   // ×m — few LARGE daubs = smooth bokeh; at full subjectness m=1 and the Broad
   // dial has no effect on the detailed subjects.
@@ -314,8 +329,12 @@ void main(){
     ssz *= mloc;
   }
   // mid/fine strokes belong where the wavelets see detail: flat bokeh keeps only
-  // the big smooth daubs.
-  float gain = (lvl >= 2) ? (0.25 + 0.75 * sgate) : 1.0;
+  // the big smooth daubs. The ABSOLUTE gate rides the Broad slider (mirror seed):
+  // past 1.0 it thins mid/fine marks out of truly flat regions — isolated dark
+  // flecks on a melted wash — leaving them at Broad <= 1 where strokes are the
+  // wanted effect.
+  float bgate = 1.0 - clamp((u_broad - 1.0) / 1.5, 0.0, 1.0) * (1.0 - min(1.0, sabs / 0.35));
+  float gain = (lvl >= 2) ? (0.25 + 0.75 * sgate) * bgate : 1.0;
   // each level reads the map matched to ITS scale (mirror of seed/layered-means).
   // The cutoff is DITHERED ±25% per seed: a hard threshold on a map that oscillates
   // around it dashes contours into bead necklaces; dithering turns the knife edge
@@ -329,7 +348,7 @@ void main(){
   // is NO claim — the fine glazes overlap the mid strokes and mix. The finer level
   // is always >= 2 here, so its claim carries the same subject gate.
   if (lvl > 0 && lvl <= 2 && k > 0) {
-    float fdv = mapAt(u_sharp[k-1], cx, cy) * (0.25 + 0.75 * sgate);
+    float fdv = mapAt(u_sharp[k-1], cx, cy) * (0.25 + 0.75 * sgate) * bgate;
     if (fdv >= u_th[k-1] * (0.75 + 0.5 * hash01(i*47 + lvl, j, 23))) return;
   }
 
@@ -362,8 +381,13 @@ void main(){
   // seals) so paint always reaches the boundary — no unpainted moat.
   float ssz2 = ssz * szf * (1.0 - ((lvl == 0) ? 0.25 : (lvl <= 3) ? 0.45 : 0.1) * Ev);
   float snoise = 0.0;
+  // MELT (mirror seed/layered-means): how much a flat-region broad stroke should
+  // sink into the wash — grows only past Broad 1.0 and only where subjectness is
+  // low, so Broad at max makes bokeh strokes invisible while detailed regions
+  // keep their brushwork. Mutes the tone jitter and drives the chain re-mix.
+  float melt = (lvl <= 1) ? clamp((u_broad - 1.0) / 1.5, 0.0, 1.0) * (1.0 - sabs) : 0.0;
   float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5)
-               * ((lvl <= 1) ? 0.25 : (lvl >= 4) ? 0.15 : 1.0);
+               * ((lvl <= 1) ? 0.25 * (1.0 - melt) : (lvl >= 4) ? 0.15 : 1.0);
 
   // broad strokes (base + level 1) colour from the HEAVY blur — smoothed at their scale
   float hb = (lvl <= 1) ? 1.0 : 0.0;
@@ -377,7 +401,7 @@ void main(){
   // paint AVERAGED colour, mids halfway, fine layers fully specific
   float tcap = (lvl <= 1) ? 0.35 : (lvl <= 3) ? 0.7 : 1.0;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
-    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap);
+    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt);
     return;
   }
 
@@ -392,7 +416,7 @@ void main(){
   // colour samples the PRE-snap position (one side of the edge); geometry snaps.
   // On-ridge colour is the sides' mix and paints silhouettes as drawn outlines.
   float cpx = x2, cpy = y2;
-  if (snapE) { vec2 sp2 = edgeSnap(x2, y2); x2 = sp2.x; y2 = sp2.y; }
+  if (snapE) { vec2 sp2 = edgeSnap(x2, y2, 0.65); x2 = sp2.x; y2 = sp2.y; }
   // which side of the ridge did this seed come from? (mirror seed/stroke-segments)
   float side = 0.0;
   if (snapE && lvl >= 4) {
@@ -433,6 +457,16 @@ void main(){
     // ...but a strong edge under the brush keeps the line alive: real ink lines
     // push THROUGH junctions, where coherence dips while edge energy stays high
     if (q > 0 && lvl >= 4 && tc.y < 0.35 && edgeAt(px, py) < 0.5) fade *= 0.5;
+    // LINE-HOLD (mirror seed/stroke-segments): a liner stroke exists to trace the
+    // fine structure it was seeded on. When the sharp fine-band map under the
+    // brush falls below the level's own placement threshold, the stroke has
+    // WALKED OFF its line — a chain escaping a silhouette tangentially would drag
+    // its bodied paint into the featureless background (ghost tendrils) — lift.
+    if (q > 0 && lvl >= 4) {
+      float mv = mapAt(2, px, py) * (0.25 + 0.75 * sgate);
+      if (mv < 0.35 * th) fade = 0.0;
+      else if (mv < 0.7 * th) fade *= 0.5;
+    }
     if (fade < 0.15) break;                        // brush lifted — emit nothing
     float tt = float(q) / float(segs - 1);
     // IMPASTO body (mirror seed/stroke-segments): fine liner strokes on a strong
@@ -442,15 +476,21 @@ void main(){
                * (0.4 + 0.6 * sgate);
     float lal2 = lal + (0.9 - lal) * body;
     // BOTH-ENDS taper (mirror seed/stroke-segments): quick lift-on at the head on top
-    // of the existing tail dry-out, so the mark tapers at BOTH ends like a real stroke.
-    float hw = 0.55 + 0.45 * smoothstep(0.0, 0.18, tt);
-    float ha = 0.5  + 0.5  * smoothstep(0.0, 0.15, tt);
+    // of the existing tail dry-out, so the mark tapers at BOTH ends like a real
+    // stroke. The LINER tier keeps only a hint (overlapping chains hand off — strong
+    // per-chain taper lumps the handoffs into a string of tadpoles).
+    float hw = (lvl >= 4) ? 0.8  + 0.2  * smoothstep(0.0, 0.18, tt)
+                          : 0.55 + 0.45 * smoothstep(0.0, 0.18, tt);
+    float ha = (lvl >= 4) ? 0.75 + 0.25 * smoothstep(0.0, 0.15, tt)
+                          : 0.5  + 0.5  * smoothstep(0.0, 0.15, tt);
     float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt)) * hw;  // width tapers at both ends
     float al = lal2 * fade * (1.0 - 0.65 * tt * tt) * ha; // alpha: lift-on × glaze × dry-out
     // the brush-load RE-MIXES with the canvas (mirror seed): the colour-sample
-    // point slides up to 35% toward the current position along the stroke
-    float wsl = (lvl >= 4) ? 0.35 * tt : 0.0;
-    emitSplat(px, py, cpx + wsl*(px - cpx), cpy + wsl*(py - cpy), sz, D, snoise, tnoise, al, hb, traw, tcap);
+    // point slides up to 35% toward the current position along the stroke.
+    // MELTED broad chains re-mix much harder — one brush-load carried across a
+    // smooth gradient reads as a feathery streak on the wash.
+    float wsl = (lvl >= 4) ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0);
+    emitSplat(px, py, cpx + wsl*(px - cpx), cpy + wsl*(py - cpy), sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt);
     // bend gated by coherence: straight strongly-oriented edges trace straight
     float bend = u_curv * 0.9 * bendf * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);
     float cb = cos(bend), sb = sin(bend);
@@ -458,10 +498,10 @@ void main(){
     float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);
     float dx1 = sgn*dx0, dy1 = sgn*dy0;
     float dx = cb*dx1 - sb*dy1, dy = sb*dx1 + cb*dy1;
-    // DIRECTION MOMENTUM (mirror seed): liner strokes blend half the previous
+    // DIRECTION MOMENTUM (mirror seed): liner strokes carry 65% of the previous
     // step's direction — a field-noise-driven turn every step waves the line
     if (lvl >= 4 && q > 0) {
-      float mx = 0.5*dx + 0.5*dxp, my = 0.5*dy + 0.5*dyp;
+      float mx = 0.35*dx + 0.65*dxp, my = 0.35*dy + 0.65*dyp;
       float ml = sqrt(mx*mx + my*my);
       if (ml > 1e-6) { dx = mx/ml; dy = my/ml; }
     }
@@ -469,7 +509,7 @@ void main(){
     float L = ssz2 * stepf * (0.4 + 0.24 * u_stroke);
     px = clamp(px + L*dx, 0.0, float(u_H - 1));
     py = clamp(py + L*dy, 0.0, float(u_W - 1));
-    if (snapE) { vec2 sp3 = edgeSnap(px, py); px = sp3.x; py = sp3.y; }
+    if (snapE) { vec2 sp3 = edgeSnap(px, py, (lvl >= 4) ? 0.35 : 0.65); px = sp3.x; py = sp3.y; }
     // side offset along the stroke's OWN motion perpendicular (mirror seed) —
     // the path is a stable frame; a per-step theta resample wobbled the line
     if (side != 0.0) {
@@ -484,7 +524,7 @@ void main(){
   ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv" "u_broad"
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
    "u_segs" "u_stepf" "u_bendf" "u_sharp"
-   "u_detailTex" "u_dmax" "u_detailDim" "u_detailSrc"
+   "u_detailTex" "u_subjTex" "u_dmax" "u_detailDim" "u_detailSrc"
    "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurHTex" "u_rawTex" "u_permTex"])
 
 (defn sources
@@ -546,19 +586,22 @@ void main(){
         ^doubles ds (or (:sharp dmap) dd)
         ^doubles de (or (:edge dmap) (double-array (alength dd)))
         ^doubles dm2 (or (:mid dmap) dd)
+        ^doubles dsu (or (:subject dmap) dd)
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
         ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
-        detail-t (new-tex) noise-t (new-tex) blur-t (new-tex) blurh-t (new-tex) raw-t (new-tex)]
+        detail-t (new-tex) subj-t (new-tex) noise-t (new-tex) blur-t (new-tex) blurh-t (new-tex) raw-t (new-tex)]
     ;; .r = aggregate map, .g = sharp fine-band, .b = raw edge strength, .a = MID band
     (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) (aget ds i) (aget de i) (aget dm2 i)])))
+    ;; ABSOLUTE subjectness (.r) — the broad tier's bokeh gate (same grid as detail)
+    (upload-rgba! subj-t   Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dsu i) 0.0 0.0 1.0])))
     ;; orientation as double-angle components (cos2θ, sin2θ) + coherence — the GS
     ;; bilinearly blends the components (fieldsAt), never the raw angle.
     (upload-rgba! noise-t  Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget c2 i) (aget s2 i) (aget co i) 0.0])))
     (upload-rgba! blur-t   W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blur b) (aget blur (+ b 1)) (aget blur (+ b 2)) 1.0]))))
     (upload-rgba! blurh-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurh b) (aget blurh (+ b 1)) (aget blurh (+ b 2)) 1.0]))))
     (upload-rgba! raw-t    W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget raw b) (aget raw (+ b 1)) (aget raw (+ b 2)) 1.0]))))
-    {:detail detail-t :noise noise-t :blur blur-t :blur-heavy blurh-t :raw raw-t :perm perm-tex
+    {:detail detail-t :subject subj-t :noise noise-t :blur blur-t :blur-heavy blurh-t :raw raw-t :perm perm-tex
      :dmap dmap                              ; the CPU detail map, for layer-params' budget
      :dmax (double (:dmax dmap))
      :detail-dim [(double Hd) (double Wd)] :detail-src [(double H) (double W)]
@@ -672,6 +715,7 @@ void main(){
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 4)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:raw fields))    (gl/gl-uniform-1i (:u_rawTex locs) 4)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 5)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:perm fields))   (gl/gl-uniform-1i (:u_permTex locs) 5)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 6)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:blur-heavy fields)) (gl/gl-uniform-1i (:u_blurHTex locs) 6)
+    (gl/gl-active-texture (+ gl/GL-TEXTURE0 7)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:subject fields))    (gl/gl-uniform-1i (:u_subjTex locs) 7)
     (gl/gl-uniform-1f (:u_dmax locs) (double (:dmax fields)))
     (gl/gl-uniform-2f (:u_detailDim locs) (double (nth (:detail-dim fields) 0)) (double (nth (:detail-dim fields) 1)))
     (gl/gl-uniform-2f (:u_detailSrc locs) (double (nth (:detail-src fields) 0)) (double (nth (:detail-src fields) 1)))

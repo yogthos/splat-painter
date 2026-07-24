@@ -187,8 +187,36 @@
          ;; survives and fine strokes hug the edge cores
          Ps (fuse acc-fine 1 1 true)
          ;; mid: bands 2-3, light smoothing, plain E — the map the mid levels place by
-         Pm (fuse acc-mid (max 1 (quot (min sh sw) 60)) 1 false)]
-     {:h sh :w sw :detail P :sharp Ps :mid Pm :edge E-arr :dmax 1.0 :src-h H :src-w W})))
+         Pm (fuse acc-mid (max 1 (quot (min sh sw) 60)) 1 false)
+         ;; ABSOLUTE subjectness: is there real structure here at all? The fused
+         ;; placement maps normalize LOCALLY so dark low-contrast texture still
+         ;; receives strokes — but that same normalization lights smooth bokeh up
+         ;; to full 'detail', which left the broad tier's bokeh-adaptive machinery
+         ;; (Broad growth / thinning / melt) inert on soft backgrounds. This map
+         ;; answers from RAW globally-scaled signals only: the fine-band Haar
+         ;; energy and the tensor edge strength. Bokeh ≈ sensor noise scores ~0;
+         ;; any actual texture or contour scores high.
+         subj (let [^doubles af acc-fine
+                    out (double-array n)]
+                (dotimes [i n]
+                  (aset out i (min 1.0 (max (/ (aget af i) 0.35)
+                                            (/ (aget E-arr i) 0.30)))))
+                (structure/box-blur out sh sw (max 2 (quot (min sh sw) 24))))]
+     {:h sh :w sw :detail P :sharp Ps :mid Pm :edge E-arr :subject subj
+      :dmax 1.0 :src-h H :src-w W})))
+
+(defn subject-abs-at
+  "ABSOLUTE subjectness ∈ [0,1] at full-image coords — 0 in bokeh/flat regions,
+   high wherever real fine structure or edges live (see placement-map :subject).
+   Drives the broad tier's bokeh adaptation; the locally-normalized maps keep
+   driving fine-stroke placement. Falls back to :detail for maps without it."
+  [dmap x y]
+  (let [H (:h dmap) W (:w dmap)
+        src-h (long (or (:src-h dmap) H)) src-w (long (or (:src-w dmap) W))
+        ^doubles d (or (:subject dmap) (:detail dmap))
+        xi (min (dec H) (max 0 (long (Math/round (* (double x) (/ (double H) src-h))))))
+        yi (min (dec W) (max 0 (long (Math/round (* (double y) (/ (double W) src-w))))))]
+    (min 1.0 (aget d (+ (* xi W) yi)))))
 
 (defn detail-at
   "Normalized detail ∈ [0,1] at full-image coords (x=row, y=col), sampled from the
