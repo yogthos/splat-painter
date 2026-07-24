@@ -102,6 +102,8 @@
     (assert-contains gs-src "if (hash01(i*61 + lvl, j, 43) >= bminp*bminp) return;" "bokeh-adaptive broad thinning")
     (assert-contains gs-src "else if (dmx > (liner ? 0.2 : 0.22)) fade *= (liner ? 0.35 : 0.4);" "stroke fades at colour drift (liners dry faster)")
     (assert-contains gs-src "if (dmx > ((lvl <= 1) ? 0.18 : (liner ? 0.32 : 0.45))) fade = 0.0;" "brush lifts at colour-region exit (liners lift hard at 0.32)")
+    (assert-contains gs-src "vec3 cpb = sampleRGB(u_blurTex, px, py);" "liner path-colour roughness: sample sharp bilateral at the paint point")
+    (assert-contains gs-src "if (racc > 0.35) fade = 0.0;" "liner path-colour roughness: hard lift on accumulated colour churn")
     (assert-contains gs-src "if (liner && q > 0 && abs(dx0*dxp + dy0*dyp) < 0.82) fade *= 0.3;" "turn-kill: liners dry at corners/junctions")
     (assert-contains gs-src "if (fade < 0.15) break;" "no emission after the brush lifts")
     (assert-contains gs-src "float al = lal2 * fade * (1.0 - 0.65 * tt * tt) * ha;" "both-ends taper × glaze × dry-out alpha")

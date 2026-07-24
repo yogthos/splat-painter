@@ -530,6 +530,7 @@ void main(){
   float ascale = 1.0;
   for (int phase = 0; phase < 2; phase++) {
   px = x2; py = y2; dxp = 0.0; dyp = 0.0; fade = 1.0;
+  vec3 prevB = sampleRGB(u_blurTex, px, py); float racc = 0.0;
   int emitted = 0;
   for (int q = 0; q < SEGS; q++) {
     if (q >= segs || fade < 0.15) break;
@@ -549,6 +550,21 @@ void main(){
       // painted several bodied dark segments (scribbles at curved contours)
       if (dmx > ((lvl <= 1) ? 0.18 : (liner ? 0.32 : 0.45))) fade = 0.0;
       else if (dmx > (liner ? 0.2 : 0.22)) fade *= (liner ? 0.35 : 0.4);
+      // PATH-COLOUR ROUGHNESS (mirror seed/stroke-segments): the box drift field
+      // dilutes a 1-3px feature's contrast below the drift thresholds at liner
+      // scale - chains snapped onto a fine feature carried its ink across the
+      // neighbouring micro-regions (detail-area noise). Accumulate the SHARP
+      // bilateral's per-step change along the painted path: feature-crossing
+      // chains churn (~0.7/span) and dry out; clean-contour chains stay stable
+      // (~0.04/span) and keep their full span - the thatch fix is preserved.
+      if (liner) {
+        vec3 cpb = sampleRGB(u_blurTex, px, py);
+        vec3 dpb = abs(cpb - prevB);
+        racc += max(dpb.r, max(dpb.g, dpb.b));
+        prevB = cpb;
+        if (racc > 0.35) fade = 0.0;
+        else if (racc > 0.2) fade *= 0.5;
+      }
     }
     vec2 tc = fieldsAt(px, py);
     // follow the line only while there IS a line (mirror seed/stroke-segments):
