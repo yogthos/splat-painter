@@ -333,8 +333,45 @@ void main(){
   float bright = 1.0 + sAmt * streak + gAmt * gn;
   float sat = 1.0 + gAmt * 0.6 * gs;
   vec3  base = mix(vec3(lum), v_color, sat);   // same hue, varied richness
-  vec3  col = clamp(base * bright, 0.0, 1.0);
-  frag = vec4(col * a, a);        // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
+   vec3  col = clamp(base * bright, 0.0, 1.0);
+   frag = vec4(col * a, a);        // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
+}")
+
+;; --- base-layer blit (layered repainting) -------------------------------------
+;; Attribute-less, like vs-src-quad: 6 GL_TRIANGLES from gl_VertexID cover the
+;; letterboxed image rect, and the FS just samples the previous render captured by
+;; glReadPixels. Drawn with blending DISABLED so it lands as an OPAQUE underpaint —
+;; the next pass's strokes then composite over it (a glaze). The layer texture is
+;; uploaded verbatim from a bottom-up readback, so texcoord V rises with image-up
+;; (v=0 = image bottom = framebuffer row 0) and the blit overlays the capture
+;; exactly upright (see gpu-draw!: v_uv = (pane - org) / (u_image * scale)).
+(def ^:private vs-src-blit
+  "#version 330 core
+uniform vec2 u_viewport;        // framebuffer pixels (vw, vh)
+uniform vec2 u_image;           // image pixels (iw, ih)
+out vec2 v_uv;                  // 0..1 texcoord into u_layer (v up = image up)
+void main(){
+  // two triangles (0,1,2)(2,1,3) over corner ids 0..3, same winding as vs-src-quad
+  int corner = gl_VertexID;
+  int cid = corner == 0 ? 0 : (corner == 1 || corner == 4) ? 1
+          : (corner == 2 || corner == 3) ? 2 : 3;
+  vec2 s = vec2((cid & 1) == 0 ? -1.0 : 1.0, (cid & 2) == 0 ? -1.0 : 1.0);
+  // letterbox rect (contain fit, centred) — same mapping as the splat quad VS
+  float scale = min(u_viewport.x / u_image.x, u_viewport.y / u_image.y);
+  vec2 org = 0.5 * (u_viewport - u_image * scale);
+  vec2 pane = org + 0.5 * u_image * scale * (vec2(1.0) + s);
+  v_uv = (pane - org) / (u_image * scale);
+  gl_Position = vec4(pane / u_viewport * 2.0 - 1.0, 0.0, 1.0);
+}")
+
+(def ^:private fs-src-blit
+  "#version 330 core
+uniform sampler2D u_layer;      // the previous render, captured bottom-up via glReadPixels
+in vec2 v_uv;
+out vec4 frag;
+void main(){
+  vec4 c = texture(u_layer, v_uv);
+  frag = vec4(c.rgb, 1.0);      // opaque base — the new strokes composite over it
 }")
 
 (defn build-program-quad
@@ -357,6 +394,19 @@ void main(){
             :u_tex_streak (gl/gl-get-uniform-location prog "u_tex_streak")
             :u_tex_grain  (gl/gl-get-uniform-location prog "u_tex_grain")
             :u_tex_edge   (gl/gl-get-uniform-location prog "u_tex_edge")}}))
+
+(defn build-program-blit
+  "Compile + link the attribute-less base-layer blit (needs a current GL context).
+  Draws 6 GL_TRIANGLES covering the letterboxed image rect and samples u_layer with
+  alpha forced to 1.0 — an opaque underpaint the splat pass composites over. Draw
+  with blending DISABLED, reusing any VAO that has no enabled attribs (gen-vao).
+  Returns {:program :locs} or nil."
+  []
+  (when-let [prog (gl/make-program vs-src-blit fs-src-blit)]
+    {:program prog
+     :locs {:u_viewport (gl/gl-get-uniform-location prog "u_viewport")
+            :u_image    (gl/gl-get-uniform-location prog "u_image")
+            :u_layer    (gl/gl-get-uniform-location prog "u_layer")}}))
 
 (defn- render-uniform-locs [prog]
   {:u_splats   (gl/gl-get-uniform-location prog "u_splats")
@@ -381,11 +431,12 @@ void main(){
                      :a_pos (gl/gl-get-attrib-location prog "a_pos"))}))
 
 (defn sources
-  "Return {:vs-src :fs-src :fs-src-buf :vs-src-quad :fs-src-quad} — pure, no GL context
-  (for headless inspection/tests)."
+  "Return {:vs-src :fs-src :fs-src-buf :vs-src-quad :fs-src-quad
+  :vs-src-blit :fs-src-blit} — pure, no GL context (for headless inspection/tests)."
   []
   {:vs-src vs-src :fs-src fs-src :fs-src-buf fs-src-buf
-   :vs-src-quad vs-src-quad :fs-src-quad fs-src-quad})
+   :vs-src-quad vs-src-quad :fs-src-quad fs-src-quad
+   :vs-src-blit vs-src-blit :fs-src-blit fs-src-blit})
 
 (defn pack-splats
   "Flatten a seq of splats into the RGBA32F texture payload (length 3*N*4): splat i
