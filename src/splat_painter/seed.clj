@@ -552,7 +552,8 @@
           ;; on the razor-sharp bilateral paint field any probe wobble across a
           ;; boundary trips the lift instantly and dashes contour chains into beads
           [hr hg hb0] (sample-arr blurd-px iw ih (+ cx0 bax) (+ cy0 bay))]
-      (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
+      (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0
+             pb (sample-arr blur-px iw ih x y) racc 0.0 acc []]
         (if (or (> k kmax) (< fade 0.15))
           acc
           (let [;; TWO-TIER dry-out. Gradual drift DRIES the brush (×0.4) — abrupt
@@ -581,7 +582,27 @@
                                (> dmx (if liner? 0.2 0.22)) (* fade (if liner? 0.35 0.4))
                                :else fade))
                        fade)
-                [th coh] (sample-fields nf px py)
+                 ;; PATH-COLOUR ROUGHNESS (liner): the drift check reads the forgiving box field,
+                 ;; which dilutes a 1-3px feature's contrast below its thresholds at liner scale —
+                 ;; chains snapped onto a fine feature carried its ink across neighbouring
+                 ;; micro-regions (the detail-area noise). Accumulate the SHARP bilateral's
+                 ;; per-step change along the painted path: a chain crossing features churns
+                 ;; (portrait feature bands ~0.7/span) and dries out; a chain riding one side of
+                 ;; a clean contour stays stable (line-art contours ~0.04/span) and keeps its
+                 ;; full span — the thatch fix is preserved exactly where it was won.
+                 rcb  (if (and (pos? k) liner?) (sample-arr blur-px iw ih px py) pb)
+                 racc1 (if (and (pos? k) liner?)
+                         (let [d (max (Math/abs (- (double (rcb 0)) (double (pb 0))))
+                                      (Math/abs (- (double (rcb 1)) (double (pb 1))))
+                                      (Math/abs (- (double (rcb 2)) (double (pb 2)))))]
+                           (+ (double racc) (double d)))
+                         racc)
+                 fade (if (and (pos? k) liner?)
+                        (cond (> racc1 0.35) 0.0
+                              (> racc1 0.2)  (* (double fade) 0.5)
+                              :else fade)
+                        fade)
+                 [th coh] (sample-fields nf px py)
                 ;; follow the line only while there IS a line: when local coherence
                 ;; collapses (busy texture, letter junctions) the liner stroke runs
                 ;; dry fast — long chains wandering through dense detail smear it.
@@ -713,7 +734,7 @@
                               [nx1 ny1]
                               [(max 0.0 (min hd (+ nx1 (* sidem 0.55 ssz (- dy)))))
                                (max 0.0 (min wd (+ ny1 (* sidem 0.55 ssz dx))))])]
-              (recur (inc k) nx2 ny2 dx dy fade acc))))))))))
+              (recur (inc k) nx2 ny2 dx dy fade rcb racc1 acc))))))))))
 
 (defn- stub-glaze
   "MEASURE-THEN-EMIT: judge a traced chain by its final length. An accent chain

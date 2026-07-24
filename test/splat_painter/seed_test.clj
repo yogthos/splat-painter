@@ -209,11 +209,19 @@
     ;; were spaced for the full 32-segment span (the detached ring around the
     ;; avatar's eyes). Denser seeds = continuous bands; the extra fine-tier demand
     ;; flows into scale-f, so more (finer-budgeted) chains survive here.
-    (is (= 1041 (count splats)))
-    (is (approx= 0.5  20473.371  sx) "Σ mean-x")
-    (is (approx= 0.5  30272.265  sy) "Σ mean-y")
-    (is (approx= 1.0  219953.020 sd) "Σ det(cov)")
-    (is (approx= 0.05 1463.199   sc) "Σ colour")))
+    ;; (1041→846) liner path-colour roughness dry-out: a chain whose PAINTED PATH
+    ;; churns the sharp bilateral (crossing fine features, ~0.7/span) now dries out
+    ;; (racc>0.2 soft ×0.5/step, >0.35 hard lift). The box drift field diluted a
+    ;; 1-3px feature's contrast below the drift thresholds, so snapped chains
+    ;; carried a feature's ink across neighbouring micro-regions (detail-area
+    ;; noise); chains riding a clean contour (~0.04/span) stay stable and keep
+    ;; their full span. Fewer surviving liner segments drop Σmean/Σcolour; Σdet is
+    ;; near-unchanged (the survivors' geometry is the same, just truncated tails).
+    (is (= 846 (count splats)))
+    (is (approx= 0.5  16742.792  sx) "Σ mean-x")
+    (is (approx= 0.5  25243.934  sy) "Σ mean-y")
+    (is (approx= 1.0  219942.931 sd) "Σ det(cov)")
+    (is (approx= 0.05 980.882   sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -367,6 +375,10 @@
   (let [[r g b] c]
     (+ (* 0.2126 r) (* 0.7152 g) (* 0.0722 b))))
 
+(defn- median [xs]
+  (let [s (sort xs) n (count s)]
+    (when (pos? n) (nth s (quot n 2)))))
+
 (deftest no-cross-boundary-colour-bleed
   ;; A synthetic two-tone image (H=W=128, vertical boundary at cols 63-64) must not
   ;; produce paint of the wrong shade placed deep inside the opposite half: no light
@@ -399,3 +411,98 @@
     (is (zero? @dark-in-light)
         (str "dark paint bleeding into the light half: " @dark-in-light
              " splat(s) centred >=0.5σ inside cols y>=65 (of " (count splats) " total)"))))
+
+;; --- liner path-colour roughness dry-out ---------------------------------------
+
+(deftest liner-chains-die-on-texture-live-on-contours
+  ;; PATH-COLOUR ROUGHNESS gate for liner chains (mirror seed/stroke-segments +
+  ;; the GS). The FORGIVING box-blurred drift field dilutes a 1-3px feature's
+  ;; contrast below its thresholds at liner scale, so chains snapped onto a fine
+  ;; feature carried its ink across neighbouring micro-regions (the detail-area
+  ;; noise). The gate accumulates the SHARP bilateral's per-step maxchan Δ along
+  ;; the PAINTED path: a chain crossing features churns and dries out; a chain
+  ;; riding a clean contour stays colour-stable and keeps its full span — the
+  ;; thatch fix is preserved exactly where it was won.
+  ;;
+  ;; Synthetic 160x160: LEFT half (cols 0-79) a uniform 0.72 ground with ONE dark
+  ;; 0.28 vertical line, 2px wide, at col 40 (a clean long contour); RIGHT half
+  ;; (cols 80-159) a high-frequency 3px-cell checker alternating 0.35/0.65 (the
+  ;; bilateral field churns along any crossing path). Built the same way as
+  ;; no-cross-boundary-colour-bleed (structure/analyze, placement map, prep-noise,
+  ;; the light + drift blur fields).
+  ;;
+  ;; Calls stroke-segments DIRECTLY (var-quote) for controlled seeds, wired with
+  ;; the liner level's own ssz/segs/stepf and the same per-candidate wiring
+  ;; layered-means uses (subject gate, gain, tone/dir hashes — no invented values).
+  ;; Before the gate the box field cannot see the 3px checker, so texture chains
+  ;; run their full 32-seg span (median >> 8); after the gate they dry out fast.
+  (let [H 160 W 160
+        detail 0.3 size 6.0 stroke 2.2 variation 0.5 curvature 0.5
+        tier-muls [0.4 0.4 0.4] cnt 600000
+        img (attach-precomputed-fields
+             {:height H :width W :channels 3
+              :pixels (double-array
+                       (mapcat (fn [x]
+                                 (mapcat (fn [y]
+                                           (let [g (cond
+                                                     ;; CONTOUR half: light ground, one 2px dark line at col 40
+                                                     (< y 80)  (if (<= 39 y 40) 0.28 0.72)
+                                                     ;; TEXTURE half: 3px-cell checker
+                                                     :else     (if (odd? (+ (quot x 3) (quot y 3))) 0.35 0.65))]
+                                             [g g g]))
+                                         (range W)))
+                               (range H)))})
+        dmap    (:detail img)
+        blur-px (:blur img)
+        blurd-px (:blur-drift img)
+        nf      (:noise-fields img)
+        hd (double (dec H)) wd (double (dec W)) iw W ih H
+        rr (/ (double H) 24.0)
+        lp      (seed/layer-params dmap detail size variation curvature stroke tier-muls cnt H W)
+        ;; the liner level: lvl≥2, nominal size < 3.5px, segs clamped at the GS cap
+        liner   (first (filter #(and (>= (:lvl %) 2)
+                                     (< (:ssz %) 3.5)
+                                     (= (:segs %) 32))
+                               (:levels lp)))
+        {:keys [lvl ssz segs stepf bendf th map-kind traw]} liner
+        bmul    (double (nth tier-muls 0))                ; 0.4 → bgate is identically 1 below Broad 1
+        deff    (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
+        ;; var-quote the private wiring helpers layered-means uses (no invented values)
+        hash01  #'splat-painter.seed/hash01
+        subject-at #'splat-painter.seed/subject-at
+        map-at  #'splat-painter.seed/map-at
+        stroke-segments #'splat-painter.seed/stroke-segments
+        ;; one liner chain's emitted-segment count for a chosen seed (cx,cy).
+        ;; seeds are placed at chosen positions (warp is inert here: aw<0.2 at this
+        ;; liner tier), mirroring layered-means' per-candidate wiring for the rest.
+        chain-len (fn [i cx cy]
+                    (let [dv     (map-at dmap map-kind cx cy)
+                          D      (deff dv)
+                          sgate  (subject-at dmap cx cy rr)
+                          bgate  (- 1.0 (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
+                                          (- 1.0 (min 1.0 (/ (wavelet/subject-abs-at dmap cx cy) 0.35)))))
+                          gain   (* (+ 0.25 (* 0.75 sgate)) bgate)
+                          cssz   ssz                                     ; liner level's own stdev
+                          tn     (* (double (let [l (long lvl)]
+                                              (cond (<= l 1) 0.25 (>= l 4) 0.15
+                                                    :else (+ 0.15 (* 0.85 (min 1.0 (max 0.0 (/ (- cssz 2.5) 2.5))))))))
+                                    (- (hash01 (+ (* i 37) lvl) 0 13) 0.5))
+                          ds     (if (< (hash01 (+ (* i 41) lvl) 0 17) 0.5) 1.0 -1.0)
+                          bph    (hash01 (+ (* i 67) lvl) 0 53)
+                          hb     (if (<= lvl 1) 1.0 0.0)
+                          traw*  (if (>= lvl 4) (* traw (+ 0.6 (* 0.4 sgate))) traw)]
+                      (count (stroke-segments nf dmap lvl cx cy cssz D 0.0 tn ds curvature stroke
+                                              hd wd segs stepf bendf hb traw* sgate blur-px iw ih
+                                              th 0.0 map-kind gain blurd-px bph))))]
+    (is liner "settings must yield a liner level (lvl≥2, ssz<3.5, segs=32)")
+    (is (= 32 segs))
+    (is (< ssz 3.5))
+    (let [contour (keep-indexed (fn [i x] (chain-len i x 40.0)) (range 12 152 7))   ; ~20 seeds ON the line (col 40)
+          texture (for [[i [x y]] (map-indexed vector
+                                               (for [x (range 15 145 20) y (range 94 150 12)] [x y]))]  ; ~35 seeds in the checker
+                    (chain-len (+ i 1000) x y))                                     ; offset i so texture hashes ≠ contour
+          cmed (median contour) tmed (median texture)]
+      (is (>= cmed 16)   (str "contour chains should run long; median=" cmed " of " (count contour)))
+      (is (<= tmed 8)    (str "texture chains should dry out; median=" tmed " of " (count texture)))
+      (is (>= cmed (* 2.0 tmed))
+          (str "contour median (" cmed ") must be ≥ 2× texture median (" tmed ")")))))
