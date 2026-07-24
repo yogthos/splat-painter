@@ -789,7 +789,7 @@
 ;; sets :hexpand. In GTK a GtkBox reports itself as "wanting to expand" to its
 ;; parent whenever any child expands (gtk_widget_compute_expand propagates up the
 ;; tree). So a :scale with :hexpand true made the control-panel :vbox compete
-;; with the :gl-area for the root :hbox's free width — splitting the window and
+;; with the :gl-area for the content row's free width — splitting the window and
 ;; letting the sidebar balloon past its :width-request (which is only a minimum).
 ;; Instead each :scale gets an explicit :width-request, which sizes the track
 ;; without expanding. The control-panel then stays at its natural width (~180px)
@@ -804,17 +804,21 @@
             :width-request 120
             :on-value #(do (reset! value-atom %) (request-render!))}]])
 
+(defn- toolbar []
+  ;; the action buttons + status live in a bar ACROSS THE TOP: stacking them in
+  ;; the sidebar forced its width to the four-button row (~2× the slider column),
+  ;; stealing canvas from the render. The status label ellipsizes instead of
+  ;; expanding, so the :gl-area stays the tree's only :hexpand widget (see the
+  ;; layout rule above) and long paths can't stretch the window.
+  [:hbox {:spacing 6 :margin 6}
+   [:button {:label "Open Image…"  :on-click open-image-dialog!}]
+   [:button {:label "Save PNG…"    :on-click save-image-dialog!}]
+   [:button {:label "Add Layer"    :on-click add-layer!}]
+   [:button {:label "Reset Layers" :on-click reset-layers!}]
+   [:label {:label @status-atom :xalign 0.0 :halign :start :ellipsize :end}]])
+
 (defn- control-panel []
-  [:vbox {:spacing 6 :margin 8 :width-request 180}
-   [:hbox {:spacing 6}
-    [:button {:label "Open Image…"  :on-click open-image-dialog!}]
-    [:button {:label "Save PNG…"    :on-click save-image-dialog!}]
-    [:button {:label "Add Layer"    :on-click add-layer!}]
-    [:button {:label "Reset Layers" :on-click reset-layers!}]]
-   ;; cap the path so the label can't widen the sidebar; ellipsize the tail
-   [:label {:label @status-atom :xalign 0.0 :halign :start
-            :max-width-chars 22 :ellipsize :end}]
-   [:separator {}]
+  [:vbox {:spacing 6 :margin 8 :width-request 160}
    [slider "Splats"    1000 600000 1000 count-atom]     ; budget: higher = more detail, slower
    [slider "Size"      6    50    0.5   size-atom]
    [slider "Broad"     0.4  2.5   0.05  broad-atom]    ; bokeh: low-detail looseness, subjects untouched
@@ -834,13 +838,16 @@
    [slider "Layer Op"  0.05 1.0   0.05  layer-opacity-atom]]) ; glaze: how much the pass below shows through
 
 (defn app []
-  [:hbox {:spacing 0}
-   [control-panel]
-   [:separator {:orientation :vertical}]
-   [:gl-area {:version [3 2] :depth-buffer false :hexpand true :vexpand true
-              :on-realize on-realize
-              :on-render  on-render
-              :on-resize  on-resize}]])
+  [:vbox {:spacing 0}
+   [toolbar]
+   [:separator {}]
+   [:hbox {:spacing 0}
+    [control-panel]
+    [:separator {:orientation :vertical}]
+    [:gl-area {:version [3 2] :depth-buffer false :hexpand true :vexpand true
+               :on-realize on-realize
+               :on-render  on-render
+               :on-resize  on-resize}]]])
 
 (defn -main [& args]
   ;; GLib must see the GSettings schemas BEFORE GTK initializes, or the file
