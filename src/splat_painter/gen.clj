@@ -265,8 +265,17 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (
 void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap, float cohmul){
   vec2  tc    = fieldsAt(px, py);
   float theta = tc.x, coh0 = tc.y * cohmul;
-  vec3  blur = (hb > 0.5) ? sampleRGB(u_blurHTex, hx, hy) : sampleRGB(u_blurTex, hx, hy);
-  vec3  raw  = sampleRGB(u_rawTex,  hx, hy);
+  vec3  bilat = sampleRGB(u_blurTex, hx, hy);
+  vec3  blur  = (hb > 0.5) ? sampleRGB(u_blurHTex, hx, hy) : bilat;
+  vec3  raw   = sampleRGB(u_rawTex,  hx, hy);
+  // REGION-CONSISTENCY clamp (mirror seed/splat-field): the bilateral DEFINES the
+  // region; raw specificity is only trusted when consistent with it. In-region
+  // micro-contrast keeps full raw pop; an edge-straddling raw sample is pulled to
+  // the region colour so it cannot bleed across a boundary at high raw weight.
+  vec3  dr    = abs(raw - bilat);
+  float dcl   = max(dr.r, max(dr.g, dr.b));
+  float wcl   = clamp((dcl - 0.12) / 0.15, 0.0, 1.0);
+  raw = mix(raw, bilat, wcl);
   float coh = MIN_COH + (1.0 - MIN_COH) * coh0;
   float e   = 1.0 + min(u_stroke, 1.5) * coh * (0.25 + 0.75 * D);
   float se  = sqrt(e);
@@ -440,6 +449,7 @@ void main(){
   // stepped along the orientation field (the edge tangent), sign-continuous, bent by
   // smooth Perlin noise scaled by Curvature, size+alpha tapering toward the tail.
   float dirsign = hash01(i*41 + lvl, j, 17) < 0.5 ? 1.0 : -1.0;
+  float bph = hash01(i*67 + lvl, j, 53);         // per-seed bend phase: decorrelates neighbours
   int   segs  = u_segs[k];                       // scale-relative stroke behaviour:
   float stepf = u_stepf[k];                      // broad levels stroke long and curl,
   float bendf = u_bendf[k];                      // fine levels make short precise marks
@@ -454,7 +464,9 @@ void main(){
   if (snapE) { vec2 sp2 = edgeSnap(x2, y2, 0.65); x2 = sp2.x; y2 = sp2.y; }
   // which side of the ridge did this seed come from? (mirror seed/stroke-segments)
   float side = 0.0;
-  if (snapE && lvl >= 4) {
+  // IMPASTO side keys on the LINER discipline (sigma-keyed), not the level index:
+  // small lvl 2-3 chains snap onto the ridge like lvl>=4 liners and keep their side
+  if (snapE && liner) {
     vec2 tcs = fieldsAt(x2, y2);
     float nsx = -sin(tcs.x), nsy = cos(tcs.x);
     float dd = (cpx - x2)*nsx + (cpy - y2)*nsy;
@@ -480,19 +492,29 @@ void main(){
   {
     vec2 tc0 = fieldsAt(cpx, cpy);
     float nx0 = -sin(tc0.x), ny0 = cos(tc0.x);
-    float hbs = max(1.75, 0.8 * ssz2);
-    vec3 c0  = sampleRGB(u_blurTex, cpx, cpy);
-    vec3 cpl = sampleRGB(u_blurTex, cpx + nx0*hbs, cpy + ny0*hbs);
-    vec3 cmn = sampleRGB(u_blurTex, cpx - nx0*hbs, cpy - ny0*hbs);
-    vec3 dsv = abs(cpl - cmn);
-    if (max(dsv.r, max(dsv.g, dsv.b)) >= 0.15) {
-      vec3 dp3 = abs(cpl - c0);
-      vec3 dm3 = abs(cmn - c0);
-      float dp = max(dp3.r, max(dp3.g, dp3.b));
-      float dm = max(dm3.r, max(dm3.g, dm3.b));
-      float sidec = (dp < dm) ? 1.0 : -1.0;
-      bax = sidec * 0.7 * ssz2 * nx0;
-      bay = sidec * 0.7 * ssz2 * ny0;
+    float hh  = max(1.75, 0.8 * ssz2);
+    // floored: a fine liner 0.7*sigma is sub-pixel and lands inside the AA ramp
+    // it exists to escape
+    float disp = max(1.5, 0.7 * ssz2);
+    vec3 cp  = sampleRGB(u_blurTex, cpx + nx0*hh, cpy + ny0*hh);
+    vec3 cm  = sampleRGB(u_blurTex, cpx - nx0*hh, cpy - ny0*hh);
+    vec3 dsv = abs(cp - cm);
+    float dsides = max(dsv.r, max(dsv.g, dsv.b));
+    if (dsides < 0.15) {
+      bax = 0.0; bay = 0.0;   // no two-sided boundary: keep the on-ridge colour
+    } else if (side != 0.0) {
+      bax = side * disp * nx0; bay = side * disp * ny0;   // geometric side wins
+    } else {                            // colour test only at a genuine STEP edge
+      vec3 c0 = sampleRGB(u_blurTex, cpx, cpy);
+      vec3 dpa = abs(cp - c0);
+      vec3 dma = abs(cm - c0);
+      float dp = max(dpa.r, max(dpa.g, dpa.b));
+      float dm = max(dma.r, max(dma.g, dma.b));
+      if (min(dp, dm) < 0.3 * dsides) {
+        float sidec = (dp < dm) ? 1.0 : -1.0;
+        bax = sidec * disp * nx0;
+        bay = sidec * disp * ny0;
+      }
     }
   }
   // drift reference + probes read the FORGIVING box field (mirror seed): on the
@@ -568,10 +590,13 @@ void main(){
     float wsl = liner ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0);
     if (phase == 1) emitSplat(px, py, cpx + bax + wsl*(px - cpx), cpy + bay + wsl*(py - cpy), sz, D, snoise, tnoise, al * ascale, hb, traw, tcap, 1.0 - melt);
     emitted++;
-    // bend gated by coherence AND physical size (mirror seed): straight
-    // strongly-oriented edges trace straight; small strokes never wobble
+    // bend gated by coherence, physical size AND the wavelet edge map (mirror
+    // seed): a chain riding a real edge traces it straight; offset by a per-seed
+    // phase so neighbours decorrelate into natural wobble instead of a weave
     float bend = u_curv * 0.9 * bendf * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)
-               * (1.0 - 0.7*tc.y) * (noise2(0.05*px, 0.05*py) - 0.5);
+               * (1.0 - 0.7*tc.y)
+               * (1.0 - clamp((edgeAt(px, py) - 0.3) / 0.3, 0.0, 1.0))
+               * (noise2(0.05*px + 89.0*bph, 0.05*py + 57.0*bph) - 0.5);
     float cb = cos(bend), sb = sin(bend);
     float dx0 = cos(tc.x), dy0 = sin(tc.x);
     float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);

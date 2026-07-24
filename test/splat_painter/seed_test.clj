@@ -186,11 +186,17 @@
     ;; sides per seed, which tiled every contour into colour capsules (the
     ;; regular wavy scallops). The dry-out probe moves with the sample, so a few
     ;; more boundary chains survive.
-    (is (= 769 (count splats)))
-    (is (approx= 0.5  16379.842  sx) "Σ mean-x")
-    (is (approx= 0.5  22437.124  sy) "Σ mean-y")
-    (is (approx= 1.0  219783.599 sd) "Σ det(cov)")
-    (is (approx= 0.05 879.861    sc) "Σ colour")))
+    ;; (769→830) four colour-path fixes: the impasto side now keys on the liner
+    ;; discipline (small lvl 2-3 chains keep their side); the brush-load is a
+    ;; three-tier decision with a floored displacement (geometric side wins, the
+    ;; colour test only at a genuine step edge); the Perlin bend gains a per-seed
+    ;; phase + wavelet-edge gate; the final colour gets a region-consistency clamp
+    ;; (raw pulled toward its bilateral region).
+    (is (= 830 (count splats)))
+    (is (approx= 0.5  17484.603  sx) "Σ mean-x")
+    (is (approx= 0.5  24322.877  sy) "Σ mean-y")
+    (is (approx= 1.0  219787.323 sd) "Σ det(cov)")
+    (is (approx= 0.05 1006.444   sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -298,3 +304,81 @@
         cnt-detail-1 (count (:splats (seed/splat-field img {:count 2000 :size 2.0 :detail 1.0 :variation 0.0})))]
     (is (> cnt-detail-1 cnt-detail-0)
         (str "detail=1 should produce more splats than detail=0: " cnt-detail-1 " vs " cnt-detail-0))))
+
+;; --- cross-boundary colour-bleed regression ----------------------------------
+
+(defn- boundary-tone [y]
+  ;; vertical boundary across COLUMNS: dark gray (y<63), light gray (y>=65),
+  ;; columns 63-64 a linear ramp (anti-aliased edge).
+  (cond
+    (< y 63) 0.15
+    (>= y 65) 0.85
+    :else (+ 0.15 (* 0.70 (/ (- (double y) 62) 3.0)))))
+
+(defn- two-tone-image [H W]
+  ;; flat H*W*3 double buffer, index base 3*(x*W+y), x=row y=col (matches gray-img).
+  {:height H :width W :channels 3
+   :pixels (double-array
+            (mapcat (fn [x]
+                      (mapcat (fn [y] (let [g (boundary-tone y)] [g g g]))
+                              (range W)))
+                    (range H)))})
+
+(defn- attach-precomputed-fields [img0]
+  ;; mirror core/on-image-loaded EXACTLY. splat-field falls back to raw pixels for
+  ;; any missing blur field, which would NOT exercise the real (edge-aware) colour
+  ;; path — so the test must attach the same fields the app does on image load.
+  (let [sfield (structure/analyze img0)
+        light  (structure/bilateral-blur img0 3)
+        drift  (structure/blur-image img0 2)
+        heavy  (structure/blur-image img0 (max 6 (quot (:height img0) 80)))]
+    (assoc img0 :structure sfield
+               :blur light
+               :blur-drift drift
+               :blur-heavy (structure/edge-preserving-blur img0 light heavy)
+               :detail (wavelet/placement-map img0 sfield)
+               :noise-fields (seed/prep-noise sfield))))
+
+(defn- sigma-max [cov]
+  ;; stdev along the major axis = sqrt of the LARGER eigenvalue of [[c00 c01][c01 c11]].
+  (let [[c00 c01 _ c11] cov
+        a (double c00) b (double c01) d (double c11)
+        h (/ (- a d) 2.0)]
+    (Math/sqrt (+ (/ (+ a d) 2.0) (Math/sqrt (+ (* h h) (* b b)))))))
+
+(defn- luma [c]
+  (let [[r g b] c]
+    (+ (* 0.2126 r) (* 0.7152 g) (* 0.0722 b))))
+
+(deftest no-cross-boundary-colour-bleed
+  ;; A synthetic two-tone image (H=W=128, vertical boundary at cols 63-64) must not
+  ;; produce paint of the wrong shade placed deep inside the opposite half: no light
+  ;; splat (luma>0.5) centred >=0.5σ-max inside the dark half, no dark splat (luma<0.5)
+  ;; centred >=0.5σ-max inside the light half. σ-max is the stdev along each splat's
+  ;; major axis (sqrt of the larger covariance eigenvalue), so ">=0.5σ past the
+  ;; boundary" means the splat's centre is meaningfully on the wrong side, not merely
+  ;; overlapping the edge.
+  ;;
+  ;; The image map is built with the SAME precomputed fields as core/on-image-loaded
+  ;; (:structure :blur :blur-drift :blur-heavy :detail :noise-fields); without them
+  ;; splat-field samples raw pixels and the edge-aware colour path is never exercised.
+  ;; Controls mirror the golden test. This is the TDD gate for the in-progress bleed
+  ;; fix — it FAILS on the current code (light paint leaks into the dark half) and
+  ;; passes once the leak is closed.
+  (let [img (attach-precomputed-fields (two-tone-image 128 128))
+        {:keys [splats]} (seed/splat-field img {:count 4000 :size 6.0 :stroke 2.5
+                                                :detail 0.6 :variation 0.5 :curvature 0.5
+                                                :opacity 0.9 :contrast 1.0})
+        margin 0.5                                        ; >=0.5σ past the boundary
+        light-in-dark (volatile! 0)                       ; light paint inside the dark half
+        dark-in-light (volatile! 0)]                      ; dark paint inside the light half
+    (doseq [{[mx my] :mean cov :cov color :color} splats
+            :let [sm (sigma-max cov) lum (luma color)]]
+      (when (and (< my (- 63 (* margin sm))) (> lum 0.5)) (vswap! light-in-dark inc))
+      (when (and (> my (+ 65 (* margin sm))) (< lum 0.5)) (vswap! dark-in-light inc)))
+    (is (zero? @light-in-dark)
+        (str "light paint bleeding into the dark half: " @light-in-dark
+             " splat(s) centred >=0.5σ inside cols y<63 (of " (count splats) " total)"))
+    (is (zero? @dark-in-light)
+        (str "dark paint bleeding into the light half: " @dark-in-light
+             " splat(s) centred >=0.5σ inside cols y>=65 (of " (count splats) " total)"))))

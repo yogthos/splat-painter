@@ -118,6 +118,12 @@
     (assert-contains gs-src "o_a = vec4(px, py, c00, c01);" "gen output o_a layout")
     (assert-contains gs-src "o_b = vec4(c11, color.r, color.g, color.b);" "gen output o_b layout")
     (assert-contains gs-src "o_c = vec4(alpha, 0.0, 0.0, 0.0);" "gen output o_c (stroke-taper alpha)")
+    ;; region-consistency clamp (mirror seed/splat-field): the bilateral defines the
+    ;; region; raw specificity trusted only when consistent with it — an
+    ;; edge-straddling raw sample is pulled to the region colour, not bled across.
+    (assert-contains gs-src "vec3  bilat = sampleRGB(u_blurTex, hx, hy);" "region: bilateral defines the colour region")
+    (assert-contains gs-src "float wcl   = clamp((dcl - 0.12) / 0.15, 0.0, 1.0);" "region-consistency clamp weight")
+    (assert-contains gs-src "raw = mix(raw, bilat, wcl);" "raw pulled to bilateral region colour")
     ;; the brush-stroke trace (mirror of seed/stroke-segments)
     (assert-contains gs-src "layout(points, max_vertices = 8) out;" "gen GS emits stroke chains")
     (assert-contains gs-src "float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt)) * hw;" "both-ends stroke width taper (seed-jittered size)")
@@ -125,11 +131,22 @@
     (assert-contains gs-src "float traw = (lvl <= 1) ? 0.0 : (lvl <= 3) ? 0.45 : (lvl <= 5) ? 0.7 : 0.85;" "per-level raw floor incl. lvl-6 step")
     (assert-contains gs-src "if (lvl > 0 && lvl <= 2 && k > 0) {" "subdivision claim gated to broad/mid tiers")
     (assert-contains gs-src "float bend = u_curv * 0.9 * bendf * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)" "coherence-gated Perlin stroke bend")
+    (assert-contains gs-src "float bph = hash01(i*67 + lvl, j, 53);" "per-seed bend phase hash (decorrelates neighbours)")
+    (assert-contains gs-src "(1.0 - clamp((edgeAt(px, py) - 0.3) / 0.3, 0.0, 1.0))" "bend gated by wavelet edge map")
+    (assert-contains gs-src "noise2(0.05*px + 89.0*bph, 0.05*py + 57.0*bph)" "per-seed phase offsets the Perlin bend")
     (assert-contains gs-src "vec2 edgeSnap(float x, float y, float gain){" "edge-ridge snap (damped corrector gain)")
     (assert-contains gs-src "if (snapE) { vec2 sp3 = edgeSnap(px, py, liner ? 0.35 : 0.65); px = sp3.x; py = sp3.y; }" "per-step ridge correction (gentle on liners)")
     (assert-contains gs-src "float mx = 0.35*dx + 0.65*dxp, my = 0.35*dy + 0.65*dyp;" "liner direction momentum")
     (assert-contains gs-src "if (phase == 0) ascale = (lvl >= 2 && emitted < 3) ? 0.5 : 1.0;" "measure-then-emit stub glaze")
     (assert-contains gs-src "bool liner = (lvl >= 4) || (lvl >= 2 && ssz2 < 3.5);" "liner discipline keys on physical stroke size")
+    ;; impasto side gate + boundary-side brush-load (mirror seed/stroke-segments):
+    ;; the side keys on the LINER discipline (sigma-keyed), not the level index;
+    ;; the brush-load is a three-tier decision — no boundary, geometric side, then
+    ;; the colour test only at a genuine STEP edge (min dp dm < 0.3*dsides).
+    (assert-contains gs-src "if (snapE && liner) {" "impasto side keys on liner, not level")
+    (assert-contains gs-src "float disp = max(1.5, 0.7 * ssz2);" "brush-load displacement floored (escapes the AA ramp)")
+    (assert-contains gs-src "bax = side * disp * nx0; bay = side * disp * ny0;" "geometric side wins the brush-load")
+    (assert-contains gs-src "if (min(dp, dm) < 0.3 * dsides) {" "colour-test brush-load only at a genuine step edge")
     ;; bokeh melt: absolute subjectness drives the broad tier; local-relative sgate
     ;; keeps driving fine placement (it saturates to 1 on smooth bokeh)
     (assert-contains gs-src "float sabs  = subjAbsAt(cx, cy);" "absolute subjectness sample")
