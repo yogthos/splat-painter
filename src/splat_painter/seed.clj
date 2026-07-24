@@ -419,7 +419,7 @@
    edge strokes alternate the two sides' colours as centres jittered across the
    contour — a bright/dark bead necklace along every silhouette).
    Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
-  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih lth melt mkind gainv blurd-px]
+  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih lth melt mkind gainv blurd-px bph]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
       ;; melted bokeh daubs ROUND OFF (coherence → 0 kills the elongation and pulls
@@ -452,8 +452,11 @@
           ;; side, so the two sides' opaque paints MEET at the edge instead of
           ;; alternating across it (on-ridge bodied strokes scalloped every
           ;; silhouette into light/dark beads). side=0 (no ridge) leaves the
-          ;; stroke untouched.
-          side (if (and snap? (>= (long lvl) 4))
+          ;; stroke untouched. The backoff follows the sigma-keyed LINER
+          ;; discipline, not the level index: small lvl 2-3 chains (size < 3.5px)
+          ;; snap onto the ridge just like lvl≥4 liners, so they keep their side
+          ;; too — without this they painted a one-side brush-load across both.
+          side (if (and snap? liner?)
                  (let [[th0 _] (sample-fields nf x y)
                        snx (- (Math/sin th0)) sny (Math/cos th0)
                        d   (+ (* (- cx0 x) snx) (* (- cy0 y) sny))]
@@ -473,28 +476,45 @@
           ;; field sign flips that would wobble a per-step θ resample.
           sidem (* (double side) (double dirsign))
           ;; BOUNDARY-SIDE BRUSH-LOAD: a chain running PARALLEL to a colour
-          ;; boundary carries one brush-load for its whole span, and which side's
-          ;; colour it grabbed is decided by where its head happened to land —
-          ;; adjacent chains alternate sides, and the painted boundary becomes a
-          ;; tiling of chain-length colour capsules: the REGULAR wavy scallops
-          ;; along every contour, wavelength = the level's chain span. Where the
-          ;; two sides genuinely differ (a boundary, not a thin LINE feature —
-          ;; lines keep their on-ridge colour), the brush-load samples ~0.7σ
-          ;; across the tangent on the stroke's OWN colour side, so the meeting
-          ;; line is drawn by stroke geometry, not by per-seed colour luck.
+          ;; boundary carries one brush-load for its whole span. Which side's
+          ;; colour it grabs is a three-tier decision:
+          ;;  • dsides<0.15 → no two-sided boundary (a thin LINE feature), keep
+          ;;    the on-ridge colour;
+          ;;  • a GEOMETRIC side (the impasto backoff sign above) wins — the body
+          ;;    was already offset toward that side, so the brush-load samples the
+          ;;    SAME side and the meeting line is drawn by stroke geometry, not by
+          ;;    per-seed colour luck. (The colour side and the geometric side are
+          ;;    computed independently and disagree ~50% of the time on the ridge,
+          ;;    so letting colour pick put a light brush-load body on the dark side.)
+          ;;  • with no geometric side (side=0, flat underpainting) the COLOUR test
+          ;;    decides — but only at a genuine STEP edge. Contour chains are seeded
+          ;;    ON the edge ridge, so the head sits on the AA ramp where even the
+          ;;    bilateral field is half-mixed: dp≈dm and a coin-flip side alternates
+          ;;    between chains, re-creating the regular scallop capsules along every
+          ;;    contour. Hold it to the on-ridge colour unless the head is clearly
+          ;;    on one side (min dp dm < 0.3·dsides); smooth RAMPS have dp≈dm too and
+          ;;    are held likewise.
           [bax bay] (let [[th0 _] (sample-fields nf cx0 cy0)
                           nx0 (- (Math/sin th0)) ny0 (Math/cos th0)
                           hh  (max 1.75 (* 0.8 ssz))
-                          [r0 g0 b0] (sample-arr blur-px iw ih cx0 cy0)
+                          ;; the sample displacement is FLOORED like the probes: a fine
+                          ;; liner's 0.7σ is sub-pixel, which lands the brush-load inside
+                          ;; the AA ramp — exactly the mixed colour it exists to escape.
+                          disp (max 1.5 (* 0.7 ssz))
                           [rp gp bp] (sample-arr blur-px iw ih (+ cx0 (* nx0 hh)) (+ cy0 (* ny0 hh)))
                           [rm gm bm] (sample-arr blur-px iw ih (- cx0 (* nx0 hh)) (- cy0 (* ny0 hh)))
                           dsides (max (Math/abs (- rp rm)) (Math/abs (- gp gm)) (Math/abs (- bp bm)))]
-                      (if (< dsides 0.15)
-                        [0.0 0.0]
-                        (let [dp (max (Math/abs (- rp r0)) (Math/abs (- gp g0)) (Math/abs (- bp b0)))
-                              dm (max (Math/abs (- rm r0)) (Math/abs (- gm g0)) (Math/abs (- bm b0)))
-                              sidec (if (< dp dm) 1.0 -1.0)]
-                          [(* sidec 0.7 ssz nx0) (* sidec 0.7 ssz ny0)])))
+                      (cond
+                        (< dsides 0.15) [0.0 0.0]
+                        (not (zero? (double side)))
+                        [(* (double side) disp nx0) (* (double side) disp ny0)]
+                        :else (let [[r0 g0 b0] (sample-arr blur-px iw ih cx0 cy0)
+                                    dp (max (Math/abs (- rp r0)) (Math/abs (- gp g0)) (Math/abs (- bp b0)))
+                                    dm (max (Math/abs (- rm r0)) (Math/abs (- gm g0)) (Math/abs (- bm b0)))]
+                                (if (< (min dp dm) (* 0.3 dsides))
+                                  (let [sidec (if (< dp dm) 1.0 -1.0)]
+                                    [(* sidec disp nx0) (* sidec disp ny0)])
+                                  [0.0 0.0]))))
           ;; the drift reference + probes read the FORGIVING box field (blurd-px):
           ;; on the razor-sharp bilateral paint field any probe wobble across a
           ;; boundary trips the lift instantly and dashes contour chains into beads
@@ -600,10 +620,20 @@
                 ;; flow regions, not to lines. It is ALSO gated by physical size
                 ;; (zero below 2.5px, full past 5px): small strokes follow the
                 ;; original detail exactly, whichever level painted them.
+                ;; AND gated by the wavelet edge map: a chain riding a REAL edge
+                ;; must trace it straight whatever its size, so the bend fades to
+                ;; zero past edge-at 0.3 and a finger/cloth-fold contour is not
+                ;; woven off the line.
+                ;; the Perlin sample is offset by a per-SEED phase (bph): the bare
+                ;; spatial field made every chain through a region wave IN PHASE,
+                ;; reading as a regular ~20px fabric-like weave on mid strokes — a
+                ;; phase per seed decorrelates neighbours into natural wobble.
                 bend (* (double curvature) 0.9 (double bendf)
                         (min 1.0 (max 0.0 (/ (- (double ssz) 2.5) 2.5)))
                         (- 1.0 (* 0.7 coh))
-                        (- (noise/noise2 (* 0.05 px) (* 0.05 py)) 0.5))
+                        (- 1.0 (min 1.0 (max 0.0 (/ (- (wavelet/edge-at dmap px py) 0.3) 0.3))))
+                        (- (noise/noise2 (+ (* 0.05 px) (* 89.0 (double bph)))
+                                         (+ (* 0.05 py) (* 57.0 (double bph)))) 0.5))
                 cb (Math/cos bend) sb (Math/sin bend)
                 dx0 (Math/cos th) dy0 (Math/sin th)
                 sgn (if (zero? k)
@@ -860,7 +890,7 @@
                                                            (* traw (+ 0.6 (* 0.4 sgate)))
                                                            traw)
                                                          sgate blur-px iw ih th melt
-                                                         map-kind gain blurd-px)))]
+                                                         map-kind gain blurd-px (hash01 (+ (* i 67) lvl) j 53))))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         (map-indexed vector levels)))))
@@ -1037,9 +1067,28 @@
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
                      (for [[x y csz dlev sn tn alpha theta coherence hb hx hy traw tcap] segments
-                           :let [blur-rgb (sample-arr (if (and hb (pos? (double hb))) blurh-px blur-px)
-                                                      width height hx hy)
-                                 raw-rgb  (sample-arr raw-px width height hx hy)]]
+                           :let [bilat-rgb (sample-arr blur-px width height hx hy)
+                                 blur-rgb  (if (and hb (pos? (double hb)))
+                                             (sample-arr blurh-px width height hx hy)
+                                             bilat-rgb)
+                                 ;; REGION-CONSISTENCY clamp: the bilateral DEFINES the
+                                 ;; region, and raw specificity is only trusted when it
+                                 ;; agrees with it. In-region micro-contrast (raw within
+                                 ;; 0.12 of the bilateral — highlights, freckles) keeps
+                                 ;; full raw pop; a raw pixel that disagrees with its own
+                                 ;; region's colour by more sits on the AA ramp or the
+                                 ;; wrong side of the boundary and is pulled to the region
+                                 ;; colour — a single edge-straddling raw sample can no
+                                 ;; longer bleed a light region across into a dark one at
+                                 ;; the high raw weight the per-level floor (0.45–0.85)
+                                 ;; otherwise gives it.
+                                 [bcr bcg bcb] bilat-rgb
+                                 [rr rg rb]   (sample-arr raw-px width height hx hy)
+                                 d (max (Math/abs (- rr bcr)) (Math/abs (- rg bcg)) (Math/abs (- rb bcb)))
+                                 w (max 0.0 (min 1.0 (/ (- d 0.12) 0.15)))
+                                 raw-rgb [(+ (* (- 1.0 w) rr) (* w bcr))
+                                          (+ (* (- 1.0 w) rg) (* w bcg))
+                                          (+ (* (- 1.0 w) rb) (* w bcb))]]]
                        (assoc (splat-record x y csz dlev theta coherence sn tn
                                             blur-rgb raw-rgb stroke variation contrast
                                             (or traw 0.0) (or tcap 1.0))
