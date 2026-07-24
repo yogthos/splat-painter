@@ -254,16 +254,20 @@
         ;; LINER chains trace one long continuous line instead of the short stitched
         ;; dashes a small-σ grid of 3-8-segment chains lays down (the contour thatch):
         ;; ~28px span target at the default Stroke, scaled BY Stroke so the slider
-        ;; extends the LINE not the gaps; clamped 8..32 (32 = the GS vertex cap) and
-        ;; computed from NOMINAL size so budget scale never perturbs it.
+        ;; extends the LINE not the gaps; clamped 8..32 (32 = the GS vertex cap).
+        ;; NOMINAL-keyed, so this (and liner?/stepf-of/overlap below) now serves
+        ;; only the BUDGET ESTIMATE (k-of) — the EMITTED per-level segs/stepf/sp
+        ;; are derived from the PHYSICAL (budget-scaled) stdev in the levels loop.
         segs-of (fn [lvl] (if (liner? lvl)
                             (let [span (* 28.0 slen)
                                   step (* (step-frac lvl) (nsize lvl))]
                               (long (max 8 (min 32 (Math/round (/ span step))))))
                             (seg-count lvl)))
-        ;; stepf is FINAL here (Stroke folded in): liner levels carry no Stroke factor
-        ;; (the slider acts through segs/span instead), broad/mid carry slen. Both
-        ;; trace loops consume stepf as-is — no in-loop stroke-length multiplication.
+        ;; stepf carries Stroke folded in: liner levels get no Stroke factor (the
+        ;; slider acts through segs/span instead), broad/mid carry slen. Both trace
+        ;; loops consume the emitted stepf as-is — no in-loop stroke-length
+        ;; multiplication. (Budget-estimate variant; the emitted stepf uses the
+        ;; physical liner test in the levels loop.)
         stepf-of (fn [lvl] (* (step-frac lvl) (if (liner? lvl) 1.0 slen)))
         ;; base layer overlaps heavily (~0.65×stdev ⇒ full coverage); finer layers are
         ;; sparser accents (the base fills behind them). Overlap is FIXED, so coverage
@@ -351,18 +355,47 @@
         ;; frequency that reads as parallel stripes across smooth regions (worst
         ;; with Variation at 0, when no size/tone diversity masks it). White-noise
         ;; positions have no periodicity to show. nx = candidate count, ny = 1.
+        ;; FINAL per-level stroke values are PHYSICAL: liner-ness, chain span and
+        ;; spacing are decided from the BUDGET-SCALED stdev (ssz = lsc·nsize) with
+        ;; the exact per-chain discipline test the trace loops apply, so a level
+        ;; can never get liner-length chains without liner discipline. Nominal-keyed
+        ;; classification did exactly that at low budgets (scale>1): a level with
+        ;; nominal 2.1 / actual 4.4 traced 13-segment chains with no momentum or
+        ;; line-hold, and the ~28px span target — computed in nominal px but traced
+        ;; at actual σ — doubled to 51px: the fat wavy S-worms along every soft
+        ;; contour. The span is now ABSOLUTE pixels, ramped by thinness: only
+        ;; genuinely thin strokes (σ≤1.4) read as drawn lines at the full ~28px
+        ;; span; by σ2.6 the level is back on the short seg-count table (fat
+        ;; accents are dabs, not liners). The budget pass above keeps the NOMINAL
+        ;; helpers (segs-of/stepf-of/overlap/sp-of): k = segs·f·area/sp² ∝ f is
+        ;; segs-invariant below the 14-seg spacing cap, so the estimate is robust
+        ;; to the final segs differing — shorter final chains spend less than
+        ;; estimated, which errs conservative.
         levels (loop [lvl (dec nlev) off 0 out []]
                  (if (< lvl 0)
                    out
                    (let [lsc (scale-of lvl)
                          ssz (* lsc (nsize lvl))
-                         sp  (sp-of lvl lsc)
+                         ldisc? (or (>= lvl 4) (and (>= lvl 2) (< ssz 3.5)))
+                         ramp (max 0.0 (min 1.0 (/ (- 2.6 ssz) 1.2)))
+                         segs (if ldisc?
+                                (max (seg-count lvl)
+                                     (min 32 (long (Math/round (/ (* 28.0 slen ramp)
+                                                                  (* (step-frac lvl) ssz))))))
+                                (seg-count lvl))
+                         stepf (* (step-frac lvl) (if ldisc? 1.0 slen))
+                         ovl (let [cnt (if ldisc? (min segs 14) (seg-count lvl))
+                                   stf (if ldisc? 1.0 slen)]
+                               (cond (zero? (long lvl)) 0.65
+                                     (<= (long lvl) 3)  (* 1.25 (Math/sqrt (* (double cnt) stf)))
+                                     :else              (* 0.7  (Math/sqrt (* (double cnt) stf)))))
+                         sp  (* ovl lsc (if (<= (long lvl) 1) (* bmin (lsize lvl)) (nsize lvl)))
                          nx  (long (Math/ceil (/ area (* sp sp))))
                          ny  1]
                      (recur (dec lvl) (+ off (* nx ny))
                             (conj out {:lvl lvl :ssz ssz :sp sp :th (thresh lvl)
                                        :nx nx :ny ny :offset off
-                                       :segs (segs-of lvl) :stepf (stepf-of lvl)
+                                       :segs segs :stepf stepf
                                        :bendf (bend-frac lvl) :map-kind (level-map-kind lvl)
                                        :traw (raw-floor lvl)})))))]
     {:nlev nlev :warp warp :scale scale :levels levels
