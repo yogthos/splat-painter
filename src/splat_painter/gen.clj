@@ -36,7 +36,7 @@ void main(){ v_id = gl_VertexID; }")
 (def ^:private gs-src
   "#version 330 core
 layout(points) in;
-layout(points, max_vertices = 8) out;
+layout(points, max_vertices = 32) out;
 flat in int v_id[];
 
 // captured by transform feedback: 12 floats = 3 RGBA texels per splat, matching the
@@ -47,7 +47,7 @@ out vec4 o_c;
 
 const int   ML      = 7;
 const float MIN_COH = 0.28;
-const int   SEGS    = 8;      // max segments per brush stroke (seed/seg-count liner lines)
+const int   SEGS    = 32;     // max segments per brush stroke (liner chains, seed/layer-params segs-of cap)
 
 // per-level placement (finest-first slots), from seed/layer-params
 uniform int   u_nlev;
@@ -544,8 +544,11 @@ void main(){
       vec3 cb = sampleRGB(u_blurDTex, px + bax, py + bay);
       vec3 dcl = abs(cb - headBlur);
       float dmx = max(dcl.r, max(dcl.g, dcl.b));
-      if (dmx > ((lvl <= 1) ? 0.18 : 0.45)) fade = 0.0;
-      else if (dmx > (liner ? 0.3 : 0.22)) fade *= 0.4;
+      // liners lift HARD at 0.32 (mirror seed): long chains escaping a dark
+      // contour read the blurred drift field a step late - at 0.45 each escape
+      // painted several bodied dark segments (scribbles at curved contours)
+      if (dmx > ((lvl <= 1) ? 0.18 : (liner ? 0.32 : 0.45))) fade = 0.0;
+      else if (dmx > (liner ? 0.2 : 0.22)) fade *= (liner ? 0.35 : 0.4);
     }
     vec2 tc = fieldsAt(px, py);
     // follow the line only while there IS a line (mirror seed/stroke-segments):
@@ -609,8 +612,14 @@ void main(){
       float ml = sqrt(mx*mx + my*my);
       if (ml > 1e-6) { dx = mx/ml; dy = my/ml; }
     }
-    // the Stroke slider is stroke LENGTH: it scales the chain step (2.5 ≈ 1.0)
-    float L = ssz2 * stepf * (0.4 + 0.24 * u_stroke);
+    // u_stepf is FINAL (layer-params baked Stroke in: span via segs on liners,
+    // step via stepf on broad/mid) — use it as-is, no in-shader stroke factor.
+    float L = ssz2 * stepf;
+    // TURN-KILL (mirror seed): when the field turns sharper than cos ~35deg per
+    // step the chain hit a CORNER or junction - long chains plowed through on
+    // momentum and flew off tangentially at pointed contours (eye corners),
+    // scribbling their dark load onto the ground. The brush dries fast instead.
+    if (liner && q > 0 && abs(dx0*dxp + dy0*dyp) < 0.82) fade *= 0.3;
     px = clamp(px + L*dx, 0.0, float(u_H - 1));
     py = clamp(py + L*dy, 0.0, float(u_W - 1));
     if (snapE) { vec2 sp3 = edgeSnap(px, py, liner ? 0.35 : 0.65); px = sp3.x; py = sp3.y; }
