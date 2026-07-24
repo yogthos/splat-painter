@@ -322,7 +322,21 @@ void main(){
   // Broad growth/thinning/melt inert exactly where they exist to act).
   float sgate = subjectAt(cx, cy);
   float sabs  = subjAbsAt(cx, cy);
-  float mloc  = 1.0 + (u_broad - 1.0) * (1.0 - sabs);
+  // Broad growth gated by the whole GROWN FOOTPRINT (mirror seed): a daub centred
+  // in the bokeh just off a silhouette reads flat, grows, and its body reaches
+  // back across the edge — 8 taps at the grown radius on the (wide, blurred)
+  // subject map catch the nearby subject that centre sampling misses.
+  float sfoot = sabs;
+  if (lvl <= 1 && u_broad > 1.0) {
+    float m0 = 1.0 + (u_broad - 1.0) * (1.0 - sabs);
+    float d  = 1.2 * ssz * m0;
+    float dd = 0.7071 * d;
+    sfoot = max(sfoot, max(subjAbsAt(cx + d, cy), subjAbsAt(cx - d, cy)));
+    sfoot = max(sfoot, max(subjAbsAt(cx, cy + d), subjAbsAt(cx, cy - d)));
+    sfoot = max(sfoot, max(subjAbsAt(cx + dd, cy + dd), subjAbsAt(cx - dd, cy - dd)));
+    sfoot = max(sfoot, max(subjAbsAt(cx + dd, cy - dd), subjAbsAt(cx - dd, cy + dd)));
+  }
+  float mloc  = 1.0 + (u_broad - 1.0) * (1.0 - sfoot);
   // broad tier: flat regions thin candidates by (bmin/m)² as the kept seeds grow
   // ×m — few LARGE daubs = smooth bokeh; at full subjectness m=1 and the Broad
   // dial has no effect on the detailed subjects.
@@ -358,7 +372,9 @@ void main(){
   // hashed positions need no jitter — they ARE the noise
   float x = cx, y = cy;
   float D = min(1.0, u_detail * dv * 2.2);
-  float aw = u_warp * (1.0 - D) * ssz;
+  // no Perlin warp on the liner tier (mirror seed): fine seeds land exactly on
+  // the detail they trace; noise variation belongs to large/medium strokes
+  float aw = (lvl >= 4) ? 0.0 : u_warp * (1.0 - D) * ssz;
   float x2 = (aw < 0.2) ? x : x + aw * noise2(0.06*x, 0.06*y);
   float y2 = (aw < 0.2) ? y : y + aw * noise2(41.3 + 0.06*x, 17.9 + 0.06*y);
   x2 = clamp(x2, 0.0, float(u_H - 1));
@@ -392,7 +408,7 @@ void main(){
   // sink into the wash — grows only past Broad 1.0 and only where subjectness is
   // low, so Broad at max makes bokeh strokes invisible while detailed regions
   // keep their brushwork. Mutes the tone jitter and drives the chain re-mix.
-  float melt = (lvl <= 1) ? clamp((u_broad - 1.0) / 1.5, 0.0, 1.0) * (1.0 - sabs) : 0.0;
+  float melt = (lvl <= 1) ? clamp((u_broad - 1.0) / 1.5, 0.0, 1.0) * (1.0 - sfoot) : 0.0;
   float tnoise = (hash01(i*37 + lvl, j, 13) - 0.5)
                * ((lvl <= 1) ? 0.25 * (1.0 - melt) : (lvl >= 4) ? 0.15 : 1.0);
 
