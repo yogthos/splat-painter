@@ -192,11 +192,28 @@
     ;; colour test only at a genuine step edge); the Perlin bend gains a per-seed
     ;; phase + wavelet-edge gate; the final colour gets a region-consistency clamp
     ;; (raw pulled toward its bilateral region).
-    (is (= 830 (count splats)))
-    (is (approx= 0.5  17484.603  sx) "Σ mean-x")
-    (is (approx= 0.5  24322.877  sy) "Σ mean-y")
-    (is (approx= 1.0  219787.323 sd) "Σ det(cov)")
-    (is (approx= 0.05 1006.444   sc) "Σ colour")))
+    ;; (830→729) liner-scale chains: small-σ levels (nominal size < 3.5px, lvl≥2)
+    ;; trace up to 32-segment continuous lines (a ~28px span target) instead of the
+    ;; short stitched dashes that thatched every contour; Stroke now extends the LINE
+    ;; via segs (not the gaps), stepf is final in layer-params and both trace loops
+    ;; drop their in-loop stroke factor; GS cap 8→32. Liner spacing keeps each level's
+    ;; OWN tier coefficient (√segs, no slen) so the per-level budget term k stays
+    ;; invariant (forcing 0.7 onto reclassified mid levels inflated k ≈3.2×); scale is
+    ;; unchanged so fewer-but-longer chains net a lower count.
+    ;; (729→685) long chains disciplined at corners: liners lift hard at 0.32 colour
+    ;; drift (soft tier 0.2, ×0.35) and dry ×0.3 when the field turns past cos 35°
+    ;; per step (turn-kill) — escaped tails that scribbled dark loops around pointed
+    ;; contours (eye corners) now end at the corner instead.
+    ;; (685→1041) liner seed spacing scales with √min(segs,14), not the nominal span:
+    ;; survival-limited chains on busy contours left sparse hard dashes when seeds
+    ;; were spaced for the full 32-segment span (the detached ring around the
+    ;; avatar's eyes). Denser seeds = continuous bands; the extra fine-tier demand
+    ;; flows into scale-f, so more (finer-budgeted) chains survive here.
+    (is (= 1041 (count splats)))
+    (is (approx= 0.5  20473.371  sx) "Σ mean-x")
+    (is (approx= 0.5  30272.265  sy) "Σ mean-y")
+    (is (approx= 1.0  219953.020 sd) "Σ det(cov)")
+    (is (approx= 0.05 1463.199   sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
