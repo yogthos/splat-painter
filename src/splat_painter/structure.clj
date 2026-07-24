@@ -182,6 +182,65 @@
         (aset out (+ b 2) (+ (* (- 1.0 w) (aget heavy (+ b 2))) (* w (aget light (+ b 2)))))))
     out))
 
+(defn bilateral-blur
+  "EDGE-AWARE smooth colour field: a box window averaged with RANGE weights —
+   each neighbour weighted by how close its raw luma is to the centre pixel's,
+   so shading within a region smooths while nothing mixes across a boundary.
+   The plain box light-blur fed every stroke a colour contaminated by whatever
+   sat across the nearest edge (a pixel 1-2px inside a dark strap sampled a
+   lightened mix), and strokes near edges paint at HIGH specificity — the pale
+   splotches in dark areas and dark smudges on smooth skin all traced back to
+   those mixed samples. Returns a flat H*W*3 double-array."
+  [image radius]
+  ;; O(n) binned approximation (bilateral grid): K luma bins; per bin, weight
+  ;; every pixel by a hat kernel around the bin centre, box-blur the weighted
+  ;; colour + weight (separable, O(n)), and interpolate each pixel's result from
+  ;; its two bracketing bins. The naive windowed form was O(n·(2r+1)²) — 145s
+  ;; per image load; this runs in a few seconds at identical visual quality.
+  (let [H (long (:height image)) W (long (:width image))
+        ^doubles px (:pixels image)
+        n (* H W)
+        ^doubles L (luma image)
+        K 9
+        dl (/ 1.0 (double (dec K)))
+        out (double-array (* n 3))
+        osum (double-array n)]
+    (dotimes [k K]
+      (let [lk (* (double k) dl)
+            wk (double-array n)
+            wr (double-array n)
+            wg (double-array n)
+            wb (double-array n)]
+        (dotimes [i n]
+          (let [w (max 0.0 (- 1.0 (/ (Math/abs (- (aget L i) lk)) dl)))
+                b (* 3 i)]
+            (aset wk i w)
+            (aset wr i (* w (aget px b)))
+            (aset wg i (* w (aget px (+ b 1))))
+            (aset wb i (* w (aget px (+ b 2))))))
+        (let [^doubles bw (box-blur-2d wk H W radius)
+              ^doubles br (box-blur-2d wr H W radius)
+              ^doubles bg (box-blur-2d wg H W radius)
+              ^doubles bb (box-blur-2d wb H W radius)]
+          (dotimes [i n]
+            (let [h (max 0.0 (- 1.0 (/ (Math/abs (- (aget L i) lk)) dl)))]
+              (when (pos? h)
+                (let [b (* 3 i)
+                      inv (/ h (max (aget bw i) 1e-12))]
+                  (aset out b       (+ (aget out b)       (* inv (aget br i))))
+                  (aset out (+ b 1) (+ (aget out (+ b 1)) (* inv (aget bg i))))
+                  (aset out (+ b 2) (+ (aget out (+ b 2)) (* inv (aget bb i))))
+                  (aset osum i (+ (aget osum i) h)))))))))
+    ;; hat kernels form a partition of unity, but guard the division anyway
+    (dotimes [i n]
+      (let [s (aget osum i) b (* 3 i)]
+        (when (> (Math/abs (- s 1.0)) 1e-9)
+          (let [inv (/ 1.0 (max s 1e-12))]
+            (aset out b       (* (aget out b) inv))
+            (aset out (+ b 1) (* (aget out (+ b 1)) inv))
+            (aset out (+ b 2) (* (aget out (+ b 2)) inv))))))
+    out))
+
 (defn blur-image
   "Box-blur an RGB image's pixels (flat H*W*3 doubles) with `radius`, returning a
    new flat H*W*3 double-array. Computed once per image load so the seed can read

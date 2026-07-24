@@ -85,7 +85,8 @@ uniform vec2  u_detailSrc;   // (src_h, src_w) = image (H, W)
 uniform sampler2D u_noiseTex;
 uniform vec2  u_noiseDim;
 uniform vec2  u_noiseSrc;
-uniform sampler2D u_blurTex;  // W×H light blur (fine strokes' smooth base)
+uniform sampler2D u_blurTex;  // W×H edge-aware light blur (fine strokes' smooth base)
+uniform sampler2D u_blurDTex; // W×H FORGIVING box blur — drift/dry-out probes only
 uniform sampler2D u_blurHTex; // W×H HEAVY blur (base + broadest level: colour at their scale)
 uniform sampler2D u_rawTex;   // W×H
 uniform sampler2D u_permTex;  // 512×1
@@ -494,7 +495,10 @@ void main(){
       bay = sidec * 0.7 * ssz2 * ny0;
     }
   }
-  vec3 headBlur = sampleRGB(u_blurTex, cpx + bax, cpy + bay);
+  // drift reference + probes read the FORGIVING box field (mirror seed): on the
+  // razor-sharp bilateral paint field any probe wobble across a boundary trips
+  // the lift instantly and dashes contour chains into beads
+  vec3 headBlur = sampleRGB(u_blurDTex, cpx + bax, cpy + bay);
   for (int q = 0; q < SEGS; q++) {
     if (q >= segs || fade < 0.15) break;
     if (q > 0) {
@@ -505,7 +509,7 @@ void main(){
       // the broad tier lifts IMMEDIATELY on any real colour change (0.18): its
       // opaque underpainting chains at the largest sizes must never carry paint
       // across a boundary (one escaped segment = a huge wrong-colour ghost cloud)
-      vec3 cb = sampleRGB(u_blurTex, px + bax, py + bay);
+      vec3 cb = sampleRGB(u_blurDTex, px + bax, py + bay);
       vec3 dcl = abs(cb - headBlur);
       float dmx = max(dcl.r, max(dcl.g, dcl.b));
       if (dmx > ((lvl <= 1) ? 0.18 : 0.45)) fade = 0.0;
@@ -589,7 +593,7 @@ void main(){
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
    "u_segs" "u_stepf" "u_bendf" "u_sharp"
    "u_detailTex" "u_subjTex" "u_dmax" "u_detailDim" "u_detailSrc"
-   "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurHTex" "u_rawTex" "u_permTex"])
+   "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurDTex" "u_blurHTex" "u_rawTex" "u_permTex"])
 
 (defn sources
   "Return {:vs-src :gs-src} — pure, no GL context (for headless inspection/tests)."
@@ -643,6 +647,7 @@ void main(){
   (let [H (long (:height img)) W (long (:width img))
         ^doubles raw (:pixels img)
         ^doubles blur (or (:blur img) (:pixels img))
+        ^doubles blurd (or (:blur-drift img) blur)
         ^doubles blurh (or (:blur-heavy img) blur)
         dmap (:detail img)
         Hd (long (:h dmap)) Wd (long (:w dmap))
@@ -654,7 +659,7 @@ void main(){
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
         ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
-        detail-t (new-tex) subj-t (new-tex) noise-t (new-tex) blur-t (new-tex) blurh-t (new-tex) raw-t (new-tex)]
+        detail-t (new-tex) subj-t (new-tex) noise-t (new-tex) blur-t (new-tex) blurd-t (new-tex) blurh-t (new-tex) raw-t (new-tex)]
     ;; .r = aggregate map, .g = sharp fine-band, .b = raw edge strength, .a = MID band
     (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) (aget ds i) (aget de i) (aget dm2 i)])))
     ;; ABSOLUTE subjectness (.r) — the broad tier's bokeh gate (same grid as detail)
@@ -663,9 +668,10 @@ void main(){
     ;; bilinearly blends the components (fieldsAt), never the raw angle.
     (upload-rgba! noise-t  Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget c2 i) (aget s2 i) (aget co i) 0.0])))
     (upload-rgba! blur-t   W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blur b) (aget blur (+ b 1)) (aget blur (+ b 2)) 1.0]))))
+    (upload-rgba! blurd-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurd b) (aget blurd (+ b 1)) (aget blurd (+ b 2)) 1.0]))))
     (upload-rgba! blurh-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurh b) (aget blurh (+ b 1)) (aget blurh (+ b 2)) 1.0]))))
     (upload-rgba! raw-t    W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget raw b) (aget raw (+ b 1)) (aget raw (+ b 2)) 1.0]))))
-    {:detail detail-t :subject subj-t :noise noise-t :blur blur-t :blur-heavy blurh-t :raw raw-t :perm perm-tex
+    {:detail detail-t :subject subj-t :noise noise-t :blur blur-t :blur-drift blurd-t :blur-heavy blurh-t :raw raw-t :perm perm-tex
      :dmap dmap                              ; the CPU detail map, for layer-params' budget
      :dmax (double (:dmax dmap))
      :detail-dim [(double Hd) (double Wd)] :detail-src [(double H) (double W)]
@@ -780,6 +786,7 @@ void main(){
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 5)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:perm fields))   (gl/gl-uniform-1i (:u_permTex locs) 5)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 6)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:blur-heavy fields)) (gl/gl-uniform-1i (:u_blurHTex locs) 6)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 7)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:subject fields))    (gl/gl-uniform-1i (:u_subjTex locs) 7)
+    (gl/gl-active-texture (+ gl/GL-TEXTURE0 8)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:blur-drift fields)) (gl/gl-uniform-1i (:u_blurDTex locs) 8)
     (gl/gl-uniform-1f (:u_dmax locs) (double (:dmax fields)))
     (gl/gl-uniform-2f (:u_detailDim locs) (double (nth (:detail-dim fields) 0)) (double (nth (:detail-dim fields) 1)))
     (gl/gl-uniform-2f (:u_detailSrc locs) (double (nth (:detail-src fields) 0)) (double (nth (:detail-src fields) 1)))
