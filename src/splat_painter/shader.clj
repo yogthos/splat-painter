@@ -305,8 +305,12 @@ void main(){
 
   // ragged edge: only ever scales pdf, so it's invisible at the core (pdf≈0) and
   // grows toward the shoulder where the contour actually reads. v_edge is 0 on the
-  // base coverage strokes (see the vertex shader) so they stay solid.
-  float pdf = max(pdf0 * (1.0 + v_edge * 2.0 * streak), 0.0);
+  // base coverage strokes (see the vertex shader) so they stay solid. It bites
+  // OUTWARD freely (streak<0 → pdf down → the contour feathers past the ellipse) but
+  // only LIGHTLY inward — a full inward carve on a ~2px liner beads it into dashes, so
+  // damp the shrink side.
+  float esf = (streak < 0.0) ? streak : streak * 0.35;
+  float pdf = max(pdf0 * (1.0 + v_edge * 2.0 * esf), 0.0);
   float a = v_alpha * u_opacity * exp(-pow(pdf, v_hard));
 
   // texture catches the LIGHT: bristle marks and tooth show in lit passages, not the
