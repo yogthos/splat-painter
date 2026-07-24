@@ -128,6 +128,7 @@
     (assert-contains gs-src "vec2 edgeSnap(float x, float y, float gain){" "edge-ridge snap (damped corrector gain)")
     (assert-contains gs-src "if (snapE) { vec2 sp3 = edgeSnap(px, py, liner ? 0.35 : 0.65); px = sp3.x; py = sp3.y; }" "per-step ridge correction (gentle on liners)")
     (assert-contains gs-src "float mx = 0.35*dx + 0.65*dxp, my = 0.35*dy + 0.65*dyp;" "liner direction momentum")
+    (assert-contains gs-src "if (phase == 0) ascale = (lvl >= 2 && emitted < 3) ? 0.5 : 1.0;" "measure-then-emit stub glaze")
     (assert-contains gs-src "bool liner = (lvl >= 4) || (lvl >= 2 && ssz2 < 3.5);" "liner discipline keys on physical stroke size")
     ;; bokeh melt: absolute subjectness drives the broad tier; local-relative sgate
     ;; keeps driving fine placement (it saturates to 1 on smooth bokeh)
