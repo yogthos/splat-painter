@@ -113,23 +113,20 @@
           (recur (inc i) (if (>= (aget d i) thr) (inc c) c)))))))
 
 (defn- mean-inv-m2
-  "E[1/m²] over the aggregate map, where m(x) = 1+(b−1)·(1−s(x)) is the
-   bokeh-adaptive Broad multiplier (same subjectness shaping as subject-at,
-   sans taps). The base level's budget term: candidates thin by (bmin/m)²
-   as their strokes grow ×m, so the cost integrates the thinning."
+  "E[1/m²] over the ABSOLUTE subject map, where m(x) = 1+(b−1)·(1−s(x)) is the
+   bokeh-adaptive Broad multiplier (mirrors layered-means' mloc). The base
+   level's budget term: candidates thin by (bmin/m)² as their strokes grow ×m,
+   so the cost integrates the thinning."
   [dmap b]
-  (let [^doubles d (:detail dmap)
-        dmax (double (max 1e-9 (:dmax dmap)))
+  (let [^doubles d (or (:subject dmap) (:detail dmap))
         n    (alength d)]
     (if (zero? n)
       1.0
       (loop [i 0 acc 0.0]
         (if (>= i n)
           (/ acc (double n))
-          (let [p0 (min 1.0 (/ (aget d i) dmax))
-                s  (max (min 1.0 (max 0.0 (/ (- p0 0.05) 0.30)))
-                        (min 1.0 (max 0.0 (/ (- p0 0.10) 0.35))))
-                m  (+ 1.0 (* (- (double b) 1.0) (- 1.0 s)))]
+          (let [s (min 1.0 (aget d i))
+                m (+ 1.0 (* (- (double b) 1.0) (- 1.0 s)))]
             (recur (inc i) (+ acc (/ 1.0 (* m m))))))))))
 
 ;; Fine-level seeds don't place one dab — they trace a BRUSH STROKE: a chain of
@@ -340,8 +337,12 @@
    p and at ±h across the local tangent, fit a parabola, step to its peak (clamped
    to ±h). Seeds scatter across a thin line by the placement noise; without the
    snap each stroke traces PARALLEL to the line at its own offset and a crisp
-   1px line renders as a wobbly multi-strand braid."
-  [dmap nf x y h hd wd]
+   1px line renders as a wobbly multi-strand braid.
+   `gain` damps the corrector: the edge map is texel-quantized, so the full
+   parabola step jitters. The SEED snap uses 0.65 (converge onto the ridge);
+   liner-chain STEPS use a gentler gain — a strong per-step lateral corrector
+   fought the direction momentum and scalloped thin traced lines into wobble."
+  [dmap nf x y h hd wd gain]
   (let [[th _] (sample-fields nf x y)
         nx (- (Math/sin th)) ny (Math/cos th)
         e0 (wavelet/edge-at dmap x y)
@@ -353,12 +354,8 @@
             d   (if (< (Math/abs den) 1e-9)
                   0.0
                   (max -1.0 (min 1.0 (/ (- em ep) (* 2.0 den)))))]
-        ;; DAMPED corrector (×0.65): the edge map is texel-quantized, so the full
-        ;; parabola step jitters; partial correction still converges over the
-        ;; chain's repeated snaps but filters the quantization wobble out of the
-        ;; traced line.
-        [(max 0.0 (min hd (+ x (* nx h d 0.65))))
-         (max 0.0 (min wd (+ y (* ny h d 0.65))))]))))
+        [(max 0.0 (min hd (+ x (* nx h d gain))))
+         (max 0.0 (min wd (+ y (* ny h d gain))))]))))
 
 (defn- map-at
   "Sample the placement map matched to a level's scale."
@@ -417,23 +414,28 @@
    edge strokes alternate the two sides' colours as centres jittered across the
    contour — a bright/dark bead necklace along every silhouette).
    Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
-  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih]
+  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih lth melt]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
-      [[x y ssz D sn tn 1.0 th coh hb x y traw (spec-cap lvl)]])
+      ;; melted bokeh daubs ROUND OFF (coherence → 0 kills the elongation and pulls
+      ;; the colour toward the smooth blur): an elongated needle on a soft gradient
+      ;; always reads as a directional streak, however faithful its colour.
+      [[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap lvl)]])
     (let [kmax (dec (long segs))
           lal  (level-alpha lvl)
           ;; fine strokes snap onto the edge ridge at the seed and after every step
           ;; (predictor: tangent step; corrector: ridge snap) — the stroke GLUES to
           ;; the line it is painting instead of braiding beside it.
           snap? (>= (long lvl) 2)
+          ;; liner chains correct gently mid-stroke (see edge-snap's gain doc)
+          sgain (if (>= (long lvl) 4) 0.35 0.65)
           ;; the GEOMETRY snaps to the ridge, but the COLOUR samples the pre-snap
           ;; position: on-ridge colour is the two sides' mix — darker than either —
           ;; and painted along a silhouette it reads as a drawn OUTLINE. Pre-snap
           ;; seeds land on one side or the other, so contour strokes interleave the
           ;; two sides' actual colours and the edge blends like meeting paint.
           cx0 x cy0 y
-          [x y] (if snap? (edge-snap dmap nf x y 1.75 hd wd) [x y])
+          [x y] (if snap? (edge-snap dmap nf x y 1.75 hd wd 0.65) [x y])
           ;; IMPASTO meeting line: bodied liner strokes keep to THEIR side of the
           ;; ridge — the centre backs off ~half a width toward the colour-sample
           ;; side, so the two sides' opaque paints MEET at the edge instead of
@@ -489,6 +491,19 @@
                 fade (if (and (pos? k) (>= (long lvl) 4) (< coh 0.35)
                               (< (wavelet/edge-at dmap px py) 0.5))
                        (* fade 0.5)
+                       fade)
+                ;; LINE-HOLD: a liner stroke exists to trace the fine structure it
+                ;; was seeded on. When the sharp fine-band map under the brush falls
+                ;; below the level's own placement threshold, the stroke has WALKED
+                ;; OFF its line — a chain escaping a silhouette tangentially would
+                ;; drag its bodied paint into the featureless background (the ghost
+                ;; tendrils around every contour) — so the painter lifts the brush.
+                fade (if (and (pos? k) (>= (long lvl) 4))
+                       (let [mv (* (wavelet/sharp-at dmap px py)
+                                   (+ 0.25 (* 0.75 (double sgate))))]
+                         (cond (< mv (* 0.35 (double lth))) 0.0
+                               (< mv (* 0.7  (double lth))) (* fade 0.5)
+                               :else fade))
                        fade)]
            (if (< fade 0.15)
             acc                                     ; brush lifted — emit nothing
@@ -510,17 +525,28 @@
                 ;; and light, swells to full over the first ~18%) on top of the existing
                 ;; longer dry-out at the tail — so the mark tapers at BOTH ends like a
                 ;; real brushstroke, not just the tail. smoothstep = the same cubic the
-                ;; GPU's smoothstep() mirrors.
-                hw  (let [u (min 1.0 (/ t 0.18))] (+ 0.55 (* 0.45 u u (- 3.0 (* 2.0 u)))))
-                ha  (let [u (min 1.0 (/ t 0.15))] (+ 0.5  (* 0.5  u u (- 3.0 (* 2.0 u)))))
+                ;; GPU's smoothstep() mirrors. The LINER tier (lvl≥4) keeps only a hint
+                ;; of it: a thin line is drawn by several overlapping chains handing
+                ;; off, and strong per-chain taper turns the handoffs into a lumpy
+                ;; string of tadpoles instead of one continuous rod.
+                hw  (let [u (min 1.0 (/ t 0.18)) s (* u u (- 3.0 (* 2.0 u)))]
+                      (if (>= (long lvl) 4) (+ 0.8 (* 0.2 s)) (+ 0.55 (* 0.45 s))))
+                ha  (let [u (min 1.0 (/ t 0.15)) s (* u u (- 3.0 (* 2.0 u)))]
+                      (if (>= (long lvl) 4) (+ 0.75 (* 0.25 s)) (+ 0.5 (* 0.5 s))))
                 sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))) hw)  ; width tapers at both ends
                 al  (* lal2 fade (- 1.0 (* 0.65 t t)) ha)        ; alpha: lift-on × glaze × dry-out
                 ;; the brush-load RE-MIXES with the canvas as the stroke travels:
                 ;; the colour-sample point slides up to 35% from the head toward
                 ;; the current position, so long strokes grade into their
                 ;; surroundings instead of carrying one colour to a hard break.
-                wsl (if (>= (long lvl) 4) (* 0.35 t) 0.0)
-                acc (conj acc [px py sz D sn tn al th coh hb
+                ;; MELT (broad tier, bokeh): at high Broad the flat-region chains
+                ;; re-mix much harder — a long chain carrying one brush-load across
+                ;; a smooth gradient reads as a feathery streak on the wash; melted
+                ;; strokes keep re-loading the local colour and disappear into it.
+                wsl (cond (>= (long lvl) 4)       (* 0.35 t)
+                          (pos? (double melt))    (* 0.85 (double melt) t)
+                          :else                   0.0)
+                acc (conj acc [px py sz D sn tn al th (* coh (- 1.0 (double melt))) hb
                                (+ cx0 (* wsl (- px cx0))) (+ cy0 (* wsl (- py cy0)))
                                traw (spec-cap lvl)])
                 ;; step: along the local tangent, sign-continuous with the previous step,
@@ -540,11 +566,11 @@
                 dx (- (* cb dx1) (* sb dy1)) dy (+ (* sb dx1) (* cb dy1))
                 ;; DIRECTION MOMENTUM: a hand-pulled stroke has inertia — re-deciding
                 ;; direction from the noisy field every step turns thin traced lines
-                ;; wavy. Liner strokes blend half the previous step's direction and
+                ;; wavy. Liner strokes carry 65% of the previous step's direction and
                 ;; plow straight through junctions where the field goes incoherent.
                 [dx dy] (if (and (>= (long lvl) 4) (pos? k))
-                          (let [mx (+ (* 0.5 dx) (* 0.5 dxp))
-                                my (+ (* 0.5 dy) (* 0.5 dyp))
+                          (let [mx (+ (* 0.35 dx) (* 0.65 dxp))
+                                my (+ (* 0.35 dy) (* 0.65 dyp))
                                 ml (Math/sqrt (+ (* mx mx) (* my my)))]
                             (if (> ml 1e-6) [(/ mx ml) (/ my ml)] [dx dy]))
                           [dx dy])
@@ -553,7 +579,7 @@
                 L  (* ssz (double stepf) (stroke-len-frac stroke))]
             (let [nx0 (max 0.0 (min hd (+ px (* L dx))))
                   ny0 (max 0.0 (min wd (+ py (* L dy))))
-                  [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd) [nx0 ny0])
+                  [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd sgain) [nx0 ny0])
                   ;; side offset along the stroke's OWN motion perpendicular — the
                   ;; path is a stable frame; re-sampling θ at every step let field
                   ;; noise wobble the offset into a wavy line.
@@ -600,11 +626,18 @@
                           cy (* (double W) (poshash i lvl 31))]
                       (if false
                         (recur (inc j) acc)
-                        (let [;; wavelet subjectness: drives the bokeh-adaptive broad tier
-                              ;; and gates mid/fine placement — splat size follows the
-                              ;; wavelet's local detail density.
+                        (let [;; wavelet subjectness (LOCAL-relative): gates mid/fine
+                              ;; placement — splat size follows the wavelet's local
+                              ;; detail density, so dark low-contrast texture still
+                              ;; receives strokes.
                               sgate (subject-at dmap cx cy rr)
-                              mloc  (+ 1.0 (* (- bmul 1.0) (- 1.0 sgate)))
+                              ;; ABSOLUTE subjectness: drives the bokeh-adaptive broad
+                              ;; tier. The local-relative gate saturates to 1 on smooth
+                              ;; bokeh (its normalization amplifies sensor noise), which
+                              ;; made Broad growth/thinning/melt inert exactly where
+                              ;; they exist to act.
+                              sabs  (wavelet/subject-abs-at dmap cx cy)
+                              mloc  (+ 1.0 (* (- bmul 1.0) (- 1.0 sabs)))
                               ;; broad tier: flat regions thin candidates by (bmin/m)² as
                               ;; the kept seeds grow ×m — few LARGE daubs = smooth bokeh;
                               ;; at full subjectness m=1 and the Broad dial has no effect.
@@ -613,8 +646,14 @@
                                            (>= (hash01 (+ (* i 61) lvl) j 43) (* pr pr))))
                               ;; mid/fine strokes belong where the wavelets see detail:
                               ;; their map value is gated by subjectness so flat bokeh
-                              ;; keeps only the big smooth daubs.
-                              gain  (if (>= (long lvl) 2) (+ 0.25 (* 0.75 sgate)) 1.0)
+                              ;; keeps only the big smooth daubs. The ABSOLUTE gate
+                              ;; rides the Broad slider: past 1.0 it thins mid/fine
+                              ;; marks out of truly flat regions (isolated dark flecks
+                              ;; on a melted wash), leaving them at Broad ≤ 1 where
+                              ;; visible strokes are the wanted effect.
+                              bgate (- 1.0 (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
+                                              (- 1.0 (min 1.0 (/ sabs 0.35)))))
+                              gain  (if (>= (long lvl) 2) (* (+ 0.25 (* 0.75 sgate)) bgate) 1.0)
                               ;; each level reads the map matched to ITS scale: the finest
                               ;; levels use the sharp fine-band map so they land on (and
                               ;; preserve) small structure the smoothed aggregate blurs away.
@@ -633,7 +672,7 @@
                                                   ;; the finer level is always ≥2, so its
                                                   ;; claim carries the same subject gate
                                                   fdv (* (map-at dmap (:map-kind fl) cx cy)
-                                                         (+ 0.25 (* 0.75 sgate)))]
+                                                         (+ 0.25 (* 0.75 sgate)) bgate)]
                                               (>= fdv (* (:th fl)
                                                          (+ 0.75 (* 0.5 (hash01 (+ (* i 47) lvl) j 23)))))))]
                           (if (or thin?
@@ -670,12 +709,23 @@
                               Ev (if (<= (long lvl) 3)
                                    (edge-near dmap cx cy (* 0.75 ssz))
                                    (wavelet/edge-at dmap cx cy))
+                              ;; MELT: how much a flat-region broad stroke should sink into
+                              ;; the wash. Grows only past Broad 1.0 (below that, strokes
+                              ;; are the wanted effect) and only where subjectness is low —
+                              ;; the Broad slider at max makes bokeh strokes invisible while
+                              ;; detailed regions keep their brushwork untouched.
+                              melt (if (<= (long lvl) 1)
+                                     (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
+                                        (- 1.0 sabs))
+                                     0.0)
                               ;; tone jitter is scale-relative: broad fills keep 25% (full
                               ;; jitter banded smooth walls) and the FINEST marks keep 15%
                               ;; (alternating-tone bodied lines bead contours) — the
                               ;; visible mid-scale brushwork carries the painterly variety.
+                              ;; Melted bokeh strokes mute it further: a wash has no
+                              ;; per-stroke tone identity to show.
                               tn (* (let [l (long lvl)]
-                                      (cond (<= l 1) 0.25 (>= l 4) 0.15 :else 1.0))
+                                      (cond (<= l 1) (* 0.25 (- 1.0 melt)) (>= l 4) 0.15 :else 1.0))
                                     (- (hash01 (+ (* i 37) lvl) j 13) 0.5))
                               ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
                               ;; keep centres in-bounds so no budget is wasted off-screen
@@ -716,7 +766,7 @@
                                                          (if (>= (long lvl) 4)
                                                            (* traw (+ 0.6 (* 0.4 sgate)))
                                                            traw)
-                                                         sgate blur-px iw ih))]
+                                                         sgate blur-px iw ih th melt))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         (map-indexed vector levels)))))
