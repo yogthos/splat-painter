@@ -171,3 +171,19 @@
       (reset! core/active-layer-atom prev-active)
       (reset! core/image-atom prev-image)
       (reset! core/status-atom prev-status))))
+
+(deftest field-tex-ids-excludes-perm-and-non-textures
+  (testing "field-tex-ids returns exactly the per-image texture ids, never :perm or :dmax"
+    ;; mirrors gen/upload-fields! (gen.clj:737): 7 per-image textures allocated via
+    ;; new-tex, plus :perm (the shared Perlin texture, uploaded ONCE by upload-perm!
+    ;; and reused across images), :dmax (a float), :dmap (a map), dim vectors and
+    ;; :H/:W. Freeing :perm corrupts every later generate!; freeing (long :dmax) would
+    ;; delete an unrelated texture id. Both must be excluded by an explicit allow-list.
+    (let [fields {:detail 22 :subject 23 :noise 24 :blur 25 :blur-drift 26
+                  :blur-heavy 27 :raw 28 :perm 3 :dmax 1.0 :dmap {:h 64 :w 64}
+                  :detail-dim [64.0 64.0] :detail-src [1024.0 1024.0]
+                  :noise-dim [32.0 32.0] :noise-src [1024.0 1024.0] :H 1024 :W 1024}
+          ids (core/field-tex-ids fields)]
+      (is (= [22 23 24 25 26 27 28] ids))   ; every per-image texture key, in order
+      (is (not-any? #(= 3 %) ids))            ; :perm shared texture never freed
+      (is (not-any? #(= 1 %) ids)))))         ; :dmax (1.0) never freed
