@@ -217,15 +217,16 @@
         _       (ffi/write errslot :pointer 0 ffi/null)  ; GError out-param must start NULL (ffi/alloc doesn't zero)
         gfile   (gtk-file-dialog-open-finish dialog res errslot)]
     (if (ffi/null? gfile)
-      (when-let [ep (ffi/read errslot :pointer 0)]
-        ;; GError is { GQuark domain(4); gint code(4); gchar *message; } — message is
-        ;; at offset 8 on LP64, NOT 16. Reading 16 fetched a garbage pointer 8 bytes
-        ;; past the struct; ptr->string on it faulted ("invalid memory reference") on
-        ;; the error/cancel branch — the crash when a file dialog was dismissed.
-        (let [mp (ffi/read ep :pointer 8)]
-          (when-not (ffi/null? mp)
-            (reset! status-atom (str "open failed: " (ffi/ptr->string mp))))
-          (g-error-free ep)))
+      (let [ep (ffi/read errslot :pointer 0)]
+        (when-not (ffi/null? ep)
+          ;; GError is { GQuark domain(4); gint code(4); gchar *message; } — message is
+          ;; at offset 8 on LP64, NOT 16. Reading 16 fetched a garbage pointer 8 bytes
+          ;; past the struct; ptr->string on it faulted ("invalid memory reference") on
+          ;; the error/cancel branch — the crash when a file dialog was dismissed.
+          (let [mp (ffi/read ep :pointer 8)]
+            (when-not (ffi/null? mp)
+              (reset! status-atom (str "open failed: " (ffi/ptr->string mp))))
+            (g-error-free ep))))
       (let [path (g-file-get-path gfile)]
         (g-object-unref gfile)
         (on-image-loaded path)))
@@ -329,15 +330,16 @@
         _       (ffi/write errslot :pointer 0 ffi/null)  ; GError out-param must start NULL (ffi/alloc doesn't zero)
         gfile   (gtk-file-dialog-save-finish dialog res errslot)]
     (if (ffi/null? gfile)
-      (when-let [ep (ffi/read errslot :pointer 0)]
-        ;; GError is { GQuark domain(4); gint code(4); gchar *message; } — message is
-        ;; at offset 8 on LP64, NOT 16. Reading 16 fetched a garbage pointer 8 bytes
-        ;; past the struct; ptr->string on it faulted ("invalid memory reference") on
-        ;; the error/cancel branch — the crash when a file dialog was dismissed.
-        (let [mp (ffi/read ep :pointer 8)]
-          (when-not (ffi/null? mp)
-            (reset! status-atom (str "save canceled/failed: " (ffi/ptr->string mp))))
-          (g-error-free ep)))
+      (let [ep (ffi/read errslot :pointer 0)]
+        (when-not (ffi/null? ep)
+          ;; GError is { GQuark domain(4); gint code(4); gchar *message; } — message is
+          ;; at offset 8 on LP64, NOT 16. Reading 16 fetched a garbage pointer 8 bytes
+          ;; past the struct; ptr->string on it faulted ("invalid memory reference") on
+          ;; the error/cancel branch — the crash when a file dialog was dismissed.
+          (let [mp (ffi/read ep :pointer 8)]
+            (when-not (ffi/null? mp)
+              (reset! status-atom (str "save canceled/failed: " (ffi/ptr->string mp))))
+            (g-error-free ep))))
       (let [path (g-file-get-path gfile)]
         (g-object-unref gfile)
         (if (and gpu-gen? @area-atom)

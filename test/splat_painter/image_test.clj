@@ -1,6 +1,8 @@
 (ns splat-painter.image-test
   (:require [clojure.test :refer [deftest is testing]]
+            [jolt.ffi :as ffi]
             [splat-painter.image :as image]
+            [splat-painter.png :as png]
             [splat-painter.seed :as seed]
             [splat-painter.gaussian :as g]))
 
@@ -31,3 +33,30 @@
       (is (pos? (count out)))
       (is (some pos? out))                       ; not all black
       (is (< (apply min out) (apply max out)))))); has contrast
+
+(deftest read-gerror-returns-nil-on-null-slot
+  ;; A zeroed GError** slot (NULL GError*) must read back as nil, not
+  ;; dereference address 0+offset into a native fault. Both copies (image +
+  ;; png) were built with the same broken read-gerror, so test them together.
+  (let [slot (ffi/alloc (ffi/sizeof :pointer))]
+    (ffi/write slot :pointer 0 ffi/null)
+    (is (nil? (#'splat-painter.image/read-gerror slot)))
+    (is (nil? (#'splat-painter.png/read-gerror slot)))
+    (ffi/free slot)))
+
+(deftest load-image-error-carries-the-real-glib-message
+  ;; A non-image file: the gdk-pixbuf loader rejects it and sets a GError with
+  ;; a real message. Tests run from the project root, so deps.edn is present —
+  ;; no fixture needed. Do not assert exact GLib wording (locale/version drift):
+  ;; assert the message is present and is NOT the "unknown error" fallback that
+  ;; read-gerror produced when it read the message from the wrong struct offset.
+  (let [msg (try (image/load-image "deps.edn")
+                 (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+    (is msg "load-image should throw an ex-info with a message")
+    (is (not (re-find #"unknown error" msg))
+        "must not fall back to 'unknown error' — that means the GLib message was lost")
+    ;; anchor on the path, not on any ": " — the "image:" prefix would satisfy
+    ;; a bare #": .+" even if GLib's portion came back empty
+    (is (re-find #"deps\.edn: \S" msg)
+        "carries a non-empty GLib portion after the path")))
+

@@ -6,8 +6,10 @@
   (:require [jolt.ffi :as ffi]))
 
 ;; GError layout on 64-bit: { guint32 domain; gint code; gchar* message; }.
-;; The message pointer is 8-byte aligned, so it sits at byte offset 16.
-(def ^:private gerror-msg-off 16)
+;; The message pointer is 8-byte aligned after the two 4-byte fields, so it
+;; sits at byte offset 8 (the struct is 16 bytes total). Offset 16 reads one
+;; pointer-width past the end of the struct into adjacent heap.
+(def ^:private gerror-msg-off 8)
 
 (ffi/defcfn pixbuf-from-file-at-scale
   "gdk_pixbuf_new_from_file_at_scale" [:string :int :int :int :pointer] :pointer)
@@ -22,11 +24,12 @@
 (defn- read-gerror
   "If `slot` holds a non-null GError*, read and free its message; else nil."
   [slot]
-  (when-let [err (ffi/read slot :pointer 0)]
-    (let [msg-ptr (ffi/read err :pointer gerror-msg-off)
-          msg (when-not (ffi/null? msg-ptr) (ffi/ptr->string msg-ptr))]
-      (g-error-free err)
-      msg)))
+  (let [err (ffi/read slot :pointer 0)]
+    (when-not (ffi/null? err)
+      (let [msg-ptr (ffi/read err :pointer gerror-msg-off)
+            msg (when-not (ffi/null? msg-ptr) (ffi/ptr->string msg-ptr))]
+        (g-error-free err)
+        msg))))
 
 (defn load-image
   "Load `path` (JPEG/PNG/...) into a flat 0..1 double pixel buffer. If `max-side`
