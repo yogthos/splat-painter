@@ -5,8 +5,10 @@
   (:require [jolt.ffi :as ffi]))
 
 ;; GError layout on 64-bit: { guint32 domain; gint code; gchar* message; }.
-;; The message pointer is 8-byte aligned, so it sits at byte offset 16.
-(def ^:private gerror-msg-off 16)
+;; The message pointer is 8-byte aligned after the two 4-byte fields, so it
+;; sits at byte offset 8 (the struct is 16 bytes total). Offset 16 reads one
+;; pointer-width past the end of the struct into adjacent heap.
+(def ^:private gerror-msg-off 8)
 
 ;; (data, colorspace=0=RGB, has_alpha=1, bits_per_sample=8, width, height, rowstride, destroy_fn, destroy_data)
 (ffi/defcfn pixbuf-new-from-data "gdk_pixbuf_new_from_data"
@@ -22,11 +24,12 @@
 (defn- read-gerror
   "If `slot` holds a non-null GError*, read and free its message; else nil."
   [slot]
-  (when-let [err (ffi/read slot :pointer 0)]
-    (let [msg-ptr (ffi/read err :pointer gerror-msg-off)
-          msg (when-not (ffi/null? msg-ptr) (ffi/ptr->string msg-ptr))]
-      (png-error-free err)
-      msg)))
+  (let [err (ffi/read slot :pointer 0)]
+    (when-not (ffi/null? err)
+      (let [msg-ptr (ffi/read err :pointer gerror-msg-off)
+            msg (when-not (ffi/null? msg-ptr) (ffi/ptr->string msg-ptr))]
+        (png-error-free err)
+        msg))))
 
 (defn save-rgba-bottom-up!
   "Write `buf` (a raw pointer to iw*ih*4 RGBA bytes, origin bottom-left as from
@@ -39,14 +42,15 @@
       (throw (ex-info "png: gdk_pixbuf_new_from_data returned NULL" {})))
     (let [pb2     (pixbuf-flip pb 0)  ; vertical flip (horizontal=FALSE=0)
           errslot (ffi/alloc (ffi/sizeof :pointer))
-          ;; GError out-param must start NULL — ffi/alloc doesn't zero, and
-          ;; read-gerror below reads the slot even on success, so leftover garbage
-          ;; would be dereferenced as a GError*. Initialize to NULL.
+          ;; GError out-param must start NULL — ffi/alloc doesn't zero, and the
+          ;; GLib loader asserts *error == NULL before writing the real error.
           _       (ffi/write errslot :pointer 0 ffi/null)
-          ok      (pixbuf-savev pb2 path "png" ffi/null ffi/null errslot)]
-      (let [msg (or (read-gerror errslot) "unknown")]
-        (png-object-unref pb2)
-        (png-object-unref pb)
-        (ffi/free errslot)
-        (when (zero? ok)
-          (throw (ex-info (str "png: save failed: " msg) {:path path})))))))
+          ok      (pixbuf-savev pb2 path "png" ffi/null ffi/null errslot)
+          ;; Only consult the error slot when the save actually failed: on
+          ;; success pixbuf-savev leaves it NULL and read-gerror returns nil.
+          msg     (when (zero? ok) (or (read-gerror errslot) "unknown"))]
+      (png-object-unref pb2)
+      (png-object-unref pb)
+      (ffi/free errslot)
+      (when (zero? ok)
+        (throw (ex-info (str "png: save failed: " msg) {:path path}))))))

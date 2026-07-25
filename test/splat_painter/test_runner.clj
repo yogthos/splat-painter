@@ -6,6 +6,7 @@
             [splat-painter.layer-test]
             [splat-painter.seed-test]
             [splat-painter.image-test]
+            [splat-painter.png-test]
             [splat-painter.structure-test]
             [splat-painter.noise-test]
             [splat-painter.wavelet-test]))
@@ -25,6 +26,7 @@
                              'splat-painter.layer-test
                              'splat-painter.seed-test
                              'splat-painter.image-test
+                             'splat-painter.png-test
                              'splat-painter.structure-test
                              'splat-painter.noise-test
                              'splat-painter.wavelet-test)
