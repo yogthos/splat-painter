@@ -331,16 +331,17 @@
                   m))
          ;; A heavily-blurred copy of the tensor: the strong edges' orientation
          ;; DIFFUSES into the surrounding flat areas (tensor smoothing / voting), so
-         ;; flow-at gives, at a flat point, the direction of the nearby edges. This is
-         ;; the "edges seed the flow" field — strokes in low-detail regions follow the
-         ;; main features instead of an image-independent noise swirl.
+         ;; the diffused tensor carries, at a flat point, the direction of the nearby
+         ;; edges. This is the "edges seed the flow" field — strokes in low-detail
+         ;; regions follow the main features instead of an image-independent noise swirl.
          fr (max 3 (min 16 (quot (min Ht Wt) 3)))
          ^doubles fjxx (box-blur-2d jxx Ht Wt fr)
          ^doubles fjyy (box-blur-2d jyy Ht Wt fr)
          ^doubles fjxy (box-blur-2d jxy Ht Wt fr)
          ;; PRECOMPUTE the per-cell eigen fields once (theta/coherence/energy for the
-         ;; sharp tensor, theta/strength for the diffused flow) so orient-at / flow-at
-         ;; are cheap array samples in the hot per-splat loop, not per-splat atan2+sqrt.
+         ;; sharp tensor, theta/strength for the diffused flow) as flat arrays, so
+         ;; orient-at and seed.clj's direct :flow-theta / :flow-str reads are cheap
+         ;; samples in the hot per-splat loop, not per-splat atan2+sqrt.
          theta-a (double-array n) coh-a (double-array n) grad-a (double-array n)
          fth-a (double-array n) fstr-a (double-array n)]
      (dotimes [i n]
@@ -374,34 +375,3 @@
   (let [idx (grid-idx sfield x y)
         ^doubles theta (:theta sfield) ^doubles coh (:coherence sfield) ^doubles grad (:grad2 sfield)]
     {:theta (aget theta idx) :coherence (aget coh idx) :grad2 (aget grad idx)}))
-
-(defn edge-strength-fn
-  "Returns a cheap (fn [x y] -> [0,1]) reading a PRECOMPUTED normalized-gradient
-   edge-strength array at full-image coords — feeds splat-painter.grid/optimize, which
-   calls it ~1e6 times, so the per-call sqrt is done once here, not per call."
-  [sfield]
-  (let [H (:h sfield) W (:w sfield)
-        src-h (double (or (:src-h sfield) H)) src-w (double (or (:src-w sfield) W))
-        rx (/ (double H) src-h) ry (/ (double W) src-w)
-        ^doubles jxx (:jxx sfield) ^doubles jyy (:jyy sfield)
-        gmax (max (double (:gmax sfield)) 1e-12)
-        n (* H W)
-        es (double-array n)]
-    (dotimes [i n] (aset es i (min 1.0 (Math/sqrt (/ (+ (aget jxx i) (aget jyy i)) gmax)))))
-    (fn [x y]
-      (let [xi (clamp (long (Math/round (* (double x) rx))) 0 (dec H))
-            yi (clamp (long (Math/round (* (double y) ry))) 0 (dec W))]
-        (aget es (+ (* xi W) yi))))))
-
-(defn flow-at
-  "Sample the DIFFUSED tensor (heavily-blurred, so edge orientations propagate into
-   flat areas) at full-image coords (x,y). Returns {:theta θ :strength s}: θ is the
-   local flow direction seeded by the nearby edges, s ∈ [0,1] how strongly those
-   edges define it (near an edge → high; a truly featureless region → ~0, where the
-   caller falls back to a noise flow)."
-  [sfield x y]
-  (let [idx (grid-idx sfield x y)
-        ^doubles fth (:flow-theta sfield) ^doubles fstr (:flow-str sfield)]
-    (if (and fth fstr)
-      {:theta (aget fth idx) :strength (aget fstr idx)}
-      {:theta 0.0 :strength 0.0})))
