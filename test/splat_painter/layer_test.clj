@@ -104,3 +104,70 @@
       (reset! a 0)
       (is (= [:c4 :c2 :c3] (tex @v)))                           ; below=[] above=[c4,c2,c3]
       (is (= 0 @a)))))
+
+;; --- clear-layers! / on-image-loaded: the texture-leak + stack-reset paths ------
+;; area-atom is nil in this headless runner, so clear-layers! skips the GL
+;; make-current + delete path (it gates on @area-atom) and on-image-loaded's
+;; request-render! no-ops. The atom bookkeeping is what these two exercise.
+
+(deftest clear-layers-resets-stack-headlessly
+  (testing "clear-layers! resets layers-atom + active to 0 without touching GL"
+    (let [prev-layers @core/layers-atom
+          prev-active @core/active-layer-atom]
+      (reset! core/layers-atom [{:tex 1 :opacity 0.6 :settings [1]}
+                                {:tex 2 :opacity 0.5 :settings [2]}
+                                {:tex 3 :opacity 0.4 :settings [3]}])
+      (reset! core/active-layer-atom 2)
+      (#'splat-painter.core/clear-layers!)
+      (is (empty? @core/layers-atom))
+      (is (zero? @core/active-layer-atom))
+      (reset! core/layers-atom prev-layers)
+      (reset! core/active-layer-atom prev-active))))
+
+(deftest loading-an-image-drops-the-previous-stack
+  (testing "on-image-loaded clears a pre-existing committed layer stack (regression)"
+    ;; prepare-image runs for real on the 512x512 fixture (~2s): structure tensor,
+    ;; bilateral + box blurs, the wavelet map, the noise fields. Do not stub it.
+    (let [prev-snap   (core/snapshot-settings)
+          prev-layers @core/layers-atom
+          prev-active @core/active-layer-atom
+          prev-image  @core/image-atom
+          prev-size   @core/size-atom
+          prev-status @core/status-atom]
+      (reset! core/layers-atom [{:tex 1 :opacity 0.6 :settings [1]}
+                                {:tex 2 :opacity 0.5 :settings [2]}])
+      (reset! core/active-layer-atom 2)
+      (#'splat-painter.core/on-image-loaded "test/splat_painter/fixtures/eye.jpeg")
+      (is (empty? @core/layers-atom))
+      (is (zero? @core/active-layer-atom))
+      (is (some? @core/image-atom))
+      (core/restore-settings! prev-snap)
+      (reset! core/layers-atom prev-layers)
+      (reset! core/active-layer-atom prev-active)
+      (reset! core/image-atom prev-image)
+      (reset! core/size-atom prev-size)
+      (reset! core/status-atom prev-status))))
+
+(deftest failed-load-leaves-existing-layers-untouched
+  (testing "a failed load (catch branch) must not clear the committed layer stack"
+    ;; pins the constraint that clear-layers! runs only AFTER prepare-image succeeds:
+    ;; a bad path throws inside load/prepare, takes the catch branch, and the existing
+    ;; image + its layers survive (only status-atom is rewritten).
+    (let [prev-snap   (core/snapshot-settings)
+          prev-layers @core/layers-atom
+          prev-active @core/active-layer-atom
+          prev-image  @core/image-atom
+          prev-status @core/status-atom
+          seeded      [{:tex 1 :opacity 0.6 :settings [1]}
+                       {:tex 2 :opacity 0.5 :settings [2]}]]
+      (reset! core/layers-atom seeded)
+      (reset! core/active-layer-atom 1)
+      (#'splat-painter.core/on-image-loaded "test/splat_painter/fixtures/does-not-exist.jpeg")
+      (is (= seeded @core/layers-atom))                         ; stack survives a failed load
+      (is (= 1 @core/active-layer-atom))                        ; active index untouched
+      (is (some? (re-find #"failed to load" @core/status-atom)))
+      (core/restore-settings! prev-snap)
+      (reset! core/layers-atom prev-layers)
+      (reset! core/active-layer-atom prev-active)
+      (reset! core/image-atom prev-image)
+      (reset! core/status-atom prev-status))))
