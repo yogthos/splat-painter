@@ -132,6 +132,9 @@
   [:pointer :pointer :pointer] :pointer)
 (ffi/defcfn gtk-file-dialog-set-initial-name "gtk_file_dialog_set_initial_name"
   [:pointer :string] :void)
+;; glimmer-gl v0.0.3 doesn't bind glDeleteTextures, so declare it locally. Used by
+;; delete-layer-textures! to free committed-layer textures on drop/reset/replace.
+(ffi/defcfn gl-delete-textures "glDeleteTextures" [:int :pointer] :void)
 
 ;; --- render requests ---------------------------------------------------------
 ;; glimmer.ratom atoms aren't IRef-watchable, so we don't add-watch. Each slider's
@@ -201,6 +204,7 @@
 (defn- on-image-loaded [path]
   (try
     (let [img (prepare-image (image/load-image path 1024))]
+      (clear-layers!)               ; new file: drop the previous image's committed layers + free their textures
       (reset! image-atom img)
       (reset! image-path-atom path)
       ;; Size is the base (flat-region) stroke stdev; detail shrinks it locally. Seed
@@ -246,10 +250,11 @@
         (gtk-file-dialog-open dialog root ffi/null cb ffi/null)))))
 
 ;; --- save (offscreen render → glReadPixels → PNG) ----------------------------
-(defn- ensure-export-targets! [area iw ih]
+(defn- ensure-export-targets!
   "Lazily create an FBO + RGBA8 color texture in gl-state for export, resizing
    the texture to iw*ih on each call (needed when image size changes). Caches
    and reuses the FBO/texture across saves — no glDelete needed."
+  [area iw ih]
   (let [st   (get @gl-state area)
         fbo  (or (:export-fbo st)  (gl/gen-one gl/gl-gen-framebuffers))
         ctex (or (:export-tex st) (gl/gen-one gl/gl-gen-textures))]
@@ -713,6 +718,25 @@
   [layers j]
   (vec (concat (subvec layers 0 j) (subvec layers (inc j)))))
 
+(defn- delete-layer-textures!
+  "Free the GL texture objects of `entries` (committed layer maps). Caller must have
+   made the GL context current."
+  [entries]
+  (doseq [{:keys [tex]} entries :when (and tex (pos? (long tex)))]
+    (let [p (gl/write-ints [(int tex)])]
+      (gl-delete-textures 1 p)
+      (ffi/free p))))
+
+(defn- clear-layers!
+  "Drop every committed layer, freeing its GL texture, and reset the active index to 0.
+   No-ops on the GL side when no GLArea is realized, so headless callers are safe."
+  []
+  (when-let [a @area-atom]
+    (glx/make-current a)
+    (delete-layer-textures! @layers-atom))
+  (reset! layers-atom [])
+  (reset! active-layer-atom 0))
+
 (defn- commit-active!
   "Capture the live splat pass ALONE (:solo — transparent clear, no blits, splats at the
    fixed 0.9) offscreen at native res, upload it to a fresh RGBA8/LINEAR/CLAMP texture,
@@ -760,14 +784,15 @@
           iw       (int (:width img)) ih (int (:height img))
           prev-fbo (read-fbo-binding)]
       (glx/make-current area)
-      (commit-active!)
       (ensure-export-targets! area iw ih)
       (gl/gl-viewport 0 0 iw ih)
-      (gpu-draw! area iw ih iw ih)               ; the full composite (below + live + above)
-      (let [buf (ffi/alloc (* iw ih 4))]
-        (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
-        (reset! image-atom (prepare-image (rgba->image buf iw ih)))
-        (ffi/free buf))
+      (gpu-draw! area iw ih iw ih)               ; the full composite (below + live + above — live drawn ONCE)
+      (let [buf  (ffi/alloc (* iw ih 4))
+            _    (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
+            img' (rgba->image buf iw ih)]
+        (ffi/free buf)
+        (commit-active!)                         ; snapshot the live pass (needs the OLD image fields)
+        (reset! image-atom (prepare-image img')))
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))
       (reset! active-layer-atom (count @layers-atom))
@@ -797,6 +822,7 @@
           (restore-settings! settings)
           (reset! layer-opacity-atom (or opacity 0.6))
           (swap! layers-atom remove-layer j)
+          (delete-layer-textures! [target])   ; free the dropped layer's GL texture
           (reset! active-layer-atom j)
           ;; 3. rebuild the live pass's SOURCE image = everything painted below it.
           (if (zero? j)
@@ -820,14 +846,13 @@
           (request-render!))))))
 
 (defn- reset-layers!
-  "Drop every committed layer (texture objects are abandoned — gated out, not deleted),
-   reset the active index to 0, and reload the original image from disk (rebuilt fields,
-   fresh single-pass render)."
+  "Drop every committed layer (freeing each layer's GL texture), reset the active index
+   to 0, and reload the original image from disk (rebuilt fields, fresh single-pass
+   render)."
   []
   (if (empty? @layers-atom)
     (reset! status-atom "no layers to reset")
-    (do (reset! layers-atom [])
-        (reset! active-layer-atom 0)
+    (do (clear-layers!)
         (when @image-path-atom (on-image-loaded @image-path-atom)))))
 
 ;; Build the per-GLArea GL objects once on realize. Kept shallow (one let) so the
