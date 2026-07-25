@@ -411,6 +411,28 @@
    :variation (cur-var) :curvature @curvature-atom :contrast @contrast-atom
    :size-broad (cur-broad) :size-mid (cur-mid) :size-fine (cur-fine)})
 
+(defn field-tex-ids
+  "The per-image GL texture ids owned by a `fields` map (as produced by
+   gen/upload-fields!), in fixed allocation order. This is an explicit allow-list:
+   it excludes :perm (the shared Perlin texture, uploaded once by upload-perm!
+   and reused across images) and the non-texture entries (:dmax float, :dmap map,
+   the dim/src vectors, :H/:W). Only ids in this list may be freed on image swap
+   — deleting :perm corrupts every later generate!, and deleting :dmax (a long)
+   would release an unrelated texture id."
+  [fields]
+  (mapv fields [:detail :subject :noise :blur :blur-drift :blur-heavy :raw]))
+
+(defn- delete-field-textures!
+  "Free the per-image texture objects of `fields`. Caller must have made the GL
+   context current. No-op when `fields` is nil (first call, nothing to free)."
+  [fields]
+  (when fields
+    (let [ids (field-tex-ids fields)]
+      (when (pos? (count ids))
+        (let [p (gl/write-ints (mapv int ids))]
+          (gl-delete-textures (count ids) p)
+          (ffi/free p))))))
+
 (defn- ensure-gpu!
   "Lazily build the GPU-generation objects (gen program, buffer-render program, perm
    texture, transform-feedback buffer + query + VAO, texture-buffer view) and (re)upload
@@ -436,7 +458,8 @@
         img @image-atom
         gpu (if (identical? img (:fields-img gpu))
               gpu
-              (assoc gpu :fields (gen/upload-fields! img (:perm gpu)) :fields-img img))]
+              (do (delete-field-textures! (:fields gpu))   ; free outgoing per-image textures
+                  (assoc gpu :fields (gen/upload-fields! img (:perm gpu)) :fields-img img)))]
     (swap! gl-state assoc-in [area :gpu] gpu)
     gpu))
 
