@@ -126,7 +126,10 @@
         (let [x (quot i W) y (rem i W)
               dist (Math/sqrt (+ (* (- x cx) (- x cx)) (* (- y cy) (- y cy))))
               raw-l (grey-at raw W i)]
-          (if (and (< dark-tol raw-l (+ dark-tol 0.03))
+          ;; dark-GROUND pixels: the ground sits exactly at dark-tol, so this must be
+          ;; inclusive at the bottom. It was `(< dark-tol raw-l ...)`, which excluded
+          ;; every pixel, gave cnt=0, and made the whole halo test read 0.0 -> 0.0.
+          (if (and (<= raw-l (+ dark-tol 0.03))
                    (<= rlo dist rhi))
             (recur (inc i) (+ sum (- (grey-at field W i) raw-l)) (inc cnt))
             (recur (inc i) sum cnt)))))))
@@ -145,11 +148,20 @@
           ring  (fn [^doubles f rlo rhi] (mean-luma-lift-in-ring img f cx cy rlo rhi dark))]
       (let [before-near (ring heavy (+ r 1) (+ r 10))   ; ~10px outside the disc
             after-near  (ring out   (+ r 1) (+ r 10))
-            near-cap    1.0
+            ;; lifts are in 0..1 units, so the cap is luma/255. The old 1.0 was a
+            ;; luma-255 number applied to a 0..1 quantity and could never fail.
+            ;; 2/255. Measured: fixed gives 0.00074 (10x under), absolute-only gives
+            ;; 0.01675 (2.1x over) - so the test fails decisively if the relative
+            ;; term is lost, rather than by the 7% margin a 4/255 cap gave.
+            near-cap    (/ 2.0 255.0)
             before-far  (ring heavy 75 90)
             after-far   (ring out   75 90)]
         (println "HALO-BLEED near-subject: heavy +" before-near " -> edge-preserving +" after-near
                  "| far-field: heavy +" before-far " -> edge-preserving +" after-far)
+        ;; GUARD THE FIXTURE: a halo test whose fixture shows no halo passes against
+        ;; zero and would stay green with the fix reverted. Assert the precondition.
+        (is (> before-near (/ 12.0 255.0))
+            (str "fixture must actually exhibit the bleed; heavy lift was " before-near))
         (is (<= after-near near-cap)
             (str "near-subject lift removed to <= " near-cap ": got " after-near
                  " (was " before-near " on the heavy field)"))
