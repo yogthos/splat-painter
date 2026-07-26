@@ -160,44 +160,107 @@
   [lvl]
   (let [l (long lvl)] (cond (== l 1) 1.0 (== l 2) 0.55 (== l 3) 0.3 :else 0.0)))
 (defn- tier-mul
-  "Per-tier size multiplier from [broad mid fine] — the user's independent control
-   of each resolution band: loosen/blur the background (broad up) while keeping
-   small details focused (fine at or below 1)."
-  [muls lvl]
-  (let [l (long lvl)]
-    (double (cond (<= l 1) (nth muls 0) (<= l 3) (nth muls 1) :else (nth muls 2)))))
+  "Per-tier size multiplier from [broad mid fine], keyed on the level's ROLE not its
+   index. Coverage levels (0-1) take Broad (applied via bmul at emission, so smul
+   returns 1.0 for them). Detail levels (lvl>=2) split by their RANK among the detail
+   levels: the coarsest detail level (rank 0) carries BOTH Mid and Fine (Mid*Fine) so
+   neither dial is a no-op at the default 3-level ladder (where it is the only detail
+   level that admits); finer detail levels (rank>=1) take Fine. The OLD index key
+   handed muls[2] to lvl>=4, which the monotone ladder never reaches — Fine was dead.
+   `rank` is the 0-based position among detail levels (lvl 2 = rank 0)."
+  [muls rank]
+  (double (if (zero? (long rank))
+            (* (nth muls 1) (nth muls 2))
+            (nth muls 2))))
+
+(def ^:private dab-max
+  "Physical stdev (px) below which a level paints DABS instead of tracing chains.
+   A dab has no path, so it cannot wander or dry out — the only sane mark below the
+   scale at which the orientation field (a ~7px tensor average) carries usable
+   direction. Set to 1.2 so the DETAIL tier TRACES feature-following strokes rather
+   than dabbing: the feature-tracer (below) terminates on geometry, not on the
+   colour-drift guard that used to lift sub-dab-max chains into short dashes. The
+   min-paintable floor (min-phys 2.2) already keeps every emitted stroke above this,
+   so in practice nothing dabs today — the machinery stays for genuinely
+   sub-paintable levels if that floor is ever lowered."
+  1.2)
+
+;; --- feature-following tracer tunables (mirror the GLSL literals in gen.clj) ---
+;; Stroke length is guided by the FEATURE, not a count: a trace stops where the ridge
+;; dies or the tangent bends (a corner). These are the geometric/colour thresholds.
+(def ^:private max-segs 32)        ; the geometry-shader vertex cap; detail levels run to it and let geometry decide
+(def ^:private expected-segs 4)
+;; ^ the MEAN traced length of a feature-following stroke, and the single constant
+;; that now sets BOTH the fine tier's seed spacing and its budget term — they have to
+;; agree or the budget scale and the real splat count diverge. It is a measurement,
+;; not a preference: once the tracer stops at the feature boundary, chains are short,
+;; and spacing derived from the old nominal count (32, via the segs cap) left the fine
+;; tier at ~9.9k seeds when it needs ~35k. Swept 10/6/4 against the render: 10 (sp
+;; 8.70, nx 13866) stays soft, 6 (sp 6.74, nx 23110) is intermediate, 4 (sp 5.50, nx
+;; 34664) is where the camera strap, the phone edge and the lips come back. Re-measure
+;; this if the stop rules change — it is the mean stroke length they produce.
+(def ^:private edge-floor 0.10)    ; ridge-alive stop: the edge is dead below this, the feature has ended
+(def ^:private bend-cos 0.90)      ; bend-break: |dot(field-dir, prev-step)| below this (~26°/step) is a corner
+(def ^:private runaway 0.60)       ; chroma BACKSTOP only: the stroke has wandered into a foreign colour region
+
+(def ^:private dab-overlap
+  "Dab spacing as a multiple of the stroke stdev. A gaussian reads out to ~2σ, so at
+   2σ spacing about three dabs meet at any point — sparse enough that each mark stands
+   on its own, dense enough to cover. The chain spacing formula (1.25·√segs) collapses
+   to ~1.25σ for a 1-segment mark and packs them ~12 deep, which is mush."
+  2.0)
+
+(defn- dab-level?
+  "Does this level paint dabs rather than tracing chains? Only the DETAIL tiers
+   (lvl>=2) ever dab. Levels 0-1 are the COVERAGE tiers by role, not by size: their
+   job is an unbroken underpainting, and dab spacing (2σ) would thin level 1's grid
+   ~3x and open gaps in it."
+  [lvl ssz]
+  (and (>= (long lvl) 2) (< (double ssz) dab-max)))
 
 (defn- level-alpha
-  "Paint translucency per level — PROGRESSIVE REFINEMENT: broad layers are opaque
-   (coverage), each finer layer glazes more, letting the accumulated layers show
-   through so detail builds on the underpainting instead of scratching over it.
-   From level 3 up the layers OVERLAP (no subdivision handoff), so the fine tier
-   glazes light and the many stacked strokes MIX into a smooth mid→fine gradient
-   instead of one stroke owning each spot."
-  [lvl]
-  (let [l (long lvl)] (cond (<= l 1) 1.0 (<= l 3) 0.85 (<= l 5) 0.65 :else 0.55)))
+  "Paint translucency by PHYSICAL stroke size — progressive refinement: broad layers
+   are opaque coverage, mid layers glaze so detail builds on the underpainting rather
+   than scratching over it. DABS are near-opaque on purpose: at 1-2px they are placed
+   sparsely (see dab-overlap) so each mark must STAND ON ITS OWN. Glaze alpha there
+   just averages neighbours into mush — the exact failure that made fine detail soft."
+  [ssz]
+  (let [v (double ssz)]
+    (cond (>= v 8.0) 1.0
+          (>= v dab-max) 0.85
+          :else 0.95)))
 
 (defn- level-map-kind
-  "Which placement map a level reads — matched to the scale it paints: broad levels
-   the smoothed aggregate, mid levels the MID band map (face-feature frequencies),
-   the finest levels the sharp fine-band map."
-  [lvl]
-  (let [l (long lvl)] (cond (<= l 1) :detail (<= l 3) :mid :else :sharp)))
+  "Which placement map a level reads, matched to the scale it paints — keyed on
+   PHYSICAL size, not the level index. Index-keyed, a ladder that ends at level 2-3
+   never reached the :else branch, so the :sharp fine-band map — the one built to find
+   eye/text-scale structure — was NEVER CONSULTED and the finest tier placed off the
+   dimmer :mid band. Measured: the fine tier then put ~0 strokes on the face, so all
+   face detail came from the 4px broad tier and no amount of fine-tier tuning changed
+   anything."
+  [lvl ssz]
+  (if (<= (long lvl) 1)
+    :detail                     ; coverage tiers always place off the aggregate map
+    (let [v (double ssz)] (if (>= v 3.5) :mid :sharp))))
 (defn- raw-floor
-  "Colour-rawness floor per level: small strokes must paint faithful colour — a
-   half-blur blend at feature scale just softens the feature it exists to keep."
-  [lvl]
-  (let [l (long lvl)] (cond (<= l 1) 0.0 (<= l 3) 0.45 (<= l 5) 0.7 :else 0.85)))
+  "Colour-rawness floor by PHYSICAL stroke size: a small stroke must paint faithful
+   colour — a half-blur blend at feature scale just softens the feature it exists to
+   keep. Keyed on size, NOT the level index: once the monotone ladder ends at level
+   2-3 the index-keyed form handed the FINEST strokes mid-tier averaged colour
+   (t capped at 0.7 — 30% blur at exactly the scale that wants fidelity), which is
+   why small details read as unclear."
+  [ssz]
+  (let [v (double ssz)]
+    (cond (>= v 8.0) 0.0 (>= v 3.5) 0.45 (>= v 1.5) 0.7 :else 0.85)))
 (defn- spec-cap
-  "Ceiling on colour SPECIFICITY (the blur→raw blend t) per level — PROGRESSIVE
-   COLOUR refinement: the coherence-driven t formula would let a base daub on a
-   strong edge paint one raw pixel's colour across its whole σ (a blotch). Broad
-   layers stay AVERAGED, mid layers go halfway, and full specificity arrives only
-   with the fine detail levels — turning detail down degrades to a soft averaged
-   underpainting, never to misplaced specific colour."
-  [lvl]
-  (let [l (long lvl)] (cond (<= l 1) 0.35 (<= l 3) 0.7 :else 1.0)))
-
+  "Ceiling on colour SPECIFICITY (the blur→raw blend t) by PHYSICAL stroke size —
+   progressive colour refinement: a fat brush cannot place a pixel-specific highlight,
+   so broad layers stay AVERAGED and full specificity arrives only at feature scale.
+   Size-keyed for the same reason as raw-floor: index-keyed, the finest surviving
+   level was capped at 0.7 and painted 30% blur."
+  [ssz]
+  (let [v (double ssz)]
+    (cond (>= v 8.0) 0.35 (>= v 3.5) 0.7 :else 1.0)))
 ;; The PHYSICAL stroke stdev below which a level reads as a drawn LINE and earns liner
 ;; discipline (gentle ridge snap, direction momentum, line-hold, impasto body). A named
 ;; constant so the Clojure and the GLSL twin stay pinned to one value (the GS uses the
@@ -251,7 +314,7 @@
         ;; The grid uses bmin = min(1,b): the densest spacing any region needs.
         bmul    (double (nth tier-muls 0))
         bmin    (min 1.0 bmul)
-        smul    (fn [lvl] (if (<= (long lvl) 1) 1.0 (tier-mul tier-muls lvl)))
+        smul    (fn [lvl] (if (<= (long lvl) 1) 1.0 (tier-mul tier-muls (max 0 (- (long lvl) 2)))))
         ;; final nominal size floored at ~a pixel AFTER the tier multiplier: a tier
         ;; dial at 0.4 must make its layer finer, never reduce it to sub-pixel dust —
         ;; dusted mid/fine layers punch the gradation ladder out of the painting and
@@ -300,17 +363,16 @@
         ;; Stroke) pack denser or they pearl-string; at default Stroke (slen 1) = 1.
         ;; base overlap 0.65 (was 0.72): hash-random placement has gap variance a
         ;; lattice doesn't; slightly tighter spacing keeps coverage airtight.
-        ;; liner spacing scales with √min(segs,14), NOT the full nominal span: chains
-        ;; on busy or tightly curved contours die to dry-out well short of their span
-        ;; target, and spacing the seeds for the NOMINAL span left the survivors'
-        ;; actual coverage below overlap — contour bands broke into sparse hard
-        ;; dashes (the detached ring around the avatar's eyes). Seeds spaced for a
-        ;; ~14-segment survivor keep the band continuous; chains that DO reach full
-        ;; span simply overlap more, which is the handoff continuity we want. The
-        ;; extra k this costs at long segs flows into scale-f like any other demand.
+         ;; liner spacing keys off the NOMINAL chain length (expected-segs) — the SAME
+         ;; value k-of counts segments with — so the budget estimate and the real seed
+         ;; density stay consistent (k = expected-segs·f·area/sp², sp² ∝ expected-segs).
+         ;; Seeding for the full max-segs cap left the fine tier ~2.6σ apart and
+         ;; under-populated; ~10-seg spacing packs survivors to ~2.2σ and the render
+         ;; fills in. Chains that trace longer simply overlap more (the handoff
+         ;; continuity we want); the extra k flows into scale-f like any other demand.
         overlap (fn [lvl] (let [l (long lvl)
-                                cnt (if (liner? lvl) (min (segs-of lvl) 14) (seg-count lvl))
-                                stf (if (liner? lvl) 1.0 slen)]
+                                 cnt (if (liner? lvl) (min expected-segs 14) (seg-count lvl))
+                                 stf (if (liner? lvl) 1.0 slen)]
                             (cond (zero? l) 0.65
                                   (<= l 3)  (* 1.25 (Math/sqrt (* (double cnt) stf)))
                                   :else     (* 0.7  (Math/sqrt (* (double cnt) stf))))))
@@ -323,7 +385,7 @@
         ;; so their term is multiplied accordingly — the budget counts splats, not seeds.
         ;; Each fine level estimates its survivor fraction on ITS OWN map (aggregate vs
         ;; sharp fine-band — the same map it thresholds against when placing).
-        lvl-frac (fn [lvl] (detail-fraction dmap (level-map-kind lvl) (thresh lvl)))
+        lvl-frac (fn [lvl] (detail-fraction dmap (level-map-kind lvl (nsize lvl)) (thresh lvl)))  ; nominal size here — the whole budget pass is nominal-keyed
         ;; SUBDIVISION within the broad/mid tiers only: levels 1-2 hand cells off to
         ;; the next-finer level (exclusive fractions). From level 3 up the finer
         ;; levels OVERLAP instead of claiming — mid keeps painting under the fine
@@ -348,8 +410,11 @@
                          (and (<= (long lvl) 2) (< (long lvl) (dec nlev)))
                                                    (max 0.0 (- (lvl-frac lvl) (lvl-frac (inc (long lvl)))))
                          :else                     (lvl-frac lvl))
-                     sp (sp-of lvl 1.0)]
-                 (/ (* (double (segs-of lvl)) f area) (* sp sp))))
+                    sp (sp-of lvl 1.0)]
+                ;; budget on the NOMINAL expected traced length (expected-segs), NOT the
+                ;; max-segs cap — actual length is data-dependent (geometry decides), so
+                ;; the estimate is approximate by construction. segs=32 here would blow it up.
+                (/ (* (double expected-segs) f area) (* sp sp))))
         Kc (reduce + 0.0 (map k-of (range 0 (min nlev 4))))
         Kf (if (> nlev 4) (reduce + 0.0 (map k-of (range 4 nlev))) 0.0)
         scale-c (max 1.0 (Math/sqrt (/ Kc budget)))
@@ -393,21 +458,35 @@
         ;; identical segs/stepf/ovl/sp from the same ssz. ldisc? is the PHYSICAL liner
         ;; predicate (liner-scale?): chain length keys on stdev, not the level index.
         phys-spec (fn [lvl ssz]
-                    (let [ldisc? (liner-scale? lvl ssz)
-                          ramp (max 0.0 (min 1.0 (/ (- 2.6 ssz) 1.2)))
-                          ;; ROUND 5a — bound the ASPECT RATIO (mirror spec): a 1px
-                          ;; stroke drew a 21px line (22:1 hair) that outran soft
-                          ;; photographic features. span = min(28·slen·ramp, span-k·ssz),
-                          ;; span-k = 12.0, so a 1px stroke draws ≤12px and a 2.5px
-                          ;; stroke is still bounded by the 28px term. `ramp` + the
-                          ;; seg-count floor / min-32 clamp are unchanged.
-                          span (min (* 28.0 slen ramp) (* 12.0 ssz))
-                          segs (if ldisc?
-                                 (max (seg-count lvl)
-                                      (min 32 (long (Math/round (/ span (* (step-frac lvl) ssz))))))
-                                 (seg-count lvl))
+                    (if (dab-level? lvl ssz)
+                      ;; DAB TIER. Below dab-max the orientation field has no
+                      ;; information at the stroke's own scale, so a traced chain
+                      ;; wanders (waviness) and its colour-drift guard lifts it after
+                      ;; 2-4 segments (short disjointed dashes). A single oriented dab
+                      ;; has no path: it cannot wander and cannot dry out.
+                      ;; Spacing is dab-overlap·σ, NOT the chain form. The chain
+                      ;; spacing carries a √segs factor that, applied to a 1-segment
+                      ;; mark, packs dabs ~1σ apart — ~12 gaussians overlapping every
+                      ;; point, which averages them into mush (measured: that is why
+                      ;; the first dab experiment went soft). At 2σ spacing roughly
+                      ;; three dabs meet at a point, so each mark still reads as its
+                      ;; own stroke while coverage stays continuous.
+                      {:segs 1 :stepf 0.0 :sp (* dab-overlap ssz)}
+                      (let [ldisc? (liner-scale? lvl ssz)
+                          detail? (>= (long lvl) 2)
+                          ;; FEATURE TRACER (supersedes Round 5a): detail tiers run to
+                          ;; max-segs and let the GEOMETRY (ridge dies / tangent bends)
+                          ;; decide where to stop — never a fixed span, never a count.
+                          ;; Broad/coverage tiers (0-1) keep the short coverage-stroke
+                          ;; table. Actual traced length is data-dependent; the budget
+                          ;; estimate (k-of) uses expected-segs, not this cap. SEED
+                          ;; SPACING keys off expected-segs too (not max-segs): seeding
+                          ;; for the max-segs cap left the fine tier ~2.6sigma apart and
+                          ;; under-populated; ~10-seg spacing packs survivors to ~2.2sigma.
+                          segs (if detail? max-segs (seg-count lvl))
                           stepf (* (step-frac lvl) (if ldisc? 1.0 slen))
-                          ovl (let [cnt (if ldisc? (min segs 14) (seg-count lvl))
+                          ovl (let [cnt (if ldisc? (min (if detail? expected-segs segs) 14)
+                                              (seg-count lvl))
                                     stf (if ldisc? 1.0 slen)]
                                 (cond (zero? (long lvl)) 0.65
                                       (<= (long lvl) 3) (* 1.25 (Math/sqrt (* (double cnt) stf)))
@@ -415,13 +494,28 @@
                           sp (if (<= (long lvl) 1)
                                (* ovl (scale-of lvl) bmin (lsize lvl))
                                (* ovl ssz))]
-                      {:segs segs :stepf stepf :sp sp}))
+                        {:segs segs :stepf stepf :sp sp})))
         ;; ADMISSION coarse→fine: keep a level only if it is meaningfully finer than the
         ;; previous (keep-ratio) AND the budget affords its clamped survivor demand. The
         ;; physical ssz is clamped to step-ratio×prev so the ladder is strictly monotone,
         ;; floored at min-phys (never sub-pixel dust). Dropping a level drops every finer
         ;; one too — a monotone ladder the budget cannot reach simply ends earlier.
-        min-phys   0.6
+        ;; MIN PAINTABLE STROKE. A stroke below ~1.4px stdev does not read as a mark,
+        ;; it reads as a scratch: the render shader already eases hardness back to a
+        ;; pure gaussian below 2.5px because anything thinner aliases. At Size 6 with
+        ;; the tier dials at 0.4 the nominal ladder asks for 0.6px and 0.3px strokes;
+        ;; floored at 0.6 those became two hairline levels covering just 6% and 14% of
+        ;; the image — sparse, aligned, alpha ~0.6 marks that scratch the underpainting
+        ;; instead of building a surface (the contour thatch). Clamping UP to the
+        ;; minimum paintable size instead keeps the detail and loses the thatch: sp is
+        ;; derived from the clamped ssz (phys-spec below), so seed count falls as
+        ;; (ssz/min-phys)² and the ink is preserved at a paintable scale. This is a
+        ;; no-op wherever the ladder already lands above 1.4px (any default-ish Size).
+        ;; Defect A: lowered 2.2 -> 1.4 so the Mid/Fine dials can MOVE the detail level
+        ;; (at 2.2 it pinned at exactly 2.20 and both dials were dead). The redundancy
+        ;; drop above still prevents two levels piling here (the original thatch), so a
+        ;; single 1.4px detail level reads as a soft glaze, not a scratch-field.
+        min-phys   1.4
         step-ratio 0.7
         keep-ratio 0.95
         ssz0  (* (scale-of 0) (nsize 0))
@@ -442,7 +536,14 @@
                            {:keys [segs sp]} (phys-spec lvl ssz)
                            cost (/ (* (double segs) (lvl-frac lvl) area) (* sp sp))
                            fine? (>= lvl broad-end)]
-                       (if (and fine? (or (>= ssz (* keep-ratio prev)) (> cost rem)))
+                       ;; REDUNDANCY drop applies at every level: once min-phys clamps
+                       ;; two levels to the same physical size (Size 6 + tiers 0.4 puts
+                       ;; both 2 and 3 on the floor) the finer one is a duplicate pass,
+                       ;; not extra detail. Dropping it cannot coarsen anything — it is
+                       ;; the same size as its parent. The BUDGET drop stays fine-tier
+                       ;; only, so raising Detail still never coarsens levels 0-3.
+                       (if (or (>= ssz (* keep-ratio prev))
+                               (and fine? (> cost rem)))
                          acc                                  ; drop this + every finer
                          (recur (inc lvl) ssz (if fine? (- rem cost) rem)
                                 (conj acc [(long lvl) ssz]))))))
@@ -450,19 +551,66 @@
         ;; order == CPU emission order == paint order. :lvl stays the ORIGINAL index so
         ;; both paths' tiering (liner?, map-kind, raw-floor, …) still keys on it; :nlev
         ;; becomes the ADMITTED count (the GS decodes exactly that many slots).
+        ;; BUDGET CAP on candidate density: the min-phys floor pins the finest levels
+        ;; at a FIXED px spacing that does NOT scale with the budget, so at low counts
+        ;; their candidate pool (area/sp^2) swamps the target and the Splats slider
+        ;; stops biting (count 1000 emitted ~6330). Cap the DETAIL tiers' (lvl>=2)
+        ;; candidate count so their candidate pool fits the budget left after the
+        ;; coverage tiers (0-1). Coverage levels keep full density so the base never gaps;
+        ;; hashed positions mean a thinned nx is still white noise (a prefix of hashed
+        ;; indices), so no lattice returns. expected-segs still drives BOTH spacing (ovl)
+        ;; and the k-of budget term -- this cap is layered on top, it does not change either.
+        ;;
+        ;; DEMAND counts survivors x emitted-segments for COVERAGE but the FULL candidate
+        ;; pool x emitted-segments for DETAIL. Two earlier attempts got this wrong:
+        ;;   (1) charging the base for CANDIDATES over-stated it ~6x at Broad<1 (bmin<1
+        ;;       densifies the grid but thins survivors by bmin^2), which starved the
+        ;;       detail tier's share 22x at 600k and erased the strap/glasses detail; so
+        ;;       coverage demand uses the bmin^2-thinned surv-frac.
+        ;;   (2) charging detail for lvl-frac SURVIVORS under-stated it ~20x at low budgets
+        ;;       (lvl-frac is a point estimate at the FULL threshold; the dithered
+        ;;       threshold drops to 0.75x and bilinear sampling lets far more candidates
+        ;;       through), so the cap never fired and count=1000 still emitted 6330; so
+        ;;       detail demand uses the full candidate pool -- the honest upper bound on a
+        ;;       textured region where survival is high. This over-predicts detail at low
+        ;;       budgets (fires the cap, which is the point) and is accurate at high ones.
+        surv-frac (fn [lvl]
+                    (cond (zero? (long lvl)) (* einv bmin bmin)
+                          (== (long lvl) 1)  (* bmin bmin
+                                               (if (< 1 (dec nlev))
+                                                 (max 0.0 (- (lvl-frac 1) (lvl-frac 2)))
+                                                 (lvl-frac 1)))
+                          (and (<= (long lvl) 2) (< (long lvl) (dec nlev)))
+                                             (max 0.0 (- (lvl-frac lvl) (lvl-frac (inc (long lvl)))))
+                          :else              (lvl-frac lvl)))
+        demand    (fn [lvl ssz]
+                    (let [{:keys [sp]} (phys-spec lvl ssz)
+                          nx (Math/ceil (/ area (* sp sp)))
+                          detail? (>= (long lvl) 2)
+                          ;; COVERAGE: bokeh-thinned survivors (bmin^2). DETAIL: full
+                          ;; candidate pool (lvl-frac under-predicts dithered survival).
+                          surv (if detail? 1.0 (surv-frac lvl))
+                          segs-per-seed (if detail? (double expected-segs)
+                                                 (double (seg-count lvl)))]
+                      (* (double nx) (double surv) segs-per-seed)))
+        cov-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (< (long lvl) 2) (demand lvl ssz) 0.0)) admitted))
+        det-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (>= (long lvl) 2) (demand lvl ssz) 0.0)) admitted))
+        det-budget (max (* 0.1 (double budget)) (- (double budget) cov-demand))
+        cand-thin  (if (> det-demand det-budget) (/ det-budget det-demand) 1.0)
         levels (loop [rem (rseq admitted) off 0 out []]
                  (if (empty? rem)
                    out
                    (let [[lvl ssz] (first rem)
                          lvl (long lvl)
                          {:keys [segs stepf sp]} (phys-spec lvl ssz)
-                         nx (long (Math/ceil (/ area (* sp sp))))]
+                         raw-nx (long (Math/ceil (/ area (* sp sp))))
+                         nx (long (if (>= lvl 2) (Math/ceil (* (double raw-nx) (double cand-thin))) raw-nx))]
                      (recur (rest rem) (+ off nx)
                             (conj out {:lvl lvl :ssz ssz :sp sp :th (thresh lvl)
                                        :nx nx :ny 1 :offset off
                                        :segs segs :stepf stepf
-                                       :bendf (bend-frac lvl) :map-kind (level-map-kind lvl)
-                                       :traw (raw-floor lvl)})))))]
+                                       :bendf (bend-frac lvl) :map-kind (level-map-kind lvl ssz)
+                                       :traw (raw-floor ssz)})))))]
     {:nlev (clojure.core/count levels) :warp warp :scale scale :levels levels
      :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))}))
 
@@ -475,9 +623,9 @@
    snap each stroke traces PARALLEL to the line at its own offset and a crisp
    1px line renders as a wobbly multi-strand braid.
    `gain` damps the corrector: the edge map is texel-quantized, so the full
-   parabola step jitters. The SEED snap uses 0.65 (converge onto the ridge);
-   liner-chain STEPS use a gentler gain — a strong per-step lateral corrector
-   fought the direction momentum and scalloped thin traced lines into wobble."
+   parabola step jitters. The SEED snap uses 0.65 (one-shot converge onto the
+   ridge); liner-chain STEPS use 0.85 — a strong per-step corrector keeps a
+   traced contour glued to its ridge instead of drifting parallel into a braid."
   [dmap nf x y h hd wd gain]
   (let [[th _] (sample-fields nf x y)
         nx (- (Math/sin th)) ny (Math/cos th)
@@ -556,9 +704,10 @@
       ;; melted bokeh daubs ROUND OFF (coherence → 0 kills the elongation and pulls
       ;; the colour toward the smooth blur): an elongated needle on a soft gradient
       ;; always reads as a directional streak, however faithful its colour.
-      [[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap lvl)]])
-    (let [coh-seed (double (second (sample-fields nf x y)))
-          lal  (level-alpha lvl)
+      ;; base tier returns the SAME [rows reason] shape as the traced branch — a bare
+      ;; row vector here made the call site read one row as the whole row list.
+      [[[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap ssz)]] :base])
+    (let [          lal  (level-alpha ssz)
           ;; fine strokes snap onto the edge ridge at the seed and after every step
           ;; (predictor: tangent step; corrector: ridge snap) — the stroke GLUES to
           ;; the line it is painting instead of braiding beside it.
@@ -569,20 +718,21 @@
           ;; accent chain must follow the original detail exactly — momentum,
           ;; gentle ridge snap, line-hold, no Perlin — or it reads as waviness.
           liner? (liner-scale? lvl ssz)
-          ;; ROUND 5b — chain length follows measured structure (mirror gen): a "line"
-          ;; only exists where the structure tensor is coherent; on smooth skin or
-          ;; bokeh it does not, so a liner seed traces FEWER segments. The nominal
-          ;; segs (from layer-params' span target) ramps from 20% (coh<=0.30, near
-          ;; flat) to 100% (coh>=0.60). Non-liner levels are untouched, and the
-          ;; layer-params BUDGET estimate stays on the nominal segs (shorter actual
-          ;; chains spend less than estimated — errs conservative).
-          coh-w   (max 0.0 (min 1.0 (/ (- coh-seed 0.30) 0.30)))
-          segs-eff (if liner?
-                     (max 2 (long (Math/round (* (double segs) (+ 0.2 (* 0.8 coh-w))))))
-                     (long segs))
-          kmax (dec segs-eff)
-          ;; liner chains correct gently mid-stroke (see edge-snap's gain doc)
-          sgain (if liner? 0.35 0.65)
+          ;; NO tensor-coherence gate on chain length. It was tried (ramp segs 20%→100%
+          ;; over coherence 0.30→0.60, on the theory that a "line" only exists where the
+          ;; tensor is coherent) and it does not work, because coherence does not
+          ;; discriminate: a smooth gradient is rank-1, i.e. perfectly ORIENTED, so bokeh
+          ;; scores nearly as coherent as a hard contour. Measured over this repo's test
+          ;; portrait — strong edge (edge-at>0.50) median coherence 0.95, FLAT (<0.08)
+          ;; median 0.72, only 13.5% of flat points below 0.30. The gate was a no-op
+          ;; where it was meant to act: removing it moved the render by 0.05/255.
+          ;; A chain-length gate needs a signal that separates the two populations;
+          ;; LINE-HOLD (the level's own placement map) already does that job per step.
+          kmax (dec (long segs))
+          ;; liner chains correct AGGRESSIVELY mid-stroke: the in-trace ridge corrector
+          ;; runs at 0.85 (was 0.35) to keep a traced contour glued to its ridge instead
+          ;; of drifting parallel into a braid. The SEED snap stays 0.65 (one-shot).
+          sgain (if liner? 0.85 0.65)
           ;; the GEOMETRY snaps to the ridge, but the COLOUR samples the pre-snap
           ;; position: on-ridge colour is the two sides' mix — darker than either —
           ;; and painted along a silhouette it reads as a drawn OUTLINE. Pre-snap
@@ -670,206 +820,142 @@
           ;; on the razor-sharp bilateral paint field any probe wobble across a
           ;; boundary trips the lift instantly and dashes contour chains into beads
           [hr hg hb0] (sample-arr blurd-px iw ih (+ cx0 bax) (+ cy0 bay))]
-      (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0
-             pb (sample-arr blur-px iw ih x y) racc 0.0 acc []]
-        (if (or (> k kmax) (< fade 0.15))
-          acc
-          (let [;; TWO-TIER dry-out. Gradual drift DRIES the brush (×0.4) — abrupt
-                ;; ends left broken dashes, and liner strokes (lvl≥4) tolerate a
-                ;; little more drift (0.3) since on-ridge blur shifts along a lit
-                ;; contour. But a LARGE mismatch (>0.45) means the stroke has
-                ;; EXITED its colour region — a chain tangentially escaping a
-                ;; curved silhouette would paint its dark brush-load into the
-                ;; background (the halo of black lines hovering over hair) — so
-                ;; the painter LIFTS the brush: fade 0, and the guard below stops
-                ;; the chain BEFORE this segment is emitted.
-                ;; the broad tier lifts IMMEDIATELY on any real colour change (0.18):
-                ;; its chains are opaque underpainting at the largest sizes — one
-                ;; escaped segment paints a huge wrong-colour cloud past a silhouette
-                ;; (the pale ghost lump over the crown), so coverage strokes never
-                ;; carry paint across a boundary; smooth gradients stay under 0.18.
-                ;; LINER chains lift HARD at 0.32: a long chain escaping a dark
-                ;; contour onto light ground reads the r2-blurred drift field a
-                ;; step or two late, and at the old 0.45 threshold each escape
-                ;; painted several bodied dark segments (the scribbles around
-                ;; tightly curved contours once chains got long).
-                fade (if (pos? k)
-                       (let [[br bg bb] (sample-arr blurd-px iw ih (+ px bax) (+ py bay))
-                             dmx (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0)))]
-                         (cond (> dmx (cond (<= (long lvl) 1) 0.18 liner? 0.32 :else 0.45)) 0.0
-                               (> dmx (if liner? 0.2 0.22)) (* fade (if liner? 0.35 0.4))
-                               :else fade))
-                       fade)
-                 ;; PATH-COLOUR ROUGHNESS (liner): the drift check reads the forgiving box field,
-                 ;; which dilutes a 1-3px feature's contrast below its thresholds at liner scale —
-                 ;; chains snapped onto a fine feature carried its ink across neighbouring
-                 ;; micro-regions (the detail-area noise). Accumulate the SHARP bilateral's
-                 ;; per-step change along the painted path: a chain crossing features churns
-                 ;; (portrait feature bands ~0.7/span) and dries out; a chain riding one side of
-                 ;; a clean contour stays stable (line-art contours ~0.04/span) and keeps its
-                 ;; full span — the thatch fix is preserved exactly where it was won.
-                 rcb  (if (and (pos? k) liner?) (sample-arr blur-px iw ih px py) pb)
-                 racc1 (if (and (pos? k) liner?)
-                         (let [d (max (Math/abs (- (double (rcb 0)) (double (pb 0))))
-                                      (Math/abs (- (double (rcb 1)) (double (pb 1))))
-                                      (Math/abs (- (double (rcb 2)) (double (pb 2)))))]
-                           (+ (double racc) (double d)))
-                         racc)
-                 fade (if (and (pos? k) liner?)
-                        (cond (> racc1 0.35) 0.0
-                              (> racc1 0.2)  (* (double fade) 0.5)
-                              :else fade)
-                        fade)
-                 [th coh] (sample-fields nf px py)
-                ;; follow the line only while there IS a line: when local coherence
-                ;; collapses (busy texture, letter junctions) the liner stroke runs
-                ;; dry fast — long chains wandering through dense detail smear it.
-                ;; …but a strong edge under the brush keeps the line alive: real
-                ;; ink lines push THROUGH junctions (glasses frame crossing a brow),
-                ;; where coherence dips while edge energy stays high.
-                fade (if (and (pos? k) liner? (< coh 0.35)
-                              (< (wavelet/edge-at dmap px py) 0.5))
-                       (* fade 0.5)
-                       fade)
-                ;; LINE-HOLD: a liner stroke exists to trace the fine structure it
-                ;; was seeded on. When ITS OWN placement map under the brush falls
-                ;; below the level's own placement threshold, the stroke has WALKED
-                ;; OFF its line — a chain escaping a silhouette tangentially would
-                ;; drag its bodied paint into the featureless background (the ghost
-                ;; tendrils around every contour) — so the painter lifts the brush.
-                ;; `gainv` is the level's full placement gain (subject gate × Broad
-                ;; bokeh gate), so hold matches placement exactly.
-                fade (if (and (pos? k) liner?)
-                       (let [mv (* (map-at dmap mkind px py) (double gainv))]
-                         (cond (< mv (* 0.35 (double lth))) 0.0
-                               (< mv (* 0.7  (double lth))) (* fade 0.5)
-                               :else fade))
-                       fade)]
-           (if (< fade 0.15)
-            acc                                     ; brush lifted — emit nothing
-            (let [t   (/ (double k) (double kmax))
-                ;; IMPASTO body: ON a strong edge the fine liner strokes carry nearly
-                ;; full paint — the contour is defined by opaque thin lines whose soft
-                ;; shoulders blend, not by translucent glazes that let the mixed-colour
-                ;; underpainting bleed through as a halo. Off-edge texture strokes keep
-                ;; the light glaze and mix with the layers beneath.
-                ;; the body follows the SURROUNDING detail density too: a bodied
-                ;; line at full opacity on soft ground reads as pen-on-watercolour;
-                ;; sparse-detail areas get gentler, more gradual contour marks.
-                body (* (if liner?
-                          (min 1.0 (max 0.0 (/ (- (wavelet/edge-at dmap px py) 0.25) 0.45)))
-                          0.0)
-                        (+ 0.4 (* 0.6 (double sgate)))
-                        ;; SOFT RAMP: do not draw an opaque line along a gradient — a ramp
-                        ;; has no meeting line, so the impasto body drops to a light glaze
-                        ;; (mirror gen). Crisp/thin-line cases keep full body.
-                        (if soft-ramp? 0.35 1.0))
-                lal2 (+ lal (* (- 0.9 lal) body))
-                ;; BOTH-ENDS taper: a quick lift-on at the head (the brush lands thin
-                ;; and light, swells to full over the first ~18%) on top of the existing
-                ;; longer dry-out at the tail — so the mark tapers at BOTH ends like a
-                ;; real brushstroke, not just the tail. smoothstep = the same cubic the
-                ;; GPU's smoothstep() mirrors. The LINER tier (lvl≥4) keeps only a hint
-                ;; of it: a thin line is drawn by several overlapping chains handing
-                ;; off, and strong per-chain taper turns the handoffs into a lumpy
-                ;; string of tadpoles instead of one continuous rod.
-                hw  (let [u (min 1.0 (/ t 0.18)) s (* u u (- 3.0 (* 2.0 u)))]
-                      (if liner? (+ 0.8 (* 0.2 s)) (+ 0.55 (* 0.45 s))))
-                ha  (let [u (min 1.0 (/ t 0.15)) s (* u u (- 3.0 (* 2.0 u)))]
-                      (if liner? (+ 0.75 (* 0.25 s)) (+ 0.5 (* 0.5 s))))
-                sz  (* ssz (- 1.0 (* 0.45 t (Math/sqrt t))) hw)  ; width tapers at both ends
-                al  (* lal2 fade (- 1.0 (* 0.65 t t)) ha)        ; alpha: lift-on × glaze × dry-out
-                ;; the brush-load RE-MIXES with the canvas as the stroke travels:
-                ;; the colour-sample point slides up to 35% from the head toward
-                ;; the current position, so long strokes grade into their
-                ;; surroundings instead of carrying one colour to a hard break.
-                ;; MELT (broad tier, bokeh): at high Broad the flat-region chains
-                ;; re-mix much harder — a long chain carrying one brush-load across
-                ;; a smooth gradient reads as a feathery streak on the wash; melted
-                ;; strokes keep re-loading the local colour and disappear into it.
-                wsl (cond soft-ramp?              1.0     ; SOFT RAMP: re-load the LOCAL colour at each segment — a gradient has no meeting line to carry
-                          liner?                  (* 0.35 t)
-                          (pos? (double melt))    (* 0.85 (double melt) t)
-                          :else                   0.0)
-                acc (conj acc [px py sz D sn tn al th (* coh (- 1.0 (double melt))) hb
-                               (+ cx0 bax (* wsl (- px cx0))) (+ cy0 bay (* wsl (- py cy0)))
-                               traw (spec-cap lvl)])
-                ;; step: along the local tangent, sign-continuous with the previous step,
-                ;; bent by low-frequency Perlin scaled by this LEVEL's curvature share —
-                ;; broad strokes curl freely, fine marks stay faithful to the edge.
-                ;; the Perlin bend is GATED by coherence: a straight, strongly
-                ;; oriented edge (coh→1) is traced straight — wobble belongs to
-                ;; flow regions, not to lines. It is ALSO gated by physical size
-                ;; (zero below 2.5px, full past 5px): small strokes follow the
-                ;; original detail exactly, whichever level painted them.
-                ;; AND gated by the wavelet edge map: a chain riding a REAL edge
-                ;; must trace it straight whatever its size, so the bend fades to
-                ;; zero past edge-at 0.3 and a finger/cloth-fold contour is not
-                ;; woven off the line.
-                ;; the Perlin sample is offset by a per-SEED phase (bph): the bare
-                ;; spatial field made every chain through a region wave IN PHASE,
-                ;; reading as a regular ~20px fabric-like weave on mid strokes — a
-                ;; phase per seed decorrelates neighbours into natural wobble.
-                bend (* (double curvature) 0.9 (double bendf)
-                        (min 1.0 (max 0.0 (/ (- (double ssz) 2.5) 2.5)))
-                        (- 1.0 (* 0.7 coh))
-                        (- 1.0 (min 1.0 (max 0.0 (/ (- (wavelet/edge-at dmap px py) 0.3) 0.3))))
-                        (- (noise/noise2 (+ (* 0.05 px) (* 89.0 (double bph)))
-                                         (+ (* 0.05 py) (* 57.0 (double bph)))) 0.5))
-                cb (Math/cos bend) sb (Math/sin bend)
-                dx0 (Math/cos th) dy0 (Math/sin th)
-                sgn (if (zero? k)
-                      (double dirsign)
-                      (if (neg? (+ (* dx0 dxp) (* dy0 dyp))) -1.0 1.0))
-                dx1 (* sgn dx0) dy1 (* sgn dy0)
-                dx (- (* cb dx1) (* sb dy1)) dy (+ (* sb dx1) (* cb dy1))
-                ;; DIRECTION MOMENTUM: a hand-pulled stroke has inertia — re-deciding
-                ;; direction from the noisy field every step turns thin traced lines
-                ;; wavy. Liner strokes carry 65% of the previous step's direction and
-                ;; plow straight through junctions where the field goes incoherent.
-                [dx dy] (if (and liner? (pos? k))
-                          (let [mx (+ (* 0.35 dx) (* 0.65 dxp))
-                                my (+ (* 0.35 dy) (* 0.65 dyp))
-                                ml (Math/sqrt (+ (* mx mx) (* my my)))]
-                            (if (> ml 1e-6) [(/ mx ml) (/ my ml)] [dx dy]))
-                          [dx dy])
-                ;; the Stroke slider acts through layer-params now: on LINER levels it
-                ;; extends the chain SPAN (segs), on broad/mid it scales the STEP (stepf
-                ;; already carries slen). Both loops consume stepf as-is.
-                L  (* ssz (double stepf))
-                ;; TURN-KILL: when the field wants to turn sharper than a liner can
-                ;; follow (|dot| of the field direction with the previous step under
-                ;; cos ~35°), the chain has hit a CORNER or junction — long chains
-                ;; that plowed through on momentum flew off tangentially at every
-                ;; pointed contour (eye corners) and scribbled their dark load onto
-                ;; the ground. A draughtsman lifts at corners; the brush dries fast.
-                fade (if (and liner? (pos? k)
-                              (< (Math/abs (+ (* dx0 dxp) (* dy0 dyp))) 0.82))
-                       (* fade 0.3)
-                       fade)]
-            (let [nx0 (max 0.0 (min hd (+ px (* L dx))))
-                  ny0 (max 0.0 (min wd (+ py (* L dy))))
-                  [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd sgain) [nx0 ny0])
-                  ;; side offset along the stroke's OWN motion perpendicular — the
-                  ;; path is a stable frame; re-sampling θ at every step let field
-                  ;; noise wobble the offset into a wavy line.
-                  [nx2 ny2] (if (zero? (double side))
-                              [nx1 ny1]
-                              [(max 0.0 (min hd (+ nx1 (* sidem 0.55 ssz (- dy)))))
-                               (max 0.0 (min wd (+ ny1 (* sidem 0.55 ssz dx))))])]
-              (recur (inc k) nx2 ny2 dx dy fade rcb racc1 acc))))))))))
+      (let [traced (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
+                     (if (> k kmax)
+                       [acc :cap]
+                       (let [[th coh] (sample-fields nf px py)
+                             dx0 (Math/cos th) dy0 (Math/sin th)
+                             ev  (wavelet/edge-at dmap px py)
+                             detail? (>= (long lvl) 2)
+                             ;; FEATURE-FOLLOWING TRACER: a stroke ends where the FEATURE
+                             ;; ends or turns — the way a person paints (the top of an eye is
+                             ;; one line, the bottom another; a finger contour one long wavy
+                             ;; line). These GEOMETRIC stops are a CLEAN break: no segment is
+                             ;; emitted at the break, so a contour chunks into the strokes a
+                             ;; draughtsman draws. They replace the old fixed-span cap and the
+                             ;; TURN-KILL fade — length now follows the feature — and apply to
+                             ;; ALL detail tiers (lvl>=2), not just liners. (mirror gen.)
+                             geo (cond
+                                   (and detail? (pos? k) (< ev edge-floor)) :ridge
+                                   (and detail? (pos? k) (< (Math/abs (+ (* dx0 dxp) (* dy0 dyp))) bend-cos)) :corner
+                                   :else nil)]
+                         (if geo
+                           [acc geo]
+                           (let [;; COLOUR is a BACKSTOP, not a stop signal. Along a real
+                                 ;; feature the colour SHOULD change, so the two-tier dry-out
+                                 ;; and the path-roughness (racc) accumulator — which fired
+                                 ;; after 2-4 segments in detailed areas — WERE the "short
+                                 ;; disjointed lines" artifact. Detail tiers keep only a HARD
+                                 ;; stop at `runaway` (the stroke wandered into a foreign
+                                 ;; colour region); the broad/coverage tiers keep their
+                                 ;; two-tier dry-out unchanged. (mirror gen.)
+                                 dmx (if (pos? k)
+                                       (let [[br bg bb] (sample-arr blurd-px iw ih (+ px bax) (+ py bay))]
+                                         (max (Math/abs (- br hr)) (Math/abs (- bg hg)) (Math/abs (- bb hb0))))
+                                       0.0)
+                                 chroma? (and detail? (pos? k) (> dmx runaway))
+                                 fade (cond (not (pos? k)) fade
+                                            chroma? 0.0
+                                            detail? fade
+                                            (> dmx 0.18) 0.0
+                                            (> dmx 0.22) (* fade 0.4)
+                                            :else fade)
+                                 ;; LINE-HOLD stays — the one non-geometric stop. A liner that
+                                 ;; walked off ITS OWN placement map has left the feature, so
+                                 ;; lift. It reads the level's map (the right signal), unlike
+                                 ;; tensor coherence, which does NOT discriminate a line from a
+                                 ;; gradient (a ramp is rank-1 = perfectly oriented), so the old
+                                 ;; coherence-follow fade guard is removed.
+                                 mv  (if (and liner? (pos? k)) (* (map-at dmap mkind px py) (double gainv)) 1.0)
+                                 lh? (and liner? (pos? k) (< mv (* 0.35 (double lth))))
+                                 fade (cond lh? 0.0
+                                            (and liner? (pos? k) (< mv (* 0.7 (double lth)))) (* fade 0.5)
+                                            :else fade)]
+                             (if (< fade 0.15)
+                               [acc (cond chroma? :chroma lh? :line-hold :else :drift)]
+                               (let [body (* (if liner?
+                                               (min 1.0 (max 0.0 (/ (- ev 0.25) 0.45)))
+                                               (+ 0.4 (* 0.6 (double sgate))))
+                                             (if soft-ramp? 0.35 1.0))
+                                     lal2 (+ lal (* (max 0.0 (- 0.9 lal)) body))
+                                     ;; store the tt-INDEPENDENT per-step state; the BOTH-ENDS
+                                     ;; taper is finalized after the loop against the ACTUAL
+                                     ;; traced length, so a corner-broken stroke still gets a
+                                     ;; full head->tail profile instead of a truncated one.
+                                     pre [k px py D sn tn th (* coh (- 1.0 (double melt))) hb body lal2 fade]
+                                     bend (* (double curvature) 0.9 (double bendf)
+                                             (min 1.0 (max 0.0 (/ (- (double ssz) 2.5) 2.5)))
+                                             (- 1.0 (* 0.7 coh))
+                                             (- 1.0 (min 1.0 (max 0.0 (/ (- ev 0.3) 0.3))))
+                                             (- (noise/noise2 (+ (* 0.05 px) (* 89.0 (double bph)))
+                                                              (+ (* 0.05 py) (* 57.0 (double bph)))) 0.5))
+                                     cb (Math/cos bend) sb (Math/sin bend)
+                                     sgn (if (zero? k) (double dirsign)
+                                             (if (neg? (+ (* dx0 dxp) (* dy0 dyp))) -1.0 1.0))
+                                     dx1 (* sgn dx0) dy1 (* sgn dy0)
+                                     dx (- (* cb dx1) (* sb dy1)) dy (+ (* sb dx1) (* cb dy1))
+                                     [dx dy] (if (and liner? (pos? k))
+                                               (let [mx (+ (* 0.35 dx) (* 0.65 dxp))
+                                                     my (+ (* 0.35 dy) (* 0.65 dyp))
+                                                     ml (Math/sqrt (+ (* mx mx) (* my my)))]
+                                                 (if (> ml 1e-6) [(/ mx ml) (/ my ml)] [dx dy]))
+                                               [dx dy])
+                                     L  (* ssz (double stepf))
+                                     nx0 (max 0.0 (min hd (+ px (* L dx))))
+                                     ny0 (max 0.0 (min wd (+ py (* L dy))))
+                                     [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd sgain) [nx0 ny0])
+                                     [nx2 ny2] (if (zero? (double side))
+                                                 [nx1 ny1]
+                                                 [(max 0.0 (min hd (+ nx1 (* sidem 0.55 ssz (- dy)))))
+                                                  (max 0.0 (min wd (+ ny1 (* sidem 0.55 ssz dx))))])]
+                                 (recur (inc k) nx2 ny2 dx dy fade (conj acc pre)))))))))]
+        ;; FINALIZE: taper follows the ACTUAL traced length. A stroke that stopped at a corner
+        ;; still gets a full head->tail profile (tt = k/(finalLen-1)), not the truncated profile
+        ;; the old tt=k/kmax gave when geometry ended the chain early. (mirror gen two-phase.)
+        (let [[pre-records reason] traced
+              n (count pre-records)
+              denom (double (max 1 (dec n)))
+              rows (mapv (fn [pr]
+                           (let [[k px py D0 sn0 tn0 th chb hb body lal2 fadep] pr
+                                 tt (/ (double k) denom)
+                                 hw (let [u (min 1.0 (/ tt 0.18)) s (* u u (- 3.0 (* 2.0 u)))]
+                                      (if liner? (+ 0.8 (* 0.2 s)) (+ 0.55 (* 0.45 s))))
+                                 ha (let [u (min 1.0 (/ tt 0.15)) s (* u u (- 3.0 (* 2.0 u)))]
+                                      (if liner? (+ 0.75 (* 0.25 s)) (+ 0.5 (* 0.5 s))))
+                                 sz (* ssz (- 1.0 (* 0.45 tt (Math/sqrt tt))) hw)
+                                 al (* lal2 fadep (- 1.0 (* 0.65 tt tt)) ha)
+                                 ;; DETAIL tiers RE-LOAD colour each segment (wsl=1): one
+                                 ;; brush-load per stroke is right for a gestural mark, but
+                                 ;; at detail scale (ssz~2.2, ~4 segs = 8px) it drags the
+                                 ;; head's colour onto the next feature (nostril, philtrum
+                                 ;; and lip line are 3-5px apart on a face).
+                                 wsl (cond soft-ramp? 1.0 detail? 1.0
+                                           (pos? (double melt)) (* 0.85 (double melt) tt) :else 0.0)
+                                 ;; the perpendicular offset escapes the AA ramp for a stroke
+                                 ;; CARRYING one brush-load across its length (wsl<1). A tier
+                                 ;; that RE-LOADS colour every segment (wsl=1) samples its OWN
+                                 ;; position; the fixed offset there reads the dark ground along
+                                 ;; a lit edge (the dark line through a finger), so it drops for
+                                 ;; carried loads only.
+                                 obx (* (double bax) (double (if (< wsl 1.0) 1.0 0.0)))
+                                 oby (* (double bay) (double (if (< wsl 1.0) 1.0 0.0)))
+                                 cxs (+ cx0 obx (* wsl (- (double px) (double cx0))))
+                                 cys (+ cy0 oby (* wsl (- (double py) (double cy0))))]
+                             [px py sz D0 sn0 tn0 al th chb hb cxs cys traw (spec-cap ssz)]))
+                         pre-records)]
+          [rows reason])))))
 
 (defn- stub-glaze
-  "MEASURE-THEN-EMIT: judge a traced chain by its final length. An accent chain
-   (lvl≥2) that died to colour drift after 1-2 segments is a STUB — a tap of the
-   brush, not a stroke — yet it used to slap its head segments down at
-   near-opaque alpha: the isolated bead-dashes along glasses frames and strap
-   edges. Stubs paint at glaze alpha (×0.5); dense contour handoffs still build
-   opacity by overlap. A standalone helper (NOT a let-wrap around the trace loop
-   inside stroke-segments — demoting that giant loop out of tail position sent
-   the jolt compiler pathological: minutes instead of seconds)."
-  [lvl rows]
-  (if (and (>= (long lvl) 2) (< (count rows) 3))
+  "Judge a traced chain by WHY it stopped, not how long it got. A feature-following
+   stroke that ended at a corner or where its ridge died is a COMPLETE short stroke
+   (the top of an eye is one line, the bottom another) and paints at full alpha. Only
+   a chain that died to the chroma BACKSTOP — it wandered into a foreign colour
+   region, i.e. it FAILED to follow a feature — is demoted to glaze (×0.5): the old
+   length test halved exactly the short corner-strokes that are now the wanted effect.
+   A standalone helper (NOT a let-wrap around the trace loop — demoting that loop out
+   of tail position sent the jolt compiler pathological)."
+  [lvl reason rows]
+  (if (and (>= (long lvl) 2) (= reason :chroma))
     (mapv (fn [r] (assoc r 6 (* 0.5 (double (nth r 6))))) rows)
     rows))
 
@@ -1069,8 +1155,7 @@
                                                (< (hash01 (+ (* i 53) lvl) j 37)
                                                   (if (== (long lvl) 1) 0.9 0.75)))
                                         []
-                                        (stub-glaze lvl
-                                         (stroke-segments nf dmap lvl
+                                        (let [[rows reason] (stroke-segments nf dmap lvl
                                                          (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
                                                          cssz
                                                          D 0.0 tn ds curvature stroke hd wd
@@ -1083,7 +1168,8 @@
                                                            (* traw (+ 0.6 (* 0.4 sgate)))
                                                            traw)
                                                          sgate blur-px iw ih th melt
-                                                         map-kind gain blurd-px (hash01 (+ (* i 67) lvl) j 53))))]
+                                                         map-kind gain blurd-px (hash01 (+ (* i 67) lvl) j 53))]
+                                          (stub-glaze lvl reason rows)))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
         (map-indexed vector levels)))))
