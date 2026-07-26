@@ -141,41 +141,51 @@ float hash01(int a, int b, int salt){
   return float(h) / 4294967296.0;
 }
 
-// nearest-map a full-image (x,y) into a reduced field grid (dim=(rows,cols),
-// src=(src_h,src_w)), matching CPU round()=floor(v+0.5), then texelFetch(col,row).
-ivec2 fieldTexel(float x, float y, vec2 dim, vec2 src){
-  int xi = int(floor(x * dim.x / src.x + 0.5));
-  int yi = int(floor(y * dim.y / src.y + 0.5));
-  xi = clamp(xi, 0, int(dim.x) - 1);
-  yi = clamp(yi, 0, int(dim.y) - 1);
-  return ivec2(yi, xi);
+// bilinear-map a full-image (x,y) into a reduced field grid (dim=(rows,cols),
+// src=(src_h,src_w)), CLAMPED at the borders — matches CPU wavelet/bilerp1 exactly:
+// floor-based texel selection with lerp (NO GL_LINEAR — hardware filtering would not
+// match the CPU). texelFetch(col,row) as before; fx blends the ROW axis, fy the COL.
+vec4 fieldBilerp(sampler2D tex, float x, float y, vec2 dim, vec2 src){
+  float gx = clamp(x * dim.x / src.x, 0.0, dim.x - 1.0);
+  float gy = clamp(y * dim.y / src.y, 0.0, dim.y - 1.0);
+  float x0f = floor(gx); float y0f = floor(gy);
+  int x0 = int(x0f); int y0 = int(y0f);
+  int x1 = min(x0 + 1, int(dim.x) - 1); int y1 = min(y0 + 1, int(dim.y) - 1);
+  float fx = gx - x0f; float fy = gy - y0f;
+  vec4 v00 = texelFetch(tex, ivec2(y0, x0), 0);   // row x0, col y0
+  vec4 v10 = texelFetch(tex, ivec2(y0, x1), 0);   // row x1, col y0
+  vec4 v01 = texelFetch(tex, ivec2(y1, x0), 0);   // row x0, col y1
+  vec4 v11 = texelFetch(tex, ivec2(y1, x1), 0);   // row x1, col y1
+  vec4 r0 = mix(v00, v10, fx);                    // along the ROW axis (x0->x1)
+  vec4 r1 = mix(v01, v11, fx);
+  return mix(r0, r1, fy);                         // along the COL axis (y0->y1)
 }
 float detailAt(float x, float y){
-  vec4 t = texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0);
+  vec4 t = fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc);
   return u_dmax > 0.0 ? min(1.0, t.r / u_dmax) : 0.0;
 }
 // the SHARP fine-band map (texel .g) — what the finest levels threshold against
 float sharpAt(float x, float y){
-  vec4 t = texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0);
+  vec4 t = fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc);
   return u_dmax > 0.0 ? min(1.0, t.g / u_dmax) : 0.0;
 }
 // scale-matched map select (mirror of seed/level-map-kind): 0 = aggregate (.r),
 // 1 = MID band (.a — face-feature frequencies), 2 = sharp fine-band (.g)
 float mapAt(int sel, float x, float y){
-  vec4 t = texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0);
+  vec4 t = fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc);
   float v = (sel == 2) ? t.g : (sel == 1) ? max(t.a, t.g) : t.r;  // mid = union with sharp
   return u_dmax > 0.0 ? min(1.0, v / u_dmax) : 0.0;
 }
 // raw edge strength (texel .b) — the band where broad fill strokes must not tread
 float edgeAt(float x, float y){
-  return texelFetch(u_detailTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0).b;
+  return fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc).b;
 }
 // ABSOLUTE subjectness (mirror wavelet/subject-abs-at): raw globally-scaled
 // fine-band energy + edge strength — 0 in bokeh, high on real structure. Drives
 // the broad tier's bokeh adaptation; the locally-normalized maps (which light
 // bokeh up to full 'detail') keep driving fine-stroke placement.
 float subjAbsAt(float x, float y){
-  return min(1.0, texelFetch(u_subjTex, fieldTexel(x, y, u_detailDim, u_detailSrc), 0).r);
+  return min(1.0, fieldBilerp(u_subjTex, x, y, u_detailDim, u_detailSrc).r);
 }
 // MAX edge strength over centre + 4 diagonal taps at radius d (mirror seed/edge-near):
 // a stroke answers for edges anywhere under its BODY — centre-sampled Ev let daubs
@@ -248,10 +258,20 @@ vec2 sideOffset(float x, float y, float side, float mag){
               clamp(y + side*mag*ny, 0.0, float(u_W - 1)));
 }
 
-vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, sample-arr nearest (int trunc)
-  int xi = clamp(int(x), 0, u_H - 1);
-  int yi = clamp(int(y), 0, u_W - 1);
-  return texelFetch(tex, ivec2(yi, xi), 0).rgb;
+vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, 4-tap bilinear (mirror seed/sample-arr)
+  float gx = clamp(x, 0.0, float(u_H - 1));
+  float gy = clamp(y, 0.0, float(u_W - 1));
+  float x0f = floor(gx); float y0f = floor(gy);
+  int x0 = int(x0f); int y0 = int(y0f);
+  int x1 = min(x0 + 1, u_H - 1); int y1 = min(y0 + 1, u_W - 1);
+  float fx = gx - x0f; float fy = gy - y0f;
+  vec3 r00 = texelFetch(tex, ivec2(y0, x0), 0).rgb;   // row x0, col y0
+  vec3 r10 = texelFetch(tex, ivec2(y0, x1), 0).rgb;   // row x1, col y0
+  vec3 r01 = texelFetch(tex, ivec2(y1, x0), 0).rgb;   // row x0, col y1
+  vec3 r11 = texelFetch(tex, ivec2(y1, x1), 0).rgb;   // row x1, col y1
+  vec3 r0 = mix(r00, r10, fx);                        // along the ROW axis (x0->x1)
+  vec3 r1 = mix(r01, r11, fx);
+  return mix(r0, r1, fy);                             // along the COL axis (y0->y1)
 }
 
 // splat-record (mirror seed/splat-record) + emit one captured record. `alpha` is the
@@ -386,9 +406,9 @@ void main(){
   // hashed positions need no jitter — they ARE the noise
   float x = cx, y = cy;
   float D = min(1.0, u_detail * dv * 2.2);
-  // no Perlin warp on the liner tier (mirror seed): fine seeds land exactly on
+  // no Perlin warp on liner-scale levels (mirror seed/liner-scale?): fine seeds land exactly on
   // the detail they trace; noise variation belongs to large/medium strokes
-  float aw = (lvl >= 4) ? 0.0 : u_warp * (1.0 - D) * ssz;
+  float aw = (lvl >= 2 && ssz < 3.5) ? 0.0 : u_warp * (1.0 - D) * ssz;   // no Perlin warp on liner-scale levels (mirror seed/liner-threshold)
   float x2 = (aw < 0.2) ? x : x + aw * noise2(0.06*x, 0.06*y);
   float y2 = (aw < 0.2) ? y : y + aw * noise2(41.3 + 0.06*x, 17.9 + 0.06*y);
   x2 = clamp(x2, 0.0, float(u_H - 1));
@@ -457,7 +477,7 @@ void main(){
   // LINER discipline keys on PHYSICAL stroke size, not level index (mirror seed):
   // which level paints fine detail depends on the sliders — any small accent
   // chain must follow the original detail exactly or it reads as waviness.
-  bool liner = (lvl >= 4) || (lvl >= 2 && ssz2 < 3.5);
+  bool liner = (lvl >= 2 && ssz2 < 3.5);              // physical (mirror seed/liner-scale?); lvl<2 never a liner
   // colour samples the PRE-snap position (one side of the edge); geometry snaps.
   // On-ridge colour is the sides' mix and paints silhouettes as drawn outlines.
   float cpx = x2, cpy = y2;
@@ -483,28 +503,59 @@ void main(){
   // tier glazes lightest so stacked strokes MIX (mirror seed/level-alpha)
   float lal = (lvl <= 1) ? 1.0 : (lvl <= 3) ? 0.85 : (lvl <= 5) ? 0.65 : 0.55;
   float fade = 1.0;
+  // ROUND 5b — chain length follows measured structure (mirror seed): a LINE only
+  // exists where the structure tensor is coherent; on smooth skin/bokeh a liner seed
+  // traces FEWER segments. cohSeed at the seed ramps the nominal segs 20%→100% over
+  // coherence 0.30→0.60. Non-liner levels untouched; layer-params budget stays nominal.
+  // sampled at the PRE-SNAP but POST-WARP position (cpx,cpy) — the CPU takes it from
+  // stroke-segments' x/y args, which are the Perlin-warped, clamped seed. Sampling the
+  // raw hashed (cx,cy) here diverged whenever the warp actually moved the seed, i.e.
+  // level ssz >= 3.5 (warp on) while the per-seed ssz2 < 3.5 (liner on) — exactly the
+  // near-edge shrink regime, where coherence 2px away can give a different segsEff.
+  float cohSeed = fieldsAt(cpx, cpy).y;
+  float cohW    = clamp((cohSeed - 0.30) / 0.30, 0.0, 1.0);
+  int   segsEff = liner ? max(2, int(floor(float(segs) * (0.2 + 0.8 * cohW) + 0.5))) : segs;
   // BOUNDARY-SIDE BRUSH-LOAD (mirror seed/stroke-segments): where the two sides
   // across the tangent genuinely differ (a boundary, not a thin LINE feature),
   // the brush-load samples ~0.7 sigma on the stroke's OWN colour side — chains
   // parallel to a boundary otherwise alternate sides per seed and tile the
   // contour into colour capsules (the regular wavy scallops).
-  float bax = 0.0, bay = 0.0;
+  float bax = 0.0, bay = 0.0; bool softRamp = false;
   {
     vec2 tc0 = fieldsAt(cpx, cpy);
     float nx0 = -sin(tc0.x), ny0 = cos(tc0.x);
-    float hh  = max(1.75, 0.8 * ssz2);
-    // floored: a fine liner 0.7*sigma is sub-pixel and lands inside the AA ramp
-    // it exists to escape
-    float disp = max(1.5, 0.7 * ssz2);
-    vec3 cp  = sampleRGB(u_blurTex, cpx + nx0*hh, cpy + ny0*hh);
-    vec3 cm  = sampleRGB(u_blurTex, cpx - nx0*hh, cpy - ny0*hh);
-    vec3 dsv = abs(cp - cm);
-    float dsides = max(dsv.r, max(dsv.g, dsv.b));
-    if (dsides < 0.15) {
-      bax = 0.0; bay = 0.0;   // no two-sided boundary: keep the on-ridge colour
+    // SHARPNESS, not contrast (mirror seed). Probe ALL THREE rungs of the ridge
+    // (no early-out) and keep the fraction of the total transition completing within
+    // h1: crisp = (d1 >= 0.75*dmax). A hard step / 1px-AA edge reads d1~=d3 (ratio ~1
+    // -> CRISP, two opaque paints meet, impasto kept); a wide ramp reads d1<<d3 (ratio
+    // ~0.35 -> SOFT RAMP, no meeting line -> paint LOCAL colour, damp the body).
+    // Contrast-invariant, so an 8px and a 24px ramp both classify soft — the fixture
+    // stays at the spec's 8px. dmax<0.15 -> a thin LINE feature / flat. cp/cm are taken
+    // at h1 (the nearest offset) for the crisp step-edge test. Unrolled, NOT a
+    // loop+break: Apple GL 4.1 mis-executes the last slot of a uniform-bound loop.
+    float h1 = max(1.75, 0.8 * ssz2);
+    float h2 = max(3.0, 1.5 * ssz2);
+    float h3 = max(5.0, 2.5 * ssz2);
+    vec3 cp1 = sampleRGB(u_blurTex, cpx + nx0*h1, cpy + ny0*h1);   // rung 1
+    vec3 cm1 = sampleRGB(u_blurTex, cpx - nx0*h1, cpy - ny0*h1);
+    float d1 = max(abs(cp1.r - cm1.r), max(abs(cp1.g - cm1.g), abs(cp1.b - cm1.b)));
+    vec3 cp2 = sampleRGB(u_blurTex, cpx + nx0*h2, cpy + ny0*h2);   // rung 2
+    vec3 cm2 = sampleRGB(u_blurTex, cpx - nx0*h2, cpy - ny0*h2);
+    float d2 = max(abs(cp2.r - cm2.r), max(abs(cp2.g - cm2.g), abs(cp2.b - cm2.b)));
+    vec3 cp3 = sampleRGB(u_blurTex, cpx + nx0*h3, cpy + ny0*h3);   // rung 3
+    vec3 cm3 = sampleRGB(u_blurTex, cpx - nx0*h3, cpy - ny0*h3);
+    float d3 = max(abs(cp3.r - cm3.r), max(abs(cp3.g - cm3.g), abs(cp3.b - cm3.b)));
+    float dmax = max(d1, max(d2, d3));
+    float disp = h1;
+    vec3 cp = cp1, cm = cm1;                 // nearest-offset colour probes (for crisp)
+    float dsides = dmax;
+    if (dmax < 0.15) {
+      bax = 0.0; bay = 0.0;                  // thin LINE feature / flat: on-ridge colour
+    } else if (d1 < 0.75 * dmax) {
+      bax = 0.0; bay = 0.0; softRamp = true;   // SOFT RAMP: paint LOCAL colour (wsl=1 below), damp body
     } else if (side != 0.0) {
       bax = side * disp * nx0; bay = side * disp * ny0;   // geometric side wins
-    } else {                            // colour test only at a genuine STEP edge
+    } else {                                  // colour test only at a genuine STEP edge
       vec3 c0 = sampleRGB(u_blurTex, cpx, cpy);
       vec3 dpa = abs(cp - c0);
       vec3 dma = abs(cm - c0);
@@ -533,7 +584,7 @@ void main(){
   vec3 prevB = sampleRGB(u_blurTex, px, py); float racc = 0.0;
   int emitted = 0;
   for (int q = 0; q < SEGS; q++) {
-    if (q >= segs || fade < 0.15) break;
+    if (q >= segsEff || fade < 0.15) break;
     if (q > 0) {
       // TWO-TIER dry-out (mirror seed): gradual drift DRIES the brush (x0.4);
       // a LARGE mismatch (>0.45) means the stroke EXITED its colour region — a
@@ -585,12 +636,12 @@ void main(){
       else if (mv < 0.7 * th) fade *= 0.5;
     }
     if (fade < 0.15) break;                        // brush lifted — emit nothing
-    float tt = float(q) / float(segs - 1);
+    float tt = float(q) / float(segsEff - 1);
     // IMPASTO body (mirror seed/stroke-segments): fine liner strokes on a strong
     // edge paint nearly opaque — the contour is defined by thin bodied lines whose
     // soft shoulders blend; off-edge texture strokes keep the light mixing glaze.
-    float body = ((lvl >= 4) ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0)
-               * (0.4 + 0.6 * sgate);
+    float body = (liner ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0)
+               * (0.4 + 0.6 * sgate) * (softRamp ? 0.35 : 1.0);   // SOFT RAMP: a gradient has no meeting line, body -> light glaze
     float lal2 = lal + (0.9 - lal) * body;
     // BOTH-ENDS taper (mirror seed/stroke-segments): quick lift-on at the head on top
     // of the existing tail dry-out, so the mark tapers at BOTH ends like a real
@@ -606,7 +657,7 @@ void main(){
     // point slides up to 35% toward the current position along the stroke.
     // MELTED broad chains re-mix much harder — one brush-load carried across a
     // smooth gradient reads as a feathery streak on the wash.
-    float wsl = liner ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0);
+    float wsl = softRamp ? 1.0 : (liner ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0));   // SOFT RAMP re-loads LOCAL colour (no meeting line to carry)
     if (phase == 1) emitSplat(px, py, cpx + bax + wsl*(px - cpx), cpy + bay + wsl*(py - cpy), sz, D, snoise, tnoise, al * ascale, hb, traw, tcap, 1.0 - melt);
     emitted++;
     // bend gated by coherence, physical size AND the wavelet edge map (mirror

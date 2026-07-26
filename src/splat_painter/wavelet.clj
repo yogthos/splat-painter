@@ -231,6 +231,24 @@
      {:h sh :w sw :detail P :sharp Ps :mid Pm :edge E-arr :subject subj
       :dmax 1.0 :src-h H :src-w W})))
 
+(defn- bilerp1
+  "Bilinear sample of a flat row-major 1-channel `^doubles` grid (W cols × H rows)
+   at full-image coords (x=row, y=col), scaled from src-h×src-w into the H×W grid,
+   CLAMPED at the borders. floor-based texel selection with lerp — matches the GLSL
+   fieldBilerp/sampleRGB exactly (CPU/GPU parity). At integer grid coords returns the
+   stored texel; at a texel midpoint returns the mean of its neighbours."
+  [^doubles arr W H src-h src-w x y]
+  (let [gx (double (max 0.0 (min (double (dec H)) (* (double x) (/ (double H) (double src-h))))))
+        gy (double (max 0.0 (min (double (dec W)) (* (double y) (/ (double W) (double src-w))))))
+        x0 (long gx) y0 (long gy)
+        x1 (min (long (dec H)) (inc x0)) y1 (min (long (dec W)) (inc y0))
+        fx (- gx (double x0)) fy (- gy (double y0))
+        v00 (aget arr (+ (* x0 W) y0)) v10 (aget arr (+ (* x1 W) y0))
+        v01 (aget arr (+ (* x0 W) y1)) v11 (aget arr (+ (* x1 W) y1))
+        r0 (+ v00 (* fx (- v10 v00)))
+        r1 (+ v01 (* fx (- v11 v01)))]
+    (+ r0 (* fy (- r1 r0)))))
+
 (defn subject-abs-at
   "ABSOLUTE subjectness ∈ [0,1] at full-image coords — 0 in bokeh/flat regions,
    high wherever real fine structure or edges live (see placement-map :subject).
@@ -239,50 +257,47 @@
   [dmap x y]
   (let [H (:h dmap) W (:w dmap)
         src-h (long (or (:src-h dmap) H)) src-w (long (or (:src-w dmap) W))
-        ^doubles d (or (:subject dmap) (:detail dmap))
-        xi (min (dec H) (max 0 (long (Math/round (* (double x) (/ (double H) src-h))))))
-        yi (min (dec W) (max 0 (long (Math/round (* (double y) (/ (double W) src-w))))))]
-    (min 1.0 (aget d (+ (* xi W) yi)))))
+        ^doubles d (or (:subject dmap) (:detail dmap))]
+    (min 1.0 (bilerp1 d W H src-h src-w x y))))
 
 (defn detail-at
-  "Normalized detail ∈ [0,1] at full-image coords (x=row, y=col), sampled from the
-   reduced-res map. 0 = flat, 1 = the most detailed cell."
+  "Normalized detail ∈ [0,1] at full-image coords (x=row, y=col), sampled BILINEARLY
+   from the reduced-res map. 0 = flat, 1 = the most detailed cell."
   [dmap x y]
   (let [H (:h dmap) W (:w dmap)
         src-h (long (or (:src-h dmap) H)) src-w (long (or (:src-w dmap) W))
         ^doubles d (:detail dmap)
-        dmax (double (:dmax dmap))
-        xi (min (dec H) (max 0 (long (Math/round (* (double x) (/ (double H) src-h))))))
-        yi (min (dec W) (max 0 (long (Math/round (* (double y) (/ (double W) src-w))))))]
-    (if (pos? dmax) (min 1.0 (/ (aget d (+ (* xi W) yi)) dmax)) 0.0)))
+        dmax (double (:dmax dmap))]
+    (if (pos? dmax) (min 1.0 (/ (bilerp1 d W H src-h src-w x y) dmax)) 0.0)))
 
 (defn edge-at
-  "Raw structure-tensor edge strength ∈ [0,1] at full-image coords, from the map's
-   :edge channel (sqrt(grad2/gmax), no normalization) — the band where broad fill
-   strokes must not tread."
+  "Raw structure-tensor edge strength ∈ [0,1] at full-image coords, sampled BILINEARLY
+   from the map's :edge channel (sqrt(grad2/gmax), no normalization) — the band where
+   broad fill strokes must not tread."
   [dmap x y]
   (if-let [e (:edge dmap)]
     (let [H (:h dmap) W (:w dmap)
           src-h (long (or (:src-h dmap) H)) src-w (long (or (:src-w dmap) W))
-          ^doubles d e
-          xi (min (dec H) (max 0 (long (Math/round (* (double x) (/ (double H) src-h))))))
-          yi (min (dec W) (max 0 (long (Math/round (* (double y) (/ (double W) src-w))))))]
-      (aget d (+ (* xi W) yi)))
+          ^doubles d e]
+      (bilerp1 d W H src-h src-w x y))
     0.0))
 
 (defn mid-at
   "The mid placement levels' map: the UNION (max) of the :mid band map (Haar bands
    2-3 — face-feature-scale structure) and the :sharp fine-band map, so mid strokes
    serve smooth features AND fine texture (dark fur, small text) alike. Falls back
-   to :detail when the maps are absent."
+   to :detail when the maps are absent. Each map is interpolated BEFORE the max —
+   max∘bilerp, not bilerp∘max (a per-texel max then bilerp smears the union across
+   cells and invents detail where neither band is strong)."
   [dmap x y]
   (if-let [m (:mid dmap)]
     (max (detail-at (assoc dmap :detail m) x y) (sharp-at dmap x y))
     (detail-at dmap x y)))
 
 (defn sharp-at
-  "Like detail-at but over the :sharp fine-band map — what the finest placement
-   levels threshold against. Falls back to :detail when the map has no :sharp."
+  "Like detail-at but over the :sharp fine-band map (sampled BILINEARLY) — what the
+   finest placement levels threshold against. Falls back to :detail when the map has
+   no :sharp."
   [dmap x y]
   (if-let [s (:sharp dmap)]
     (detail-at (assoc dmap :detail s) x y)
