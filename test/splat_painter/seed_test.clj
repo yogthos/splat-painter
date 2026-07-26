@@ -713,6 +713,39 @@
       (is (<= (double (hi lvl)) (double (lo lvl)))
           (str "level " lvl ": raising Detail 0.6→1.0 must not coarsen the broad/mid tier")))))
 
+(deftest coverage-tiers-take-coverage-values-by-role
+  ;; Regression: raw-floor/spec-cap/level-alpha keyed PURELY on the 8px size
+  ;; threshold. At Size 6 the base tier lands ~6.7px (under 8px), so the COVERAGE
+  ;; layer got detail-tier treatment (traw 0.45, tcap 0.70, lal 0.85): a coverage
+  ;; layer at 0.85 alpha does not fully cover — the black background shows through
+  ;; around silhouettes — and a 6.7px daub painting up to 70% raw colour smears edge
+  ;; colour outward. Levels 0-1 are coverage BY ROLE and take the coverage constants
+  ;; unconditionally; size-keying applies only from level 2 (mirror level-map-kind).
+  ;; Same small size, two roles: a detail tier (lvl 2) at the SAME size keeps the
+  ;; size-keyed values, proving the gate is role-based, not a flat override.
+  (let [raw-floor   #'splat-painter.seed/raw-floor
+        spec-cap    #'splat-painter.seed/spec-cap
+        level-alpha #'splat-painter.seed/level-alpha
+        ssz 6.7]                    ; under the 8px size threshold
+    (testing "coverage tiers (lvl 0-1) take coverage constants regardless of size"
+      (doseq [lvl [0 1]]
+        (is (zero? (raw-floor lvl ssz))        (str "lvl " lvl ": traw 0.0 (faithful colour)"))
+        (is (== 0.35 (spec-cap lvl ssz))       (str "lvl " lvl ": tcap 0.35 (averaged colour)"))
+        (is (== 1.0 (level-alpha lvl ssz))     (str "lvl " lvl ": lal 1.0 (full opacity)"))))
+    (testing "a detail tier (lvl 2) at the same size keeps the size-keyed values"
+      (is (== 0.45 (raw-floor 2 ssz)))
+      (is (== 0.7 (spec-cap 2 ssz)))
+      (is (== 0.85 (level-alpha 2 ssz))))
+    (testing "layer-params wires the role gate: a base level under 8px still gets traw 0.0"
+      (let [img   (ladder-img)
+            dmap  (wavelet/placement-map img (structure/analyze img))
+            levels (:levels (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.5 [1.0 1.0 1.0] 72000 512 512))
+            base  (first (filter #(zero? (long (:lvl %))) levels))]
+        (is (some? base) "a base level (lvl 0) is admitted")
+        (when (some? base)
+          (is (< (double (:ssz base)) 8.0) (str "base ssz " (:ssz base) " is under the 8px threshold"))
+          (is (zero? (:traw base))         "base :traw is 0.0 (coverage constant, not size-keyed)"))))))
+
 (deftest admitted-levels-fit-the-budget
   ;; The admission keeps the EMITTED field within the budget and the transform-feedback
   ;; buffer capacity. Measured on the survivor count (splat-field :splats) — the post-cull

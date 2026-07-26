@@ -224,11 +224,13 @@
    than scratching over it. DABS are near-opaque on purpose: at 1-2px they are placed
    sparsely (see dab-overlap) so each mark must STAND ON ITS OWN. Glaze alpha there
    just averages neighbours into mush — the exact failure that made fine detail soft."
-  [ssz]
-  (let [v (double ssz)]
-    (cond (>= v 8.0) 1.0
-          (>= v dab-max) 0.85
-          :else 0.95)))
+  [lvl ssz]
+  (if (<= (long lvl) 1)
+    1.0                          ; coverage tiers always fully opaque, by role
+    (let [v (double ssz)]
+      (cond (>= v 8.0) 1.0
+            (>= v dab-max) 0.85
+            :else 0.95))))
 
 (defn- level-map-kind
   "Which placement map a level reads, matched to the scale it paints — keyed on
@@ -249,18 +251,22 @@
    2-3 the index-keyed form handed the FINEST strokes mid-tier averaged colour
    (t capped at 0.7 — 30% blur at exactly the scale that wants fidelity), which is
    why small details read as unclear."
-  [ssz]
-  (let [v (double ssz)]
-    (cond (>= v 8.0) 0.0 (>= v 3.5) 0.45 (>= v 1.5) 0.7 :else 0.85)))
+  [lvl ssz]
+  (if (<= (long lvl) 1)
+    0.0                          ; coverage tiers: faithful colour, by role
+    (let [v (double ssz)]
+      (cond (>= v 8.0) 0.0 (>= v 3.5) 0.45 (>= v 1.5) 0.7 :else 0.85))))
 (defn- spec-cap
   "Ceiling on colour SPECIFICITY (the blur→raw blend t) by PHYSICAL stroke size —
    progressive colour refinement: a fat brush cannot place a pixel-specific highlight,
    so broad layers stay AVERAGED and full specificity arrives only at feature scale.
    Size-keyed for the same reason as raw-floor: index-keyed, the finest surviving
    level was capped at 0.7 and painted 30% blur."
-  [ssz]
-  (let [v (double ssz)]
-    (cond (>= v 8.0) 0.35 (>= v 3.5) 0.7 :else 1.0)))
+  [lvl ssz]
+  (if (<= (long lvl) 1)
+    0.35                         ; coverage tiers: averaged colour, by role
+    (let [v (double ssz)]
+      (cond (>= v 8.0) 0.35 (>= v 3.5) 0.7 :else 1.0))))
 ;; The PHYSICAL stroke stdev below which a level reads as a drawn LINE and earns liner
 ;; discipline (gentle ridge snap, direction momentum, line-hold, impasto body). A named
 ;; constant so the Clojure and the GLSL twin stay pinned to one value (the GS uses the
@@ -610,7 +616,7 @@
                                        :nx nx :ny 1 :offset off
                                        :segs segs :stepf stepf
                                        :bendf (bend-frac lvl) :map-kind (level-map-kind lvl ssz)
-                                       :traw (raw-floor ssz)})))))]
+                                       :traw (raw-floor lvl ssz)})))))]
     {:nlev (clojure.core/count levels) :warp warp :scale scale :levels levels
      :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))}))
 
@@ -706,8 +712,8 @@
       ;; always reads as a directional streak, however faithful its colour.
       ;; base tier returns the SAME [rows reason] shape as the traced branch — a bare
       ;; row vector here made the call site read one row as the whole row list.
-      [[[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap ssz)]] :base])
-    (let [          lal  (level-alpha ssz)
+      [[[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap lvl ssz)]] :base])
+    (let [          lal  (level-alpha lvl ssz)
           ;; fine strokes snap onto the edge ridge at the seed and after every step
           ;; (predictor: tangent step; corrector: ridge snap) — the stroke GLUES to
           ;; the line it is painting instead of braiding beside it.
@@ -941,7 +947,7 @@
                                  oby (* (double bay) (double (if (< wsl 1.0) 1.0 0.0)))
                                  cxs (+ cx0 obx (* wsl (- (double px) (double cx0))))
                                  cys (+ cy0 oby (* wsl (- (double py) (double cy0))))]
-                             [px py sz D0 sn0 tn0 al th chb hb cxs cys traw (spec-cap ssz)]))
+                             [px py sz D0 sn0 tn0 al th chb hb cxs cys traw (spec-cap lvl ssz)]))
                          pre-records)]
           [rows reason])))))
 
