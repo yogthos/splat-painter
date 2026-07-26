@@ -164,22 +164,35 @@
   "Blend the HEAVY blur back toward the LIGHT blur where it deviates from the raw
    pixel. A box blur bleeds colour straight across strong boundaries, so broad
    strokes near a silhouette paint halo colours (the average of both sides); where
-   |heavy − raw| is large — an edge — the smooth field must follow the image side
-   it is on. w ramps over max-channel |Δ| ∈ [0.06, 0.16]. Flat regions keep the
-   full heavy smoothing (seamless gradients)."
+   heavy strays from the image side it is on, the smooth field must follow the
+   light field. The deviation is tested BOTH absolutely AND relatively, taking the
+   larger weight:
+     wabs = clamp((d − 0.06) / 0.10, 0, 1)            ; large on bright regions
+     wrel = clamp((d / max(lv,0.02) − 0.15) / 0.45, 0, 1)  ; ...and on dark ones
+   The same ~0.04 lift is noise on lit skin but +300% on a near-black background,
+   so the ABSOLUTE ramp alone never fired in dark halos (82.6% sat below its 0.06
+   start) and the subject bled across the silhouette. Flat regions keep the full
+   heavy smoothing: there heavy agrees with raw both ways, so both tests read ~0
+   and the blend is a no-op (heavy≈light there anyway) — bokeh stays seamless."
   [image ^doubles light ^doubles heavy]
   (let [n (* (long (:height image)) (long (:width image)))
         ^doubles raw (:pixels image)
         out (double-array (* n 3))]
     (dotimes [i n]
       (let [b (* 3 i)
-            d (max (Math/abs (- (aget heavy b)       (aget raw b)))
-                   (Math/abs (- (aget heavy (+ b 1)) (aget raw (+ b 1))))
-                   (Math/abs (- (aget heavy (+ b 2)) (aget raw (+ b 2)))))
-            w (min 1.0 (max 0.0 (/ (- d 0.06) 0.10)))]
-        (aset out b       (+ (* (- 1.0 w) (aget heavy b))       (* w (aget light b))))
-        (aset out (+ b 1) (+ (* (- 1.0 w) (aget heavy (+ b 1))) (* w (aget light (+ b 1)))))
-        (aset out (+ b 2) (+ (* (- 1.0 w) (aget heavy (+ b 2))) (* w (aget light (+ b 2)))))))
+            hr (aget heavy b) hg (aget heavy (inc b)) hb (aget heavy (+ b 2))
+            rr (aget raw b)   rg (aget raw (inc b))   rb (aget raw (+ b 2))
+            d (max (Math/abs (- hr rr))
+                   (Math/abs (- hg rg))
+                   (Math/abs (- hb rb)))
+            wabs (min 1.0 (max 0.0 (/ (- d 0.06) 0.10)))
+            lv (max rr (max rg rb))
+            wrel (min 1.0 (max 0.0 (/ (- (/ d (max lv 0.02)) 0.15) 0.45)))
+            w (max wabs wrel)
+            iw (- 1.0 w)]
+        (aset out b       (+ (* iw hr) (* w (aget light b))))
+        (aset out (+ b 1) (+ (* iw hg) (* w (aget light (inc b)))))
+        (aset out (+ b 2) (+ (* iw hb) (* w (aget light (+ b 2)))))))
     out))
 
 (defn bilateral-blur

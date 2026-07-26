@@ -465,13 +465,17 @@ void main(){
   // monotone ladder ends at level 2-3, index-keyed tiering gives the FINEST strokes
   // mid-tier averaged colour (t capped at 0.7) — blur at exactly the scale we want
   // fidelity. Size-keyed restores small-stroke faithful colour.
-  float traw = (ssz2 < 1.5) ? 0.85 : (ssz2 < 3.5) ? 0.7 : (ssz2 < 8.0) ? 0.45 : 0.0;
+  // COVERAGE tiers (lvl<=1) take the coverage constant by ROLE, not size: a small
+  // base daub must still paint faithful, fully-covering colour (seed/raw-floor). At
+  // Size 6 the base lands ~6.7px — under the 8px size threshold — so size-keying
+  // gave it mid-tier averaged colour (t 0.45) that smeared edge colour outward.
+  float traw = (lvl <= 1) ? 0.0 : (ssz2 < 1.5) ? 0.85 : (ssz2 < 3.5) ? 0.7 : (ssz2 < 8.0) ? 0.45 : 0.0;
   // fine colour rawness follows the local detail density (mirror seed): a crisp
   // raw-colour mark never pops at full contrast on soft ground
-  if (ssz2 < 3.5) traw *= 0.6 + 0.4 * sgate;
+  if (ssz2 < 3.5 && lvl >= 2) traw *= 0.6 + 0.4 * sgate;
   // colour-specificity ceiling per level (mirror seed/spec-cap): broad layers
   // paint AVERAGED colour, mids halfway, fine layers fully specific
-  float tcap = (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;
+  float tcap = (lvl <= 1) ? 0.35 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
     emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt);
     return;
@@ -516,7 +520,9 @@ void main(){
   // paint translucency by PHYSICAL size (mirror seed/level-alpha): broad = opaque
   // coverage, mid = glaze, DABS near-opaque because they are placed sparsely and each
   // must stand on its own — glaze alpha there just averages neighbours into mush.
-  float lal = (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;
+  // coverage tiers (lvl<=1) are fully opaque by role — size-keying at small Size
+  // gave the base 0.85 alpha and let the black background through around silhouettes.
+  float lal = (lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;
   float fade = 1.0;
   // NO tensor-coherence gate on chain length (mirror seed/stroke-segments). Tried and
   // removed: coherence does not discriminate a line from a smooth gradient, because a
