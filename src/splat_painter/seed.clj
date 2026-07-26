@@ -254,8 +254,22 @@
   [lvl ssz]
   (if (<= (long lvl) 1)
     0.0                          ; coverage tiers: faithful colour, by role
-    (let [v (double ssz)]
-      (cond (>= v 8.0) 0.0 (>= v 3.5) 0.45 (>= v 1.5) 0.7 :else 0.85))))
+     (let [v (double ssz)]
+       (cond (>= v 8.0) 0.0 (>= v 3.5) 0.45 (>= v 1.5) 0.7 :else 0.85))))
+(defn- density-scaled-traw
+  "Scale a detail stroke's raw-fidelity floor by the FINEST wavelet band (`sharp-at`,
+   0..1). At feature scale (a ~1.4px stroke, traw 0.85) 85% of the colour is a single
+   RAW sample; where features crowd (sharp-at high) that one sample lands on a shadow /
+   lip line 3-5px from the next feature and paints a foreign dark mark (the band above
+   the upper lip). Trust the bilateral (region) colour more there. An isolated crisp
+   feature (sharp-at low) keeps full raw fidelity. Coverage tiers (lvl 0-1) are never
+   scaled — they paint faithful colour by role. GLSL mirror: gen.clj emitSplat block
+   (`if (lvl >= 2) traw *= 1.0 - 0.7 * sharpAt(cx, cy);`)."
+  [lvl traw sharp-at]
+  (if (<= (long lvl) 1)
+    traw
+    (let [dens (double sharp-at)]
+      (* (double traw) (- 1.0 (* 0.7 dens))))))
 (defn- spec-cap
   "Ceiling on colour SPECIFICITY (the blur→raw blend t) by PHYSICAL stroke size —
    progressive colour refinement: a fat brush cannot place a pixel-specific highlight,
@@ -1167,12 +1181,10 @@
                                                          D 0.0 tn ds curvature stroke hd wd
                                                          segs stepf bendf
                                                          (if (<= (long lvl) 1) 1.0 0.0)
-                                                         ;; fine colour rawness follows the local
-                                                         ;; detail density — a crisp raw mark never
-                                                         ;; pops at full contrast on soft ground
-                                                         (if (>= (long lvl) 4)
-                                                           (* traw (+ 0.6 (* 0.4 sgate)))
-                                                           traw)
+                                                           ;; fine colour rawness follows the LOCAL FINE-DETAIL
+                                                           ;; DENSITY (:sharp) — in a crowded region a single
+                                                           ;; raw sample is unreliable, so trust the region more
+                                                           (density-scaled-traw lvl traw (wavelet/sharp-at dmap cx cy))
                                                          sgate blur-px iw ih th melt
                                                          map-kind gain blurd-px (hash01 (+ (* i 67) lvl) j 53))]
                                           (stub-glaze lvl reason rows)))]

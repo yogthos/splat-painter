@@ -470,9 +470,12 @@ void main(){
   // Size 6 the base lands ~6.7px — under the 8px size threshold — so size-keying
   // gave it mid-tier averaged colour (t 0.45) that smeared edge colour outward.
   float traw = (lvl <= 1) ? 0.0 : (ssz2 < 1.5) ? 0.85 : (ssz2 < 3.5) ? 0.7 : (ssz2 < 8.0) ? 0.45 : 0.0;
-  // fine colour rawness follows the local detail density (mirror seed): a crisp
-  // raw-colour mark never pops at full contrast on soft ground
-  if (ssz2 < 3.5 && lvl >= 2) traw *= 0.6 + 0.4 * sgate;
+  // DENSITY-SCALED traw (mirror seed, spec-lip-band): in a feature-DENSE region
+  // (sharpAt high) a single raw sample is unreliable — it lands on a shadow or lip
+  // line 3-5px from the next feature and paints a foreign dark mark (the band above
+  // the upper lip). Trust the bilateral (region) colour more there; an isolated
+  // crisp feature (low sharpAt) keeps full raw fidelity.
+  if (lvl >= 2) traw *= 1.0 - 0.7 * sharpAt(cx, cy);
   // colour-specificity ceiling per level (mirror seed/spec-cap): broad layers
   // paint AVERAGED colour, mids halfway, fine layers fully specific
   float tcap = (lvl <= 1) ? 0.35 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;
