@@ -197,6 +197,19 @@
    underpainting, never to misplaced specific colour."
   [lvl]
   (let [l (long lvl)] (cond (<= l 1) 0.35 (<= l 3) 0.7 :else 1.0)))
+
+;; The PHYSICAL stroke stdev below which a level reads as a drawn LINE and earns liner
+;; discipline (gentle ridge snap, direction momentum, line-hold, impasto body). A named
+;; constant so the Clojure and the GLSL twin stay pinned to one value (the GS uses the
+;; literal 3.5 in `bool liner`, `aw` and `body`).
+(def ^:private liner-threshold 3.5)
+(defn liner-scale?
+  "lvl<2 (base/broad coverage) is never a liner; otherwise a level is liner-scale iff
+   its PHYSICAL stdev is below `liner-threshold` (boundary exclusive). Keys on physical
+   size, not the level index — which level paints fine detail depends on the sliders."
+  [lvl ssz]
+  (and (>= (long lvl) 2) (< (double ssz) liner-threshold)))
+
 (defn- stroke-len-frac
   "The Stroke slider as stroke LENGTH: scales the chain step. 2.5 (default) = 1.0."
   [stroke]
@@ -250,7 +263,7 @@
         ;; Stroke/Size the mid levels (2-3) drop below the threshold and join the fine
         ;; liners (4+). Nominal (pre-budget-scale) so it is deterministic and identical
         ;; CPU/GPU (both receive these maps as uniforms).
-        liner?  (fn [lvl] (and (>= (long lvl) 2) (< (nsize lvl) 3.5)))
+        liner?  (fn [lvl] (and (>= (long lvl) 2) (< (nsize lvl) liner-threshold)))
         ;; LINER chains trace one long continuous line instead of the short stitched
         ;; dashes a small-σ grid of 3-8-segment chains lays down (the contour thatch):
         ;; ~28px span target at the default Stroke, scaled BY Stroke so the slider
@@ -340,10 +353,14 @@
         Kc (reduce + 0.0 (map k-of (range 0 (min nlev 4))))
         Kf (if (> nlev 4) (reduce + 0.0 (map k-of (range 4 nlev))) 0.0)
         scale-c (max 1.0 (Math/sqrt (/ Kc budget)))
+        ;; fine-tier remaining budget (the slice left after the broad/mid tier 0–3 has
+        ;; taken its scale-c share). Reused by scale-f and the admission gate.
+        fine-rem (if (> nlev 4)
+                   (max (* 0.15 (double budget)) (- (double budget) (/ Kc (* scale-c scale-c))))
+                   0.0)
         scale-f (if (<= nlev 4)
                   scale-c
-                  (let [rem (max (* 0.15 budget) (- budget (/ Kc (* scale-c scale-c))))]
-                    (max scale-c (Math/sqrt (/ Kf rem)))))
+                  (max scale-c (Math/sqrt (/ Kf fine-rem))))
         scale-of (fn [lvl] (if (<= (long lvl) 3) scale-c scale-f))
         scale scale-c
         ;; build FINEST level first (lvl nlev-1 → 0), assigning cumulative candidate offsets
@@ -371,34 +388,82 @@
         ;; segs-invariant below the 14-seg spacing cap, so the estimate is robust
         ;; to the final segs differing — shorter final chains spend less than
         ;; estimated, which errs conservative.
-        levels (loop [lvl (dec nlev) off 0 out []]
-                 (if (< lvl 0)
+        ;; PHYSICAL per-level stroke spec for a given FINAL (post-clamp) stdev. Factored
+        ;; out so the coarse→fine admission pass and the finest-first output pass derive
+        ;; identical segs/stepf/ovl/sp from the same ssz. ldisc? is the PHYSICAL liner
+        ;; predicate (liner-scale?): chain length keys on stdev, not the level index.
+        phys-spec (fn [lvl ssz]
+                    (let [ldisc? (liner-scale? lvl ssz)
+                          ramp (max 0.0 (min 1.0 (/ (- 2.6 ssz) 1.2)))
+                          ;; ROUND 5a — bound the ASPECT RATIO (mirror spec): a 1px
+                          ;; stroke drew a 21px line (22:1 hair) that outran soft
+                          ;; photographic features. span = min(28·slen·ramp, span-k·ssz),
+                          ;; span-k = 12.0, so a 1px stroke draws ≤12px and a 2.5px
+                          ;; stroke is still bounded by the 28px term. `ramp` + the
+                          ;; seg-count floor / min-32 clamp are unchanged.
+                          span (min (* 28.0 slen ramp) (* 12.0 ssz))
+                          segs (if ldisc?
+                                 (max (seg-count lvl)
+                                      (min 32 (long (Math/round (/ span (* (step-frac lvl) ssz))))))
+                                 (seg-count lvl))
+                          stepf (* (step-frac lvl) (if ldisc? 1.0 slen))
+                          ovl (let [cnt (if ldisc? (min segs 14) (seg-count lvl))
+                                    stf (if ldisc? 1.0 slen)]
+                                (cond (zero? (long lvl)) 0.65
+                                      (<= (long lvl) 3) (* 1.25 (Math/sqrt (* (double cnt) stf)))
+                                      :else             (* 0.7  (Math/sqrt (* (double cnt) stf)))))
+                          sp (if (<= (long lvl) 1)
+                               (* ovl (scale-of lvl) bmin (lsize lvl))
+                               (* ovl ssz))]
+                      {:segs segs :stepf stepf :sp sp}))
+        ;; ADMISSION coarse→fine: keep a level only if it is meaningfully finer than the
+        ;; previous (keep-ratio) AND the budget affords its clamped survivor demand. The
+        ;; physical ssz is clamped to step-ratio×prev so the ladder is strictly monotone,
+        ;; floored at min-phys (never sub-pixel dust). Dropping a level drops every finer
+        ;; one too — a monotone ladder the budget cannot reach simply ends earlier.
+        min-phys   0.6
+        step-ratio 0.7
+        keep-ratio 0.95
+        ssz0  (* (scale-of 0) (nsize 0))
+        ;; broad/mid tier 0..broad-end-1 is ALWAYS admitted — scale-c sized it to fit and
+        ;; the two-tier budget guarantees raising Detail never coarsens those levels. Only
+        ;; the fine tier (4+) is gated: keep it iff it is meaningfully finer than the
+        ;; previous (keep-ratio) AND its clamped survivor demand fits the fine remaining
+        ;; budget. Dropping a fine level drops every finer one too.
+        broad-end (long (min nlev 4))
+        ;; admitted: coarse→fine vector of [lvl ssz] (ssz already clamped to the monotone
+        ;; ladder + min-phys floor during admission).
+        admitted (loop [lvl 1 prev (double ssz0) rem (double fine-rem)
+                        acc [[(long 0) ssz0]]]
+                   (if (>= lvl nlev)
+                     acc
+                     (let [raw (* (scale-of lvl) (nsize lvl))
+                           ssz (max min-phys (min raw (* step-ratio prev)))
+                           {:keys [segs sp]} (phys-spec lvl ssz)
+                           cost (/ (* (double segs) (lvl-frac lvl) area) (* sp sp))
+                           fine? (>= lvl broad-end)]
+                       (if (and fine? (or (>= ssz (* keep-ratio prev)) (> cost rem)))
+                         acc                                  ; drop this + every finer
+                         (recur (inc lvl) ssz (if fine? (- rem cost) rem)
+                                (conj acc [(long lvl) ssz]))))))
+        ;; build FINEST-FIRST with cumulative candidate offsets, so GPU gl_VertexID
+        ;; order == CPU emission order == paint order. :lvl stays the ORIGINAL index so
+        ;; both paths' tiering (liner?, map-kind, raw-floor, …) still keys on it; :nlev
+        ;; becomes the ADMITTED count (the GS decodes exactly that many slots).
+        levels (loop [rem (rseq admitted) off 0 out []]
+                 (if (empty? rem)
                    out
-                   (let [lsc (scale-of lvl)
-                         ssz (* lsc (nsize lvl))
-                         ldisc? (or (>= lvl 4) (and (>= lvl 2) (< ssz 3.5)))
-                         ramp (max 0.0 (min 1.0 (/ (- 2.6 ssz) 1.2)))
-                         segs (if ldisc?
-                                (max (seg-count lvl)
-                                     (min 32 (long (Math/round (/ (* 28.0 slen ramp)
-                                                                  (* (step-frac lvl) ssz))))))
-                                (seg-count lvl))
-                         stepf (* (step-frac lvl) (if ldisc? 1.0 slen))
-                         ovl (let [cnt (if ldisc? (min segs 14) (seg-count lvl))
-                                   stf (if ldisc? 1.0 slen)]
-                               (cond (zero? (long lvl)) 0.65
-                                     (<= (long lvl) 3)  (* 1.25 (Math/sqrt (* (double cnt) stf)))
-                                     :else              (* 0.7  (Math/sqrt (* (double cnt) stf)))))
-                         sp  (* ovl lsc (if (<= (long lvl) 1) (* bmin (lsize lvl)) (nsize lvl)))
-                         nx  (long (Math/ceil (/ area (* sp sp))))
-                         ny  1]
-                     (recur (dec lvl) (+ off (* nx ny))
+                   (let [[lvl ssz] (first rem)
+                         lvl (long lvl)
+                         {:keys [segs stepf sp]} (phys-spec lvl ssz)
+                         nx (long (Math/ceil (/ area (* sp sp))))]
+                     (recur (rest rem) (+ off nx)
                             (conj out {:lvl lvl :ssz ssz :sp sp :th (thresh lvl)
-                                       :nx nx :ny ny :offset off
+                                       :nx nx :ny 1 :offset off
                                        :segs segs :stepf stepf
                                        :bendf (bend-frac lvl) :map-kind (level-map-kind lvl)
                                        :traw (raw-floor lvl)})))))]
-    {:nlev nlev :warp warp :scale scale :levels levels
+    {:nlev (clojure.core/count levels) :warp warp :scale scale :levels levels
      :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))}))
 
 (declare sample-fields)
@@ -492,7 +557,7 @@
       ;; the colour toward the smooth blur): an elongated needle on a soft gradient
       ;; always reads as a directional streak, however faithful its colour.
       [[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap lvl)]])
-    (let [kmax (dec (long segs))
+    (let [coh-seed (double (second (sample-fields nf x y)))
           lal  (level-alpha lvl)
           ;; fine strokes snap onto the edge ridge at the seed and after every step
           ;; (predictor: tangent step; corrector: ridge snap) — the stroke GLUES to
@@ -503,7 +568,19 @@
           ;; makes levels 2-3 smaller than the lvl-4 liners at Fine 1.0). Any small
           ;; accent chain must follow the original detail exactly — momentum,
           ;; gentle ridge snap, line-hold, no Perlin — or it reads as waviness.
-          liner? (or (>= (long lvl) 4) (and (>= (long lvl) 2) (< (double ssz) 3.5)))
+          liner? (liner-scale? lvl ssz)
+          ;; ROUND 5b — chain length follows measured structure (mirror gen): a "line"
+          ;; only exists where the structure tensor is coherent; on smooth skin or
+          ;; bokeh it does not, so a liner seed traces FEWER segments. The nominal
+          ;; segs (from layer-params' span target) ramps from 20% (coh<=0.30, near
+          ;; flat) to 100% (coh>=0.60). Non-liner levels are untouched, and the
+          ;; layer-params BUDGET estimate stays on the nominal segs (shorter actual
+          ;; chains spend less than estimated — errs conservative).
+          coh-w   (max 0.0 (min 1.0 (/ (- coh-seed 0.30) 0.30)))
+          segs-eff (if liner?
+                     (max 2 (long (Math/round (* (double segs) (+ 0.2 (* 0.8 coh-w))))))
+                     (long segs))
+          kmax (dec segs-eff)
           ;; liner chains correct gently mid-stroke (see edge-snap's gain doc)
           sgain (if liner? 0.35 0.65)
           ;; the GEOMETRY snaps to the ridge, but the COLOUR samples the pre-snap
@@ -512,17 +589,41 @@
           ;; seeds land on one side or the other, so contour strokes interleave the
           ;; two sides' actual colours and the edge blends like meeting paint.
           cx0 x cy0 y
+          ;; CRISPNESS = SHARPNESS, not contrast (mirror gen). Probe ALL THREE rungs of
+          ;; the ridge (no early-out) and keep the fraction of the total transition that
+          ;; completes within h1: crisp? = d1 >= 0.75*dmax. A hard step / 1px-AA edge
+          ;; reads d1~=d3 (ratio ~1 -> CRISP, two opaque paints meet, impasto kept); a
+          ;; wide ramp reads d1<<d3 (ratio ~0.35 -> SOFT RAMP, no meeting line -> paint
+          ;; the LOCAL colour, damp the body). Contrast-invariant, so an 8px and a 24px
+          ;; ramp both classify soft — the fixture stays at the spec's 8px. dmax<0.15 ->
+          ;; a thin LINE feature / flat, keep the on-ridge colour. Hoisted ahead of
+          ;; edge-snap + the geometric side offset: it keys both.
+          [nx0 ny0] (let [[t0 _] (sample-fields nf cx0 cy0)]
+                      [(- (Math/sin t0)) (Math/cos t0)])
+          h1 (max 1.75 (* 0.8 ssz))
+          h2 (max 3.0 (* 1.5 ssz))
+          h3 (max 5.0 (* 2.5 ssz))
+          rung (fn [hh]
+                 (let [[rp gp bp] (sample-arr blur-px iw ih (+ cx0 (* nx0 hh)) (+ cy0 (* ny0 hh)))
+                       [rm gm bm] (sample-arr blur-px iw ih (- cx0 (* nx0 hh)) (- cy0 (* ny0 hh)))
+                       d (max (Math/abs (- rp rm)) (Math/abs (- gp gm)) (Math/abs (- bp bm)))]
+                   {:hh hh :rp rp :gp gp :bp bp :rm rm :gm gm :bm bm :d d}))
+          r1 (rung h1)
+          r2 (rung h2)
+          r3 (rung h3)
+          d1 (:d r1) d2 (:d r2) d3 (:d r3)
+          dmax (max d1 d2 d3)
+          crisp? (>= d1 (* 0.75 dmax))
+          soft-ramp? (and (not crisp?) (>= dmax 0.15))
+          dsides dmax
+          disp h1
+          rp (:rp r1) gp (:gp r1) bp (:bp r1)
+          rm (:rm r1) gm (:gm r1) bm (:bm r1)
           [x y] (if snap? (edge-snap dmap nf x y 1.75 hd wd 0.65) [x y])
-          ;; IMPASTO meeting line: bodied liner strokes keep to THEIR side of the
-          ;; ridge — the centre backs off ~half a width toward the colour-sample
-          ;; side, so the two sides' opaque paints MEET at the edge instead of
-          ;; alternating across it (on-ridge bodied strokes scalloped every
-          ;; silhouette into light/dark beads). side=0 (no ridge) leaves the
-          ;; stroke untouched. The backoff follows the sigma-keyed LINER
-          ;; discipline, not the level index: small lvl 2-3 chains (size < 3.5px)
-          ;; snap onto the ridge just like lvl≥4 liners, so they keep their side
-          ;; too — without this they painted a one-side brush-load across both.
-          side (if (and snap? liner?)
+          ;; IMPASTO meeting line: bodied liner strokes keep to THEIR side of the ridge.
+          ;; Suppressed on a SOFT RAMP (side=0, no geometric backoff) — a gradient has no
+          ;; meeting line to draw; thin-line/crisp edges keep today's displacement sign.
+          side (if (and snap? liner? (not soft-ramp?))
                  (let [[th0 _] (sample-fields nf x y)
                        snx (- (Math/sin th0)) sny (Math/cos th0)
                        d   (+ (* (- cx0 x) snx) (* (- cy0 y) sny))]
@@ -541,46 +642,30 @@
           ;; (−dy,dx) reproduces the head offset — and stays consistent through
           ;; field sign flips that would wobble a per-step θ resample.
           sidem (* (double side) (double dirsign))
-          ;; BOUNDARY-SIDE BRUSH-LOAD: a chain running PARALLEL to a colour
-          ;; boundary carries one brush-load for its whole span. Which side's
-          ;; colour it grabs is a three-tier decision:
-          ;;  • dsides<0.15 → no two-sided boundary (a thin LINE feature), keep
-          ;;    the on-ridge colour;
-          ;;  • a GEOMETRIC side (the impasto backoff sign above) wins — the body
-          ;;    was already offset toward that side, so the brush-load samples the
-          ;;    SAME side and the meeting line is drawn by stroke geometry, not by
-          ;;    per-seed colour luck. (The colour side and the geometric side are
-          ;;    computed independently and disagree ~50% of the time on the ridge,
-          ;;    so letting colour pick put a light brush-load body on the dark side.)
-          ;;  • with no geometric side (side=0, flat underpainting) the COLOUR test
-          ;;    decides — but only at a genuine STEP edge. Contour chains are seeded
-          ;;    ON the edge ridge, so the head sits on the AA ramp where even the
-          ;;    bilateral field is half-mixed: dp≈dm and a coin-flip side alternates
-          ;;    between chains, re-creating the regular scallop capsules along every
-          ;;    contour. Hold it to the on-ridge colour unless the head is clearly
-          ;;    on one side (min dp dm < 0.3·dsides); smooth RAMPS have dp≈dm too and
-          ;;    are held likewise.
-          [bax bay] (let [[th0 _] (sample-fields nf cx0 cy0)
-                          nx0 (- (Math/sin th0)) ny0 (Math/cos th0)
-                          hh  (max 1.75 (* 0.8 ssz))
-                          ;; the sample displacement is FLOORED like the probes: a fine
-                          ;; liner's 0.7σ is sub-pixel, which lands the brush-load inside
-                          ;; the AA ramp — exactly the mixed colour it exists to escape.
-                          disp (max 1.5 (* 0.7 ssz))
-                          [rp gp bp] (sample-arr blur-px iw ih (+ cx0 (* nx0 hh)) (+ cy0 (* ny0 hh)))
-                          [rm gm bm] (sample-arr blur-px iw ih (- cx0 (* nx0 hh)) (- cy0 (* ny0 hh)))
-                          dsides (max (Math/abs (- rp rm)) (Math/abs (- gp gm)) (Math/abs (- bp bm)))]
-                      (cond
-                        (< dsides 0.15) [0.0 0.0]
-                        (not (zero? (double side)))
-                        [(* (double side) disp nx0) (* (double side) disp ny0)]
-                        :else (let [[r0 g0 b0] (sample-arr blur-px iw ih cx0 cy0)
-                                    dp (max (Math/abs (- rp r0)) (Math/abs (- gp g0)) (Math/abs (- bp b0)))
-                                    dm (max (Math/abs (- rm r0)) (Math/abs (- gm g0)) (Math/abs (- bm b0)))]
-                                (if (< (min dp dm) (* 0.3 dsides))
-                                  (let [sidec (if (< dp dm) 1.0 -1.0)]
-                                    [(* sidec disp nx0) (* sidec disp ny0)])
-                                  [0.0 0.0]))))
+          ;; BOUNDARY-SIDE BRUSH-LOAD: a chain running PARALLEL to a colour boundary
+          ;; carries one brush-load for its whole span. Keyed on the crispness ladder:
+          ;;  • no rung clears (dsides<0.15) → thin LINE feature, keep the on-ridge colour;
+          ;;  • SOFT RAMP (h2/h3 only) → paint the LOCAL colour (bax=bay=0); a gradient
+          ;;    has no uniform side colour near the ridge, so any off-ridge brush-load
+          ;;    samples a colour absent where the stroke is painted (the dark rim on
+          ;;    out-of-focus fingers). The body is damped separately.
+          ;;  • a crisp GEOMETRIC side wins — the body was already offset toward that
+          ;;    side, so the brush-load samples the SAME side and the meeting line is
+          ;;    drawn by stroke geometry, not per-seed colour luck.
+          ;;  • a crisp edge with no geometric side → the colour test, only at a genuine
+          ;;    STEP edge (min dp dm < 0.3·dsides); else the on-ridge colour.
+          [bax bay] (cond
+                      (< dsides 0.15) [0.0 0.0]
+                      soft-ramp? [0.0 0.0]
+                      (not (zero? (double side)))
+                      [(* (double side) disp nx0) (* (double side) disp ny0)]
+                      :else (let [[r0 g0 b0] (sample-arr blur-px iw ih cx0 cy0)
+                                  dp (max (Math/abs (- rp r0)) (Math/abs (- gp g0)) (Math/abs (- bp b0)))
+                                  dm (max (Math/abs (- rm r0)) (Math/abs (- gm g0)) (Math/abs (- bm b0)))]
+                              (if (< (min dp dm) (* 0.3 dsides))
+                                (let [sidec (if (< dp dm) 1.0 -1.0)]
+                                  [(* sidec disp nx0) (* sidec disp ny0)])
+                                [0.0 0.0])))
           ;; the drift reference + probes read the FORGIVING box field (blurd-px):
           ;; on the razor-sharp bilateral paint field any probe wobble across a
           ;; boundary trips the lift instantly and dashes contour chains into beads
@@ -671,10 +756,14 @@
                 ;; the body follows the SURROUNDING detail density too: a bodied
                 ;; line at full opacity on soft ground reads as pen-on-watercolour;
                 ;; sparse-detail areas get gentler, more gradual contour marks.
-                body (* (if (>= (long lvl) 4)
+                body (* (if liner?
                           (min 1.0 (max 0.0 (/ (- (wavelet/edge-at dmap px py) 0.25) 0.45)))
                           0.0)
-                        (+ 0.4 (* 0.6 (double sgate))))
+                        (+ 0.4 (* 0.6 (double sgate)))
+                        ;; SOFT RAMP: do not draw an opaque line along a gradient — a ramp
+                        ;; has no meeting line, so the impasto body drops to a light glaze
+                        ;; (mirror gen). Crisp/thin-line cases keep full body.
+                        (if soft-ramp? 0.35 1.0))
                 lal2 (+ lal (* (- 0.9 lal) body))
                 ;; BOTH-ENDS taper: a quick lift-on at the head (the brush lands thin
                 ;; and light, swells to full over the first ~18%) on top of the existing
@@ -698,7 +787,8 @@
                 ;; re-mix much harder — a long chain carrying one brush-load across
                 ;; a smooth gradient reads as a feathery streak on the wash; melted
                 ;; strokes keep re-loading the local colour and disappear into it.
-                wsl (cond liner?                  (* 0.35 t)
+                wsl (cond soft-ramp?              1.0     ; SOFT RAMP: re-load the LOCAL colour at each segment — a gradient has no meeting line to carry
+                          liner?                  (* 0.35 t)
                           (pos? (double melt))    (* 0.85 (double melt) t)
                           :else                   0.0)
                 acc (conj acc [px py sz D sn tn al th (* coh (- 1.0 (double melt))) hb
@@ -908,7 +998,7 @@
                               ;; detail strokes (D≈1) stay put → faithful edges. The liner
                               ;; tier gets NO warp at all — fine seeds must land exactly on
                               ;; the detail they trace (see bend-frac).
-                              aw (if (>= (long lvl) 4) 0.0 (* warp (- 1.0 D) ssz))
+                              aw (if (liner-scale? lvl ssz) 0.0 (* warp (- 1.0 D) ssz))
                               x2 (if (< aw 0.2) x
                                    (+ x (* aw (noise/noise2 (* 0.06 x) (* 0.06 y)))))
                               y2 (if (< aw 0.2) y
@@ -1063,12 +1153,25 @@
 ;; --- helpers (unchanged) ----------------------------------------------------
 
 (defn- sample-arr
-  "Nearest-pixel [r g b] from a flat H*W*3 double-array at grid (x,y), clamped."
+  "Bilinear [r g b] from a flat H*W*3 double-array at grid (x,y) (x=row, y=col),
+   CLAMPED at the borders. At integer coords returns the stored texel; at a texel
+   midpoint returns the neighbours' mean. Matches the GLSL sampleRGB exactly
+   (CPU/GPU parity) and the test reference bilerp-src. width=cols, height=rows."
   [^doubles arr width height x y]
-  (let [xi (min (dec height) (max 0 (int x)))
-        yi (min (dec width)  (max 0 (int y)))
-        base (* 3 (+ (* xi width) yi))]
-    [(aget arr base) (aget arr (+ base 1)) (aget arr (+ base 2))]))
+  (let [W (long width) H (long height)
+        gx (double (max 0.0 (min (double (dec H)) (double x))))
+        gy (double (max 0.0 (min (double (dec W)) (double y))))
+        x0 (int gx) y0 (int gy)
+        x1 (min (long (dec H)) (inc x0)) y1 (min (long (dec W)) (inc y0))
+        fx (- gx (double x0)) fy (- gy (double y0))
+        tex (fn [xi yi] (let [b (* 3 (+ (* xi W) yi))]
+                          [(aget arr b) (aget arr (+ b 1)) (aget arr (+ b 2))]))
+        [r00 g00 b00] (tex x0 y0) [r10 g10 b10] (tex x1 y0)
+        [r01 g01 b01] (tex x0 y1) [r11 g11 b11] (tex x1 y1)
+        lx (fn [a b t] (+ (double a) (* (double t) (- (double b) (double a)))))
+        r0 (lx r00 r10 fx) g0 (lx g00 g10 fx) b0 (lx b00 b10 fx)
+        r1 (lx r01 r11 fx) g1 (lx g01 g11 fx) b1 (lx b01 b11 fx)]
+    [(lx r0 r1 fy) (lx g0 g1 fy) (lx b0 b1 fy)]))
 
 (defn- apply-contrast
   "Per-channel linear contrast about 0.5, clamped to [0,1]."

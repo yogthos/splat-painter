@@ -15,6 +15,9 @@
 (defn- assert-contains [src needle label]
   (assert (str/includes? src needle) (str label " missing from shader: " needle))
   true)
+(defn- assert-not-contains [src needle label]
+  (assert (not (str/includes? src needle)) (str label " should be gone from shader: " needle))
+  true)
 
 (defn- hiccup-nodes
   "Depth-first walk over a glimmer widget tree. A node is either a hiccup element
@@ -107,12 +110,15 @@
     (assert-contains gs-src "if (liner && q > 0 && abs(dx0*dxp + dy0*dyp) < 0.82) fade *= 0.3;" "turn-kill: liners dry at corners/junctions")
     (assert-contains gs-src "if (fade < 0.15) break;" "no emission after the brush lifts")
     (assert-contains gs-src "float al = lal2 * fade * (1.0 - 0.65 * tt * tt) * ha;" "both-ends taper × glaze × dry-out alpha")
-    (assert-contains gs-src "float body = ((lvl >= 4) ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0)" "impasto body on strong edges")
+    (assert-contains gs-src "float body = (liner ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0)" "impasto body gated on the physical liner predicate")
     (assert-contains gs-src "float Ev = (lvl <= 3) ? edgeNear(cx, cy, 0.75 * ssz) : edgeAt(cx, cy);" "footprint-sensed edge strength")
     (assert-contains gs-src "float cy = float(u_W) * poshash(i, lvl, 31);" "avalanche-hashed candidate y")
     (assert-contains gs-src "float cx = float(u_H) * poshash(i, lvl, 29);" "avalanche-hashed candidate positions")
     (assert-contains gs-src "uint wang32(uint v){" "Wang avalanche hash")
-    (assert-contains gs-src "float aw = (lvl >= 4) ? 0.0 : u_warp * (1.0 - D) * ssz;" "gen warp amplitude (none on the liner tier)")
+    (assert-contains gs-src "float aw = (lvl >= 2 && ssz < 3.5) ? 0.0 : u_warp * (1.0 - D) * ssz;" "gen warp zeroed on physical liner-scale levels")
+    ;; Round 2: liner? is a pure physical-size predicate (lvl>=2 && ssz<3.5), mirrored in the GS.
+    (assert-contains gs-src "bool liner = (lvl >= 2 && ssz2 < 3.5);" "gen physical liner predicate (mirror seed/liner-scale?)")
+    (assert-not-contains gs-src "(lvl >= 4) || (lvl >= 2" "old lvl>=4 liner disjunct removed (raw-floor/melt still key on lvl)")
     (assert-contains gs-src "float sfoot = sabs;" "footprint-sensed Broad growth gate")
     (assert-contains gs-src "float mloc  = 1.0 + (u_broad - 1.0) * (1.0 - sfoot);" "growth gated by grown footprint")
     ;; hash01 (uint wrap == CPU mod 2^32) + Perlin (permutation texture)
@@ -127,6 +133,10 @@
     (assert-contains gs-src "* max(1.0, ssz * szf / 8.0)) * Ev);" "sigma-aware near-edge shrink")
     (assert-contains gs-src "float tcap = (lvl <= 1) ? 0.35 : (lvl <= 3) ? 0.7 : 1.0;" "progressive colour-specificity ceiling")
     (assert-contains gs-src "float mapAt(int sel, float x, float y){" "scale-matched map selector")
+    (assert-contains gs-src "vec4 fieldBilerp(sampler2D tex, float x, float y, vec2 dim, vec2 src){" "field maps sampled bilinearly (fieldBilerp)")
+    (assert-contains gs-src "vec4 t = fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc);" "detail/sharp/mid maps via fieldBilerp")
+    (assert-contains gs-src "fieldBilerp(u_subjTex, x, y, u_detailDim, u_detailSrc).r" "absolute subjectness via fieldBilerp")
+    (assert-contains gs-src "vec3 r11 = texelFetch(tex, ivec2(y1, x1), 0).rgb;" "colour sampled 4-tap bilinear (sampleRGB), not nearest")
     (assert-contains gs-src "if (fdv >= u_th[k-1] * (0.75 + 0.5 * hash01(i*47 + lvl, j, 23))) return;" "dithered subdivision claim")
     (assert-contains gs-src "uniform sampler2D u_blurHTex;" "gen heavy-blur texture")
     (assert-contains gs-src "float hb = (lvl <= 1) ? 1.0 : 0.0;" "broad strokes use heavy blur")
@@ -153,13 +163,18 @@
     (assert-contains gs-src "if (snapE) { vec2 sp3 = edgeSnap(px, py, liner ? 0.35 : 0.65); px = sp3.x; py = sp3.y; }" "per-step ridge correction (gentle on liners)")
     (assert-contains gs-src "float mx = 0.35*dx + 0.65*dxp, my = 0.35*dy + 0.65*dyp;" "liner direction momentum")
     (assert-contains gs-src "if (phase == 0) ascale = (lvl >= 2 && emitted < 3) ? 0.5 : 1.0;" "measure-then-emit stub glaze")
-    (assert-contains gs-src "bool liner = (lvl >= 4) || (lvl >= 2 && ssz2 < 3.5);" "liner discipline keys on physical stroke size")
+    (assert-contains gs-src "bool liner = (lvl >= 2 && ssz2 < 3.5);" "liner discipline keys on physical stroke size")
     ;; impasto side gate + boundary-side brush-load (mirror seed/stroke-segments):
     ;; the side keys on the LINER discipline (sigma-keyed), not the level index;
     ;; the brush-load is a three-tier decision — no boundary, geometric side, then
     ;; the colour test only at a genuine STEP edge (min dp dm < 0.3*dsides).
     (assert-contains gs-src "if (snapE && liner) {" "impasto side keys on liner, not level")
-    (assert-contains gs-src "float disp = max(1.5, 0.7 * ssz2);" "brush-load displacement floored (escapes the AA ramp)")
+    (assert-contains gs-src "float h1 = max(1.75, 0.8 * ssz2);" "probe ladder: rung 1 (narrow)")
+    (assert-contains gs-src "float h2 = max(3.0, 1.5 * ssz2);" "probe ladder: rung 2 (mid)")
+    (assert-contains gs-src "float h3 = max(5.0, 2.5 * ssz2);" "probe ladder: rung 3 (wide, clears a soft ramp)")
+    (assert-contains gs-src "float dmax = max(d1, max(d2, d3));" "sharpness probe: all three rungs, take dmax")
+    (assert-contains gs-src "float disp = h1;" "disp = h1 (the nearest offset; crisp samples at h1)")
+    (assert-contains gs-src "else if (d1 < 0.75 * dmax)" "sharpness measure: soft ramp when d1 < 0.75*dmax")
     (assert-contains gs-src "bax = side * disp * nx0; bay = side * disp * ny0;" "geometric side wins the brush-load")
     (assert-contains gs-src "if (min(dp, dm) < 0.3 * dsides) {" "colour-test brush-load only at a genuine step edge")
     ;; bokeh melt: absolute subjectness drives the broad tier; local-relative sgate
@@ -167,7 +182,7 @@
     (assert-contains gs-src "float sabs  = subjAbsAt(cx, cy);" "absolute subjectness sample")
     (assert-contains gs-src "float melt = (lvl <= 1) ? clamp((u_broad - 1.0) / 1.5, 0.0, 1.0) * (1.0 - sfoot) : 0.0;" "broad-tier bokeh melt (footprint-gated)")
     (assert-contains gs-src "float bgate = bg0 * bg0;" "Broad-tied mid/fine bokeh gate")
-    (assert-contains gs-src "float wsl = liner ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0);" "canvas re-mix incl. melted broad chains")
+    (assert-contains gs-src "float wsl = softRamp ? 1.0 : (liner ? 0.35 * tt" "canvas re-mix incl. melted broad chains; SOFT RAMP re-loads local colour")
     (assert-contains gs-src "float theta = tc.x, coh0 = tc.y * cohmul;" "melt rounds coherence (and colour) off")
     (assert-contains gs-src "uniform sampler2D u_subjTex;" "absolute-subjectness texture")
     ;; line-hold: liner strokes lift when the sharp map under the brush drops
@@ -178,6 +193,12 @@
     (assert-contains gs-src "float ha = liner ? 0.75 + 0.25 * smoothstep(0.0, 0.15, tt)" "liner-muted head alpha taper")
     (assert-contains gs-src "float dv = mapAt(u_sharp[k], cx, cy);" "scale-matched detail map per level")
     (assert-contains gs-src "int   segs  = u_segs[k];" "per-level segment count")
+    ;; must be (cpx,cpy) — the post-warp, pre-snap seed, matching where the CPU's
+    ;; stroke-segments takes coh-seed from. (cx,cy) is the raw hashed position and
+    ;; diverges once the Perlin warp moves the seed.
+    (assert-contains gs-src "float cohSeed = fieldsAt(cpx, cpy).y;" "coherence sampled at the post-warp seed (chain-length gate)")
+    (assert-contains gs-src "int   segsEff = liner ? max(2, int(floor(float(segs) * (0.2 + 0.8 * cohW) + 0.5))) : segs;" "coherence gate: liner chain length scales with seed coherence")
+    (assert-contains gs-src "if (q >= segsEff || fade < 0.15) break;" "trace loops the coherence-gated segment count")
     (assert-contains gs-src "float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);" "sign-continuous tangent"))
 
   (println "pack-splats:")

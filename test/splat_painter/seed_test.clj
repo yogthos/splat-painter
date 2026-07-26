@@ -3,7 +3,8 @@
             [splat-painter.seed :as seed]
             [splat-painter.wavelet :as wavelet]
             [splat-painter.structure :as structure]
-            [splat-painter.gaussian :as g]))
+            [splat-painter.gaussian :as g]
+            [splat-painter.shader :as shader]))
 
 (defn- approx= [tol a b] (< (Math/abs (- (double a) (double b))) tol))
 (defn- solid [H W [r g b :as c]]
@@ -223,11 +224,22 @@
     ;; 2.6σ). At this image's scale the liner level drops 32→31 segs and spacing
     ;; tightens marginally — a small survivor shift, no behavioural change here
     ;; (the fix targets low-budget fat-liner regimes).
-    (is (= 838 (count splats)))
-    (is (approx= 0.5  16594.301  sx) "Σ mean-x")
-    (is (approx= 0.5  25193.786  sy) "Σ mean-y")
-    (is (approx= 1.0  219920.071 sd) "Σ det(cov)")
-    (is (approx= 0.05 978.926   sc) "Σ colour")))
+    ;; (838→889) Round 1 monotone admission: a fine level (lvl≥4) is dropped unless it is
+    ;; ≥0.7× finer than the previous AND its clamped survivor demand fits the fine budget.
+    ;; This fixture's ladder trims a redundant near-duplicate fine level, so more (denser)
+    ;; candidates survive — count, Σmean and Σcolour rise; Σdet is near-unchanged.
+    ;; (Round 2 physical liner predicate) a lvl≥4 stroke with stdev≥3.5 is no longer a
+    ;; liner — it keeps its head taper and forgoes impasto body/raw, so the fixture's
+    ;; borderline chains shift colour/mean slightly; count and Σdet are unchanged.
+    ;; (889→683) Rounds 4+5: bilinear field/colour sampling shifts means/colour, and the
+    ;; aspect-bounded liner span (≤12px) + coherence gate (short chains on incoherent
+    ;; texture) cut emitted segments — count drops sharply; Σdet/Σcolour move with the
+    ;; shorter, more isotropic chains and the bilinear colours. Re-pinned once (jolt -M:pin).
+    (is (= 683 (count splats)))
+    (is (approx= 0.5  13842.947  sx) "Σ mean-x")
+    (is (approx= 0.5  19912.245  sy) "Σ mean-y")
+    (is (approx= 1.0  219759.323 sd) "Σ det(cov)")
+    (is (approx= 0.05 794.590   sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -324,17 +336,21 @@
     (is (every? (fn [{[r g b] :color}] (and (<= 0.0 r 1.0) (<= 0.0 g 1.0) (<= 0.0 b 1.0))) splats))))
 
 (deftest detail-makes-more-splats-in-texture
-  ;; half-flat, half-checkerboard. detail>0 adds fine levels in the textured half,
-  ;; producing more splats than detail=0 (base only). Budget must be realistic: at a
-  ;; tiny budget the level scale-up dominates and the comparison inverts.
+  ;; half-flat, half-checkerboard. detail>0 admits the fine levels and lowers their
+  ;; placement threshold in the textured half. After rounds 5a/5b the fine chains ON
+  ;; high-frequency texture are deliberately SHORT (aspect-bounded + coherence-gated),
+  ;; so the grand TOTAL can stay flat — the detail slider's effect now shows up as more
+  ;; FINE-LEVEL (lvl≥4) splats in the textured region, not a higher total count.
   (let [img (gray-img 48 48 (fn [x y]
                               (if (< x 24)
                                 0.5                                       ; flat top half
                                 (if (odd? (+ (int x) (int y))) 0.0 1.0)))) ; checkerboard
-        cnt-detail-0 (count (:splats (seed/splat-field img {:count 2000 :size 2.0 :detail 0.0 :variation 0.0})))
-        cnt-detail-1 (count (:splats (seed/splat-field img {:count 2000 :size 2.0 :detail 1.0 :variation 0.0})))]
-    (is (> cnt-detail-1 cnt-detail-0)
-        (str "detail=1 should produce more splats than detail=0: " cnt-detail-1 " vs " cnt-detail-0))))
+        fine (fn [detail] (count (filter #(>= (double (first (:mean %))) 24.0)
+                                         (:splats (seed/splat-field img {:count 2000 :size 2.0
+                                                                          :detail detail :variation 0.0})))))
+        cnt-0 (fine 0.0) cnt-1 (fine 1.0)]
+    (is (> cnt-1 cnt-0)
+        (str "detail=1 should place more splats in the textured half (mean-x≥24) than detail=0: " cnt-1 " vs " cnt-0))))
 
 ;; --- cross-boundary colour-bleed regression ----------------------------------
 
@@ -397,9 +413,11 @@
   ;; The image map is built with the SAME precomputed fields as core/on-image-loaded
   ;; (:structure :blur :blur-drift :blur-heavy :detail :noise-fields); without them
   ;; splat-field samples raw pixels and the edge-aware colour path is never exercised.
-  ;; Controls mirror the golden test. This is the TDD gate for the in-progress bleed
-  ;; fix — it FAILS on the current code (light paint leaks into the dark half) and
-  ;; passes once the leak is closed.
+  ;; Controls mirror the golden test. Regression guard: no dark splat (luma<0.5) may
+  ;; sit >=0.5σ into the light half (cols y>=65) and no light splat into the dark half
+  ;; (cols y<63). The bilateral-blurred boundary reads SOFT under the sharpness measure,
+  ;; so soft-ramp strokes re-load their LOCAL colour (wsl=1) instead of carrying an
+  ;; off-ridge brush-load across — that is what keeps both halves clean.
   (let [img (attach-precomputed-fields (two-tone-image 128 128))
         {:keys [splats]} (seed/splat-field img {:count 4000 :size 6.0 :stroke 2.5
                                                 :detail 0.6 :variation 0.5 :curvature 0.5
@@ -410,7 +428,8 @@
     (doseq [{[mx my] :mean cov :cov color :color} splats
             :let [sm (sigma-max cov) lum (luma color)]]
       (when (and (< my (- 63 (* margin sm))) (> lum 0.5)) (vswap! light-in-dark inc))
-      (when (and (> my (+ 65 (* margin sm))) (< lum 0.5)) (vswap! dark-in-light inc)))
+      (when (and (> my (+ 65 (* margin sm))) (< lum 0.5))
+        (vswap! dark-in-light inc)))
     (is (zero? @light-in-dark)
         (str "light paint bleeding into the dark half: " @light-in-dark
              " splat(s) centred >=0.5σ inside cols y<63 (of " (count splats) " total)"))
@@ -501,14 +520,14 @@
                                               hd wd segs stepf bendf hb traw* sgate blur-px iw ih
                                               th 0.0 map-kind gain blurd-px bph))))]
     (is liner "settings must yield a liner level (lvl≥2, ssz<3.5)")
-    (is (>= segs 24) "thin liners keep the long span")
+    (is (>= segs 10) "liner level keeps a meaningful (round-5a-bounded) span")
     (is (< ssz 3.5))
     (let [contour (keep-indexed (fn [i x] (chain-len i x 40.0)) (range 12 152 7))   ; ~20 seeds ON the line (col 40)
           texture (for [[i [x y]] (map-indexed vector
                                                (for [x (range 15 145 20) y (range 94 150 12)] [x y]))]  ; ~35 seeds in the checker
                     (chain-len (+ i 1000) x y))                                     ; offset i so texture hashes ≠ contour
           cmed (median contour) tmed (median texture)]
-      (is (>= cmed 16)   (str "contour chains should run long; median=" cmed " of " (count contour)))
+      (is (>= cmed (* 0.8 (double segs)))   (str "contour chains run their full (coherence-ungated) span; median=" cmed " of nominal segs " segs))
       (is (<= tmed 8)    (str "texture chains should dry out; median=" tmed " of " (count texture)))
       (is (>= cmed (* 2.0 tmed))
           (str "contour median (" cmed ") must be ≥ 2× texture median (" tmed ")")))))
@@ -553,9 +572,15 @@
                           (str "budget " cnt " lvl " lvl " ssz " ssz
                                ": ramp floor — fat liners stay on the table")))
                     (when (and (>= lvl 2) liner? (<= ssz 1.4))
-                      (is (>= (long segs) 24)
-                          (str "budget " cnt " lvl " lvl " ssz " ssz
-                               ": thin liners keep the long span")))
+                      ;; ROUND 5a bounds the span to ≤12px (min(28·slen·ramp, 12·ssz)):
+                      ;; thin liners no longer draw 24-seg hairlines; they keep a
+                      ;; meaningful span that is ABSOLUTELY bounded (≤12.5·ssz, with the
+                      ;; 0.5-seg rounding slack included). The physical-sigma ramp that
+                      ;; this test pins is unchanged — only its ceiling lowered.
+                      (is (and (>= (long segs) 10)
+                               (<= (* (double segs) (double stepf) ssz) (* 12.5 ssz)))
+                          (str "budget " cnt " lvl " lvl " ssz " ssz " segs " segs
+                               ": thin liner span is meaningful and round-5a-bounded to ≤12px")))
                     (when liner?
                       (is (<= (* (double segs) (double stepf) ssz)
                               (* 1.15 28.0 slen))
@@ -568,3 +593,345 @@
       ;; lvl>=2 stdevs past the ramp floor) or the conditional asserts are vacuous
       (is (some #(and (>= (long (:lvl %)) 2) (> (double (:ssz %)) 2.6)) (:levels p))
           "low budget must produce a fat (ssz>2.6) lvl>=2 level"))))
+
+;; --- Round 1: the level ladder must be monotone -------------------------------
+;; layer-params admits levels coarse→fine under a monotonicity + budget rule so
+;; the finest strokes are never FATTER than coarser ones, redundant near-duplicate
+;; passes collapse, and nothing sub-pixel survives. A large enough synthetic image
+;; is needed to exercise the scale-f>scale-c regime where the defect (finest levels
+;; fatter than the mid tier) actually appears.
+
+(defn- ladder-img
+  "512×512 synthetic image with structure at several scales so the fine/sharp detail
+   maps carry signal (otherwise Kf≈0 and scale-f stays 1 — the defect never appears)."
+  []
+  (gray-img 512 512 (fn [x y]
+                       (let [coarse (* 0.25 (+ 1.0 (Math/sin (* 0.04 (+ x y)))))
+                             fine  (if (odd? (+ (quot x 2) (quot y 3))) 0.12 -0.12)]
+                         (max 0.0 (min 1.0 (+ coarse fine)))))))
+
+(def ^:private ladder-configs
+  (for [size   [6.0 12.0 20.5 50.0]
+        detail [0.0 0.3 0.6 1.0]
+        tiers  [[0.4 0.4 0.4] [1.0 1.0 1.0] [2.5 1.0 0.4]]
+        cnt    [1000 72000 600000]]
+    [size detail tiers cnt]))
+
+(deftest ladder-is-strictly-finer-per-level
+  (let [img  (ladder-img)
+        dmap (wavelet/placement-map img (structure/analyze img))]
+    (doseq [[size detail tiers cnt] ladder-configs
+            :let [{:keys [levels]} (seed/layer-params dmap detail size 0.5 0.5 2.5 tiers cnt 512 512)
+                  ;; coarse→fine: largest ssz first
+                  coarse-fine (sort-by :ssz > levels)]]
+      (doseq [[coarser finer] (partition 2 1 coarse-fine)]
+        (is (<= (double (:ssz finer)) (* 0.95 (double (:ssz coarser))))
+            (str "size " size " detail " detail " tiers " tiers " count " cnt
+                 ": finer ssz " (:ssz finer) " must be <= 0.95× coarser " (:ssz coarser)))))))
+
+(deftest no-duplicate-levels
+  (let [img  (ladder-img)
+        dmap (wavelet/placement-map img (structure/analyze img))]
+    (doseq [[size detail tiers cnt] ladder-configs
+            :let [{:keys [levels]} (seed/layer-params dmap detail size 0.5 0.5 2.5 tiers cnt 512 512)
+                  sig (fn [l] [(:ssz l) (:th l) (:map-kind l) (:nx l)])]]
+      (is (= (count levels) (count (distinct (map sig levels))))
+          (str "size " size " detail " detail " tiers " tiers " count " cnt
+               ": no two admitted levels share [ssz th map-kind nx]")))))
+
+(deftest no-sub-pixel-levels
+  (let [img  (ladder-img)
+        dmap (wavelet/placement-map img (structure/analyze img))]
+    (doseq [[size detail tiers cnt] ladder-configs
+            :let [{:keys [levels]} (seed/layer-params dmap detail size 0.5 0.5 2.5 tiers cnt 512 512)]]
+      (is (every? #(>= (double (:ssz %)) 0.6) levels)
+          (str "size " size " detail " detail " count " cnt ": every admitted ssz >= 0.6")))))
+
+(deftest detail-does-not-coarsen-the-broad-tier
+  (let [img  (ladder-img)
+        dmap (wavelet/placement-map img (structure/analyze img))
+        ssz-by-lvl (fn [detail]
+                     (into {} (map (juxt :lvl :ssz)
+                                   (:levels (seed/layer-params dmap detail 12.0 0.5 0.5 2.5
+                                                               [1.0 1.0 1.0] 72000 512 512)))))
+        lo (ssz-by-lvl 0.6)
+        hi (ssz-by-lvl 1.0)]
+    (doseq [lvl [0 1 2 3]
+            :when (and (lo lvl) (hi lvl))]
+      (is (<= (double (hi lvl)) (double (lo lvl)))
+          (str "level " lvl ": raising Detail 0.6→1.0 must not coarsen the broad/mid tier")))))
+
+(deftest admitted-levels-fit-the-budget
+  ;; The admission keeps the EMITTED field within the budget and the transform-feedback
+  ;; buffer capacity. Measured on the survivor count (splat-field :splats) — the post-cull
+  ;; quantity the buffer actually holds — not the pre-cull candidate×segs upper bound,
+  ;; which the per-level detail threshold always trims down to ≈ the budget.
+  (let [img (gray-img 256 256 (fn [x y]
+                                 (let [coarse (* 0.25 (+ 1.0 (Math/sin (* 0.04 (+ x y)))))
+                                       fine  (if (odd? (+ (quot x 2) (quot y 3))) 0.12 -0.12)]
+                                   (max 0.0 (min 1.0 (+ coarse fine))))))]
+    (doseq [cnt [1000 72000 600000]
+            :let [n (count (:splats (seed/splat-field img {:count cnt :size 6.0 :detail 1.0
+                                                           :variation 0.5 :curvature 0.5})))]]
+      (is (<= n (* 1.5 cnt)) (str "count " cnt ": survivor count within 1.5× of the budget"))
+      (is (<= n shader/max-splats) (str "count " cnt ": never exceeds shader/max-splats")))))
+
+;; --- Round 2: liner-scale? is a pure physical-size predicate ------------------
+(deftest liner-scale-predicate
+  (testing "liner-scale? = (lvl>=2 && ssz<3.5); boundary exclusive, lvl<2 never a liner"
+    (is (not (seed/liner-scale? 4 3.85)))   ; fat lvl-4 stroke is NOT a liner
+    (is (not (seed/liner-scale? 5 4.0)))
+    (is (seed/liner-scale? 2 0.94))         ; small mid chain IS a liner
+    (is (not (seed/liner-scale? 1 0.5)))    ; broad/base never a liner
+    (is (seed/liner-scale? 6 0.7))
+    (is (not (seed/liner-scale? 2 3.5)))))  ; boundary exclusive
+
+(deftest stroke-segments-head-taper-is-physical
+  (testing "a lvl-5 stroke keys its head taper on PHYSICAL ssz, not the level index"
+    ;; flat uniform ground: no edge ⇒ impasto body=0, no colour drift ⇒ fade stays 1, so the
+    ;; first segment's alpha is lal×head-alpha and the ONLY lvl-5 q=0 difference between a
+    ;; 4.0px (non-liner, head-alpha 0.5) and 2.0px (liner, head-alpha 0.75) stroke is that
+    ;; head-alpha factor — their ratio is 0.5/0.75 = 2/3. With the old lvl>=4 rule both were
+    ;; liners (ratio 1); the physical rule makes the fat one a dab.
+    (let [img    (gray-img 32 32 (fn [_ _] 0.5))
+          sfield (structure/analyze img)
+          dmap   (wavelet/placement-map img sfield)
+          nf     (seed/prep-noise sfield)
+          px     (:pixels img)
+          head-a (fn [ssz]
+                   (let [segs (seed/stroke-segments nf dmap 5 16 16 ssz 1.0 0.0 0.5 1 0.5 2.5
+                                                    31 31 8 0.9 0.0 0.0 0.5 1.0 px 32 32
+                                                    0.5 0.0 :sharp 1.0 px 0.5)]
+                     (nth (first segs) 6)))
+          a-fat  (head-a 4.0)
+          a-thin (head-a 2.0)]
+      (is (pos? a-fat) "the fat lvl-5 stroke still emits")
+      (is (< a-fat a-thin) "non-liner head alpha (0.5×lal) is below liner (0.75×lal)")
+      (is (approx= 0.02 (/ (double a-fat) (double a-thin)) (/ 0.5 0.75))
+          "head-alpha ratio 0.5/0.75 proves the taper keys on the physical predicate"))))
+
+;; --- Round 3: two-radius colour probe ---------------------------------------
+(defn- ramp-img [H W dark light rw]
+  ;; two flat colours joined by an rw-wide COSINE ramp (a soft edge) centred at W/2:
+  ;; flat dark flank | cosine smoothstep | flat light flank. The 0.02 sine keeps a
+  ;; hair of signal in the flats but does not wash the ramp away.
+  (let [c0 (/ W 2.0) hw (/ rw 2.0)]
+    (gray-img H W (fn [row col]
+                    (let [t    (max 0.0 (min 1.0 (/ (- col (- c0 hw)) rw)))
+                          edge (* 0.5 (- 1.0 (Math/cos (* Math/PI t))))
+                          tex  (* 0.02 (Math/sin (* 0.6 (+ row col))))]
+                      (max 0.0 (min 1.0 (+ dark (* edge (- light dark)) tex))))))))
+
+(defn- line-img [H W line-col dark light]
+  ;; a genuine 1px hard line (dark) on a light ground — NOT a soft Gaussian. This is
+  ;; the line-art control: the on-ridge colour path must survive the two-radius probe.
+  (gray-img H W (fn [row col]
+                  (let [base (+ 0.4 (* 0.2 (/ col (dec W))))
+                        tex  (* 0.02 (Math/sin (* 0.6 row)))]
+                    (max 0.0 (min 1.0 (+ (if (== col line-col) dark base) tex)))))))
+
+(defn- cheb-from [s ref]
+  (let [[r g b] (:color s)]
+    (max (Math/abs (- (double r) (double ref)))
+         (Math/abs (- (double g) (double ref)))
+         (Math/abs (- (double b) (double ref))))))
+
+(defn- bilerp-src
+  "Reference bilinear [r g b] from the flat H*W*3 source array at grid (x,y), clamped
+  at the borders — x=row (height dim), y=col (width dim), matching seed/sample-arr's
+  coordinate convention. This is what seed/sample-arr becomes in round 4; used here as
+  the ground-truth source colour at a splat's mean."
+  [img x y]
+  (let [W   (:width img)  H (:height img)  ^doubles px (:pixels img)
+        xc  (max 0.0 (min (double (dec H)) (double x)))
+        yc  (max 0.0 (min (double (dec W)) (double y)))
+        x0  (int xc)  y0 (int yc)
+        x1  (min (dec H) (inc x0))  y1 (min (dec W) (inc y0))
+        fx  (- xc x0)  fy (- yc y0)
+        tex (fn [xi yi] (let [b (* 3 (+ (* xi W) yi))]
+                          [(aget px b) (aget px (+ b 1)) (aget px (+ b 2))]))
+        [r00 g00 b00] (tex x0 y0)  [r01 g01 b01] (tex x0 y1)
+        [r10 g10 b10] (tex x1 y0)  [r11 g11 b11] (tex x1 y1)
+        lx  (fn [a b t] (+ a (* t (- b a))))
+        r0 (lx r00 r10 fx)  g0 (lx g00 g10 fx)  b0 (lx b00 b10 fx)
+        r1 (lx r01 r11 fx)  g1 (lx g01 g11 fx)  b1 (lx b01 b11 fx)]
+    [(lx r0 r1 fy) (lx g0 g1 fy) (lx b0 b1 fy)]))
+
+(deftest two-radius-probe-rescues-soft-ramp
+  (testing "a bodied liner splat paints a colour present where it is painted (two-radius probe)"
+    ;; The defect is NOT "far from both flat side colours": a stroke on the ramp centre
+    ;; legitimately paints a mid-tone (the ramp is real image content). The defect is a
+    ;; stroke carrying a colour that is NOT at the place it is painted. So: among alpha>0.5
+    ;; splats at LINER scale (σ<3.5), the splat colour must be within 0.20 (Chebyshev) of
+    ;; the bilinearly-sampled SOURCE colour at the splat's own mean.
+    ;;
+    ;; PRE-FIX (disp = 0.5*chosen_hh, the wrong spec draft): 0.318 (631/1984) violated —
+    ;; the on-ridge mid-blend this round exists to escape. Corrected disp (full chosen_hh)
+    ;; drops it well under 5%.
+    (let [dark 0.1 light 0.85
+          ;; the fixture must carry the same precomputed fields the app uses, or the
+          ;; probes read the RAW ramp instead of the bilateral blur (not the real path).
+          ;; RW=8 (the spec's value): an 8px cosine ramp is a SOFT edge — the bilateral
+          ;; blur spreads it so d1/dmax ≈ 0.35, and the sharpness measure classifies it
+          ;; SOFT and paints the local colour. The OLD contrast measure ("which rung
+          ;; cleared 0.15 first") read h1≥0.15 here and wrongly called it crisp — that
+          ;; bug is exactly what this round fixes. Do NOT widen the ramp to pass: an 8px
+          ;; transition is the real scale of an out-of-focus portrait edge.
+          img  (attach-precomputed-fields (ramp-img 128 128 dark light 8.0))
+          fld  (seed/splat-field img {:count 4000 :size 6.0 :detail 0.6
+                                      :variation 0.5 :curvature 0.5})
+          liner? (fn [s] (let [[c00 _ _ c11] (:cov s)]
+                           (< (Math/sqrt (max (double c00) (double c11))) 3.5)))
+          scope  (filter #(and (> (:alpha %) 0.5) (liner? %)) (:splats fld))
+          cheb-at-mean (fn [s]
+                         (let [[sr sg sb] (:color s)
+                               [mx my] (:mean s)
+                               [vr vg vb] (bilerp-src img mx my)]
+                           (max (Math/abs (- (double sr) (double vr)))
+                                (Math/abs (- (double sg) (double vg)))
+                                (Math/abs (- (double sb) (double vb))))))
+          offenders (filter #(> (cheb-at-mean %) 0.20) scope)
+          frac (if (seq scope) (/ (double (count offenders)) (double (count scope))) 0.0)]
+      (println "RAMP3-DIAG offenders:" (count offenders) "of" (count scope)
+               "liner alpha>0.5 splats; violating fraction =" (double frac))
+      (is (< frac 0.05)
+          (str "too many liner splats carry a colour absent at their location: "
+               (count offenders) "/" (count scope) " = " (double frac))))))
+
+(deftest hard-line-stroke-keeps-line-colour
+  (testing "a 1px hard line still takes the line's own colour (on-ridge path intact)"
+    (let [dark 0.08 light 0.9
+          img  (line-img 64 64 32 dark light)
+          fld  (seed/splat-field img {:count 4000 :size 6.0 :detail 0.6
+                                      :variation 0.5 :curvature 0.5})
+          splats (:splats fld)
+          dark-ones (filter #(<= (cheb-from % dark) 0.12) splats)]
+      (is (seq dark-ones) "the hard line is painted in its own dark colour, not lost"))))
+
+;; --- round 4: bilinear sampling ---------------------------------------------
+
+(deftest sample-arr-is-bilinear
+  (testing "seed/sample-arr interpolates bilinearly: exact at integers, mean at midpoints, clamped"
+    (let [sample @#'splat-painter.seed/sample-arr
+          ;; 2x2 RGB (width=2 cols, height=2 rows), index base 3*(x*2+y):
+          ;;   row0=[black, red], row1=[green, blue]
+          arr (double-array [0 0 0   1 0 0
+                             0 1 0   0 0 1])
+          vapprox (fn [want got]
+                    (< (reduce max 0.0 (map #(Math/abs (- (double %1) (double %2)))
+                                            want got)) 1e-9))]
+      (is (vapprox [0.0 0.0 0.0] (sample arr 2 2 0 0))   "exact at integer (row0,col0)")
+      (is (vapprox [1.0 0.0 0.0] (sample arr 2 2 0 1))   "exact at integer (row0,col1)")
+      (is (vapprox [0.0 1.0 0.0] (sample arr 2 2 1 0))   "exact at integer (row1,col0)")
+      (is (vapprox [0.5 0.0 0.0] (sample arr 2 2 0 0.5)) "col midpoint at row0 = mean of the two cols")
+      (is (vapprox [0.0 0.5 0.0] (sample arr 2 2 0.5 0)) "row midpoint at col0 = mean of the two rows")
+      (is (vapprox [0.25 0.25 0.25] (sample arr 2 2 0.5 0.5)) "centre = mean of all four texels")
+      (is (vapprox [0.0 0.0 0.0] (sample arr 2 2 -0.5 0))     "clamps below the border")
+      (is (vapprox [0.0 0.0 1.0] (sample arr 2 2 5 5))        "clamps above the border"))))
+
+(deftest wavelet-detail-at-is-bilinear
+  (testing "wavelet/detail-at interpolates bilinearly and normalizes into [0,1]"
+    ;; 2x2 detail (row-major detail[x*2+y]): row0=[0.0,0.4], row1=[0.6,1.0]
+    (let [detail (double-array [0.0 0.4 0.6 1.0])
+          dmap   {:h 2 :w 2 :detail detail :sharp detail :dmax 1.0 :src-h 2 :src-w 2}]
+      (is (approx= 1e-9 0.0 (wavelet/detail-at dmap 0 0))   "exact at texel (0,0)")
+      (is (approx= 1e-9 1.0 (wavelet/detail-at dmap 1 1))   "exact at texel (1,1)")
+      (is (approx= 1e-9 0.5 (wavelet/detail-at dmap 0.5 0.5)) "centre = mean of all four (0.5)")
+      (is (approx= 1e-9 0.2 (wavelet/detail-at dmap 0 0.5))   "col midpoint at row0 (0.2)")
+      (is (approx= 1e-9 0.3 (wavelet/detail-at dmap 0.5 0))   "row midpoint at col0 (0.3)")
+      (is (approx= 1e-9 0.0 (wavelet/detail-at dmap 0 -5))    "clamps below")
+      (is (approx= 1e-9 1.0 (wavelet/detail-at dmap 5 5))     "clamps above")
+      (let [dmap2 (assoc dmap :dmax 0.4)]
+        (is (approx= 1e-9 1.0 (wavelet/detail-at dmap2 1 1))
+            "normalized by dmax and clamped to [0,1] (1.0/0.4 -> 1.0)")))))
+
+(deftest mid-at-is-max-of-interpolations
+  (testing "mid-at takes max AFTER interpolating each band (max∘bilerp, not bilerp∘max)"
+    ;; 1x2 grid: mid=[0.0,1.0], sharp=[1.0,0.0]. At the col midpoint:
+    ;;   bilerp(mid)=0.5, bilerp(sharp)=0.5 -> max = 0.5   (correct max∘bilerp)
+    ;;   per-texel max=[1.0,1.0] -> bilerp = 1.0            (wrong bilerp∘max)
+    (let [mid (double-array [0.0 1.0]) sharp (double-array [1.0 0.0])
+          dmap {:h 1 :w 2 :mid mid :sharp sharp :detail mid :dmax 1.0 :src-h 1 :src-w 2}
+          v (wavelet/mid-at dmap 0 0.5)]
+      (is (approx= 1e-9 0.5 v)
+          (str "mid-at at the band midpoint must be the max of the INTERPOLATED bands (0.5), "
+               "not the interpolation of the per-texel max (1.0); got " v)))))
+
+
+;; --- round 5: aspect-bounded span + coherence-gated chain length -------------
+
+(deftest liner-span-is-aspect-bounded
+  (testing "round 5a: a thin liner chain's absolute span (segs·stepf·ssz) is bounded to ≤12.5·ssz"
+    ;; span = min(28·slen·ramp, 12·ssz) caps the 22:1 hairlines that outran soft
+    ;; features. Asserted on THIN liners (ssz<2.6, ramp>0) where the span term — not
+    ;; the seg-count floor — sets the length; fat liners (ramp=0) keep the short table.
+    (let [H 128 W 128
+          img (attach-precomputed-fields
+               {:height H :width W :channels 3
+                :pixels (double-array (mapcat (fn [x] (mapcat (fn [y]
+                  (let [g (if (odd? (+ (quot x 2) (quot y 2))) 0.35 0.65)] [g g g])) (range W))) (range H)))})
+          dmap (:detail img)
+          lp (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 0.7 0.4] 4000 H W)
+          thin-liners (filter #(and (>= (:lvl %) 2) (< (:ssz %) 3.5) (< (:ssz %) 2.6)) (:levels lp))]
+      (is (seq thin-liners) "config yields thin liner levels (ssz<2.6)")
+      (doseq [{:keys [lvl ssz segs stepf]} thin-liners]
+        (let [span (* (double segs) (double stepf) (double ssz))
+              limit (* 12.5 (double ssz))]
+          (is (<= span limit)
+              (str "liner lvl " lvl " ssz " ssz ": traced span " span " > 12.5·ssz " limit
+                   " (segs " segs " stepf " stepf ")")))))))
+
+(deftest low-coherence-seeds-make-short-marks
+  (testing "round 5b: a liner seed traces few segments where the structure tensor is incoherent"
+    ;; A "line" only exists where the structure tensor is coherent. On an isotropic
+    ;; texture (a fine checker — gradients in BOTH axes → coherence ~0) a liner seed
+    ;; draws a short dab; on a clean hard edge (one strong orientation → coherence ~1)
+    ;; it runs long. NOTE: the spec's "smooth gradient" is a misnomer — a 1D ramp is
+    ;; itself oriented (structure tensor rank-1 → coherence HIGH); an isotropic texture
+    ;; is the correct low-coherence fixture.
+    (let [mean-chain (fn [img seeds]
+                       (let [dmap (:detail img) blur-px (:blur img) blurd-px (:blur-drift img)
+                             nf (:noise-fields img)
+                             H (:height img) W (:width img)
+                             hd (double (dec H)) wd (double (dec W)) iw W ih H
+                             rr (/ (double H) 24.0)
+                             lp (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 0.7 0.4] 4000 H W)
+                             liner (->> (:levels lp) (filter #(and (>= (:lvl %) 2) (< (:ssz %) 3.5)))
+                                        (apply max-key :segs))
+                             {:keys [lvl ssz segs stepf bendf map-kind traw]} liner
+                             hash01 #'splat-painter.seed/hash01
+                             subject-at #'splat-painter.seed/subject-at
+                             map-at #'splat-painter.seed/map-at
+                             stroke-segments #'splat-painter.seed/stroke-segments
+                             deff (fn [D] (min 1.0 (* 0.6 (double D) 2.2)))
+                             len (fn [i cx cy]
+                                   (let [D (deff (map-at dmap map-kind cx cy))
+                                         sgate (subject-at dmap cx cy rr)
+                                         tn (* 0.2 (- (hash01 (+ (* i 37) lvl) 0 13) 0.5))
+                                         ds (if (< (hash01 (+ (* i 41) lvl) 0 17) 0.5) 1.0 -1.0)
+                                         bph (hash01 (+ (* i 67) lvl) 0 53)]
+                                     (count (stroke-segments nf dmap lvl cx cy ssz D 0.0 tn ds 0.5 2.5
+                                                             hd wd segs stepf bendf 0.0 traw sgate blur-px iw ih
+                                                             0.0 0.0 map-kind 1.0 blurd-px bph))))]
+                         (when liner
+                           (/ (double (transduce (map-indexed (fn [i [x y]] (len i x y))) + 0 seeds))
+                              (max 1 (count seeds))))))
+          edge-img (attach-precomputed-fields
+                    {:height 128 :width 128 :channels 3
+                     :pixels (double-array (mapcat (fn [x] (mapcat (fn [y]
+                       (let [g (if (<= 39 y 40) 0.28 0.72)] [g g g])) (range 128))) (range 128)))})
+          checker-img (attach-precomputed-fields
+                       {:height 128 :width 128 :channels 3
+                        :pixels (double-array (mapcat (fn [x] (mapcat (fn [y]
+                          (let [g (if (odd? (+ (quot x 2) (quot y 2))) 0.35 0.65)] [g g g])) (range 128))) (range 128)))})
+          edge-seeds (for [x (range 20 120 8)] [x 40.0])      ; ~12 seeds ON the hard edge
+          tex-seeds  (for [x (range 20 120 12) y (range 20 120 12)] [x y])  ; ~80 seeds in the checker
+          edge-mean (mean-chain edge-img edge-seeds)
+          tex-mean  (mean-chain checker-img tex-seeds)]
+      (is edge-mean  "config yields a liner level on the edge image")
+      (is tex-mean   "config yields a liner level on the checker image")
+      (when (and edge-mean tex-mean)
+        (is (>= edge-mean 8.0) (str "coherent seeds run long; edge mean " edge-mean))
+        (is (<= tex-mean 4.0) (str "incoherent seeds make short marks; checker mean " tex-mean))
+        (is (> edge-mean (* 2.0 tex-mean))
+            (str "coherent mean (" edge-mean ") must be ≥ 2× incoherent mean (" tex-mean ")"))))))
