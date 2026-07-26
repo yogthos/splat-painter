@@ -292,9 +292,17 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   // region; raw specificity is only trusted when consistent with it. In-region
   // micro-contrast keeps full raw pop; an edge-straddling raw sample is pulled to
   // the region colour so it cannot bleed across a boundary at high raw weight.
+  // SIZE-AWARE: the clamp exists because a FAT stroke sampling one raw pixel that
+  // disagrees with its region smears a blotch across its whole sigma. A 1-2px dab is
+  // the size of the feature it is painting — its raw sample IS the detail, not an
+  // outlier — and clamping it erased fine detail exactly where detail lives (an eye
+  // or a glasses rim easily exceeds dcl 0.27, which pinned raw to the bilateral blur
+  // and is why small features read soft however sharp the mark). Fade the clamp in
+  // with stroke size: off at <=1.5px, full by 4.5px.
   vec3  dr    = abs(raw - bilat);
   float dcl   = max(dr.r, max(dr.g, dr.b));
-  float wcl   = clamp((dcl - 0.12) / 0.15, 0.0, 1.0);
+  float sizew = clamp((csz - 1.5) / 3.0, 0.0, 1.0);
+  float wcl   = clamp((dcl - 0.12) / 0.15, 0.0, 1.0) * sizew;
   raw = mix(raw, bilat, wcl);
   float coh = MIN_COH + (1.0 - MIN_COH) * coh0;
   float e   = 1.0 + min(u_stroke, 1.5) * coh * (0.25 + 0.75 * D);
@@ -453,13 +461,17 @@ void main(){
   float hb = (lvl <= 1) ? 1.0 : 0.0;
   // colour-rawness floor rises with fineness (seed/raw-floor): small strokes paint
   // faithful colour — a half-blur blend at feature scale softens the feature away
-  float traw = (lvl <= 1) ? 0.0 : (lvl <= 3) ? 0.45 : (lvl <= 5) ? 0.7 : 0.85;
+  // EXPERIMENT: colour ladder keyed on PHYSICAL size, not level index. Once the
+  // monotone ladder ends at level 2-3, index-keyed tiering gives the FINEST strokes
+  // mid-tier averaged colour (t capped at 0.7) — blur at exactly the scale we want
+  // fidelity. Size-keyed restores small-stroke faithful colour.
+  float traw = (ssz2 < 1.5) ? 0.85 : (ssz2 < 3.5) ? 0.7 : (ssz2 < 8.0) ? 0.45 : 0.0;
   // fine colour rawness follows the local detail density (mirror seed): a crisp
   // raw-colour mark never pops at full contrast on soft ground
-  if (lvl >= 4) traw *= 0.6 + 0.4 * sgate;
+  if (ssz2 < 3.5) traw *= 0.6 + 0.4 * sgate;
   // colour-specificity ceiling per level (mirror seed/spec-cap): broad layers
   // paint AVERAGED colour, mids halfway, fine layers fully specific
-  float tcap = (lvl <= 1) ? 0.35 : (lvl <= 3) ? 0.7 : 1.0;
+  float tcap = (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
     emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt);
     return;
@@ -501,20 +513,16 @@ void main(){
   // progressive refinement: finer layers GLAZE (translucent touches over the
   // accumulated underpainting) instead of overwriting it; the overlapping fine
   // tier glazes lightest so stacked strokes MIX (mirror seed/level-alpha)
-  float lal = (lvl <= 1) ? 1.0 : (lvl <= 3) ? 0.85 : (lvl <= 5) ? 0.65 : 0.55;
+  // paint translucency by PHYSICAL size (mirror seed/level-alpha): broad = opaque
+  // coverage, mid = glaze, DABS near-opaque because they are placed sparsely and each
+  // must stand on its own — glaze alpha there just averages neighbours into mush.
+  float lal = (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;
   float fade = 1.0;
-  // ROUND 5b — chain length follows measured structure (mirror seed): a LINE only
-  // exists where the structure tensor is coherent; on smooth skin/bokeh a liner seed
-  // traces FEWER segments. cohSeed at the seed ramps the nominal segs 20%→100% over
-  // coherence 0.30→0.60. Non-liner levels untouched; layer-params budget stays nominal.
-  // sampled at the PRE-SNAP but POST-WARP position (cpx,cpy) — the CPU takes it from
-  // stroke-segments' x/y args, which are the Perlin-warped, clamped seed. Sampling the
-  // raw hashed (cx,cy) here diverged whenever the warp actually moved the seed, i.e.
-  // level ssz >= 3.5 (warp on) while the per-seed ssz2 < 3.5 (liner on) — exactly the
-  // near-edge shrink regime, where coherence 2px away can give a different segsEff.
-  float cohSeed = fieldsAt(cpx, cpy).y;
-  float cohW    = clamp((cohSeed - 0.30) / 0.30, 0.0, 1.0);
-  int   segsEff = liner ? max(2, int(floor(float(segs) * (0.2 + 0.8 * cohW) + 0.5))) : segs;
+  // NO tensor-coherence gate on chain length (mirror seed/stroke-segments). Tried and
+  // removed: coherence does not discriminate a line from a smooth gradient, because a
+  // gradient is rank-1 and so reads as perfectly ORIENTED. Measured on the test
+  // portrait: strong-edge median 0.95 vs FLAT median 0.72. It was a no-op where it was
+  // meant to act (0.05/255 on the render), so the nominal segs stands.
   // BOUNDARY-SIDE BRUSH-LOAD (mirror seed/stroke-segments): where the two sides
   // across the tangent genuinely differ (a boundary, not a thin LINE feature),
   // the brush-load samples ~0.7 sigma on the stroke's OWN colour side — chains
@@ -572,133 +580,120 @@ void main(){
   // razor-sharp bilateral paint field any probe wobble across a boundary trips
   // the lift instantly and dashes contour chains into beads
   vec3 headBlur = sampleRGB(u_blurDTex, cpx + bax, cpy + bay);
-  // MEASURE-THEN-EMIT (mirror seed/stroke-segments): phase 0 traces the whole
-  // chain without emitting to count its segments; an accent chain that dies to
-  // colour drift under 3 segments is a STUB — a tap, not a stroke — and phase 1
-  // emits it at glaze alpha instead of slapping near-opaque bead-dashes along
-  // glasses frames and strap edges. The walk is fully deterministic, so both
-  // phases trace identical paths.
-  float ascale = 1.0;
+  // FEATURE-FOLLOWING TRACER (mirror seed/stroke-segments): a stroke ends where the
+  // FEATURE ends or turns — CLEAN breaks, no segment emitted at the break — so a contour
+  // chunks into the strokes a draughtsman draws (the top of an eye one line, the bottom
+  // another). Detail tiers (lvl>=2) replace the old fixed-span cap, TURN-KILL, the racc
+  // path-roughness accumulator and the coherence-follow fade with GEOMETRIC stops + a
+  // single chroma BACKSTOP; broad/coverage tiers keep their two-tier dry-out. LINE-HOLD
+  // stays. The walk is fully deterministic, so phase 0 counts the traced length and
+  // captures the stop reason; phase 1 re-walks the identical path and emits with the
+  // ACTUAL-length taper. (mirror seed two-phase.) GLSL has no returns from a loop, so
+  // the stop reason rides in an int and every stop is a clean break.
+  const int RSN_CAP = 0, RSN_RIDGE = 1, RSN_CORNER = 2, RSN_CHROMA = 3, RSN_LH = 4, RSN_DRIFT = 5;
+  int reason   = RSN_CAP;
+  int finalLen = 0;
   for (int phase = 0; phase < 2; phase++) {
-  px = x2; py = y2; dxp = 0.0; dyp = 0.0; fade = 1.0;
-  vec3 prevB = sampleRGB(u_blurTex, px, py); float racc = 0.0;
-  int emitted = 0;
-  for (int q = 0; q < SEGS; q++) {
-    if (q >= segsEff || fade < 0.15) break;
-    if (q > 0) {
-      // TWO-TIER dry-out (mirror seed): gradual drift DRIES the brush (x0.4);
-      // a LARGE mismatch (>0.45) means the stroke EXITED its colour region — a
-      // chain escaping a curved silhouette would paint its dark brush-load into
-      // the background — so the painter LIFTS the brush and emits nothing.
-      // the broad tier lifts IMMEDIATELY on any real colour change (0.18): its
-      // opaque underpainting chains at the largest sizes must never carry paint
-      // across a boundary (one escaped segment = a huge wrong-colour ghost cloud)
-      vec3 cb = sampleRGB(u_blurDTex, px + bax, py + bay);
-      vec3 dcl = abs(cb - headBlur);
-      float dmx = max(dcl.r, max(dcl.g, dcl.b));
-      // liners lift HARD at 0.32 (mirror seed): long chains escaping a dark
-      // contour read the blurred drift field a step late - at 0.45 each escape
-      // painted several bodied dark segments (scribbles at curved contours)
-      if (dmx > ((lvl <= 1) ? 0.18 : (liner ? 0.32 : 0.45))) fade = 0.0;
-      else if (dmx > (liner ? 0.2 : 0.22)) fade *= (liner ? 0.35 : 0.4);
-      // PATH-COLOUR ROUGHNESS (mirror seed/stroke-segments): the box drift field
-      // dilutes a 1-3px feature's contrast below the drift thresholds at liner
-      // scale - chains snapped onto a fine feature carried its ink across the
-      // neighbouring micro-regions (detail-area noise). Accumulate the SHARP
-      // bilateral's per-step change along the painted path: feature-crossing
-      // chains churn (~0.7/span) and dry out; clean-contour chains stay stable
-      // (~0.04/span) and keep their full span - the thatch fix is preserved.
-      if (liner) {
-        vec3 cpb = sampleRGB(u_blurTex, px, py);
-        vec3 dpb = abs(cpb - prevB);
-        racc += max(dpb.r, max(dpb.g, dpb.b));
-        prevB = cpb;
-        if (racc > 0.35) fade = 0.0;
-        else if (racc > 0.2) fade *= 0.5;
+    px = x2; py = y2; dxp = 0.0; dyp = 0.0; fade = 1.0;
+    int emitted = 0;
+    for (int q = 0; q < SEGS; q++) {
+      if (q >= segs) break;                       // per-level SEGS cap (mirror seed kmax = segs-1)
+      vec2  tc  = fieldsAt(px, py);
+      float dx0 = cos(tc.x), dy0 = sin(tc.x);
+      float ev  = edgeAt(px, py);
+      bool  detail = (lvl >= 2);
+      // GEOMETRIC STOPS — clean break, no segment emitted (mirror seed):
+      //   edge-floor 0.10: the ridge died, the feature has ended -> :ridge
+      //   bend-cos 0.90: |dot(field-dir, prev-step)| < 0.90 (~26deg/step) -> a :corner
+      if (q > 0 && detail) {
+        if (ev < 0.10) { reason = RSN_RIDGE; break; }
+        if (abs(dx0*dxp + dy0*dyp) < 0.90) { reason = RSN_CORNER; break; }
       }
+      // COLOUR is a BACKSTOP, not a stop signal (mirror seed): along a real feature the
+      // colour SHOULD change, so the old two-tier dry-out + racc fired after 2-4 segs in
+      // detailed areas and WAS the 'short disjointed lines' artifact. Detail tiers keep
+      // only a HARD stop at runaway 0.60 (the stroke wandered into a foreign colour
+      // region); broad/coverage tiers keep their two-tier dry-out unchanged.
+      float dmx = 0.0;
+      if (q > 0) {
+        vec3 cb = sampleRGB(u_blurDTex, px + bax, py + bay);
+        vec3 dcl = abs(cb - headBlur);
+        dmx = max(dcl.r, max(dcl.g, dcl.b));
+      }
+      bool chroma = (detail && q > 0 && dmx > 0.60);
+      if (q > 0) {
+        if (chroma) fade = 0.0;                   // detail tiers: only the chroma backstop
+        else if (!detail) {
+          if (dmx > 0.18) fade = 0.0; else if (dmx > 0.22) fade *= 0.4;   // broad two-tier dry-out
+        }
+      }
+      // LINE-HOLD stays — the one non-geometric stop (mirror seed): a liner that walked
+      // off ITS OWN placement map has left the feature, so lift. It reads the level's map
+      // (the right signal); the old coherence-follow fade is removed (a gradient is
+      // rank-1 = perfectly oriented, so coherence never separated a line from bokeh).
+      float mv = (liner && q > 0) ? mapAt(u_sharp[k], px, py) * gain : 1.0;
+      bool  lh = (liner && q > 0 && mv < 0.35 * th);
+      if (lh) fade = 0.0;
+      else if (liner && q > 0 && mv < 0.7 * th) fade *= 0.5;
+      if (fade < 0.15) {
+        reason = chroma ? RSN_CHROMA : (lh ? RSN_LH : RSN_DRIFT);
+        break;                                   // brush lifted — emit nothing at this step
+      }
+      // EMIT (phase 1 only). tt follows the ACTUAL traced length captured in phase 0
+      // (finalLen), so a corner-broken stroke still gets a full head->tail profile.
+      if (phase == 1) {
+        float tt = float(q) / float(max(1, finalLen - 1));
+        float body = (liner ? clamp((ev - 0.25) / 0.45, 0.0, 1.0) : (0.4 + 0.6 * sgate))
+                   * (softRamp ? 0.35 : 1.0);   // SOFT RAMP: a gradient has no meeting line
+        float lal2 = lal + max(0.0, 0.9 - lal) * body;
+        float hw = liner ? 0.8  + 0.2  * smoothstep(0.0, 0.18, tt)
+                         : 0.55 + 0.45 * smoothstep(0.0, 0.18, tt);
+        float ha = liner ? 0.75 + 0.25 * smoothstep(0.0, 0.15, tt)
+                         : 0.5  + 0.5  * smoothstep(0.0, 0.15, tt);
+        float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt)) * hw;
+        float al = lal2 * fade * (1.0 - 0.65 * tt * tt) * ha;
+        // DETAIL tiers RE-LOAD colour each segment (wsl=1): one brush-load per stroke is
+        // right for a gestural mark, but at detail scale (~8px span) it drags the head's
+        // colour onto the next feature (nostril/philtrum/lip line 3-5px apart on a face).
+        float wsl = softRamp ? 1.0 : (detail ? 1.0 : ((melt > 0.0) ? 0.85 * melt * tt : 0.0));
+        // stub-glaze (mirror seed/stub-glaze): only a chain that died to the chroma
+        // BACKSTOP — it FAILED to follow a feature — is demoted to glaze (x0.5). A
+        // ridge/corner/cap/line-hold stop is a COMPLETE short stroke at full alpha.
+        if (detail && reason == RSN_CHROMA) al *= 0.5;
+        // offset drops for re-loading tiers: a CARRIED brush-load (wsl<1) samples
+        // cpx+bax to escape the AA ramp; a per-segment RELOAD (wsl>=1) samples its own
+        // position, where the fixed offset would draw the dark ground through a lit shape.
+        emitSplat(px, py, cpx + bax*(wsl < 1.0 ? 1.0 : 0.0) + wsl*(px - cpx),
+                        cpy + bay*(wsl < 1.0 ? 1.0 : 0.0) + wsl*(py - cpy),
+                  sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt);
+      }
+      emitted++;
+      // bend gated by coherence, physical size AND the wavelet edge map (mirror seed);
+      // per-seed phase decorrelates neighbours into natural wobble instead of a weave
+      float bend = u_curv * 0.9 * bendf * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)
+                 * (1.0 - 0.7*tc.y)
+                 * (1.0 - clamp((ev - 0.3) / 0.3, 0.0, 1.0))
+                 * (noise2(0.05*px + 89.0*bph, 0.05*py + 57.0*bph) - 0.5);
+      float cb = cos(bend), sb = sin(bend);
+      float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);
+      float dx1 = sgn*dx0, dy1 = sgn*dy0;
+      float dx = cb*dx1 - sb*dy1, dy = sb*dx1 + cb*dy1;
+      if (liner && q > 0) {
+        float mx = 0.35*dx + 0.65*dxp, my = 0.35*dy + 0.65*dyp;
+        float ml = sqrt(mx*mx + my*my);
+        if (ml > 1e-6) { dx = mx/ml; dy = my/ml; }
+      }
+      float L = ssz2 * stepf;
+      px = clamp(px + L*dx, 0.0, float(u_H - 1));
+      py = clamp(py + L*dy, 0.0, float(u_W - 1));
+      if (snapE) { vec2 sp3 = edgeSnap(px, py, liner ? 0.85 : 0.65); px = sp3.x; py = sp3.y; }
+      if (side != 0.0) {
+        px = clamp(px + sidem * 0.55 * ssz2 * (-dy), 0.0, float(u_H - 1));
+        py = clamp(py + sidem * 0.55 * ssz2 * ( dx), 0.0, float(u_W - 1));
+      }
+      dxp = dx; dyp = dy;
     }
-    vec2 tc = fieldsAt(px, py);
-    // follow the line only while there IS a line (mirror seed/stroke-segments):
-    // when coherence collapses (busy texture, letter junctions) the liner stroke
-    // runs dry fast — long chains wandering through dense detail smear it.
-    // ...but a strong edge under the brush keeps the line alive: real ink lines
-    // push THROUGH junctions, where coherence dips while edge energy stays high
-    if (q > 0 && liner && tc.y < 0.35 && edgeAt(px, py) < 0.5) fade *= 0.5;
-    // LINE-HOLD (mirror seed/stroke-segments): a liner stroke exists to trace the
-    // fine structure it was seeded on. When ITS OWN placement map under the
-    // brush falls below the level's own placement threshold, the stroke has
-    // WALKED OFF its line — a chain escaping a silhouette tangentially would drag
-    // its bodied paint into the featureless background (ghost tendrils) — lift.
-    // `gain` is the level's full placement gain, so hold matches placement.
-    if (q > 0 && liner) {
-      float mv = mapAt(u_sharp[k], px, py) * gain;
-      if (mv < 0.35 * th) fade = 0.0;
-      else if (mv < 0.7 * th) fade *= 0.5;
-    }
-    if (fade < 0.15) break;                        // brush lifted — emit nothing
-    float tt = float(q) / float(segsEff - 1);
-    // IMPASTO body (mirror seed/stroke-segments): fine liner strokes on a strong
-    // edge paint nearly opaque — the contour is defined by thin bodied lines whose
-    // soft shoulders blend; off-edge texture strokes keep the light mixing glaze.
-    float body = (liner ? clamp((edgeAt(px, py) - 0.25) / 0.45, 0.0, 1.0) : 0.0)
-               * (0.4 + 0.6 * sgate) * (softRamp ? 0.35 : 1.0);   // SOFT RAMP: a gradient has no meeting line, body -> light glaze
-    float lal2 = lal + (0.9 - lal) * body;
-    // BOTH-ENDS taper (mirror seed/stroke-segments): quick lift-on at the head on top
-    // of the existing tail dry-out, so the mark tapers at BOTH ends like a real
-    // stroke. The LINER tier keeps only a hint (overlapping chains hand off — strong
-    // per-chain taper lumps the handoffs into a string of tadpoles).
-    float hw = liner ? 0.8  + 0.2  * smoothstep(0.0, 0.18, tt)
-                     : 0.55 + 0.45 * smoothstep(0.0, 0.18, tt);
-    float ha = liner ? 0.75 + 0.25 * smoothstep(0.0, 0.15, tt)
-                     : 0.5  + 0.5  * smoothstep(0.0, 0.15, tt);
-    float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt)) * hw;  // width tapers at both ends
-    float al = lal2 * fade * (1.0 - 0.65 * tt * tt) * ha; // alpha: lift-on × glaze × dry-out
-    // the brush-load RE-MIXES with the canvas (mirror seed): the colour-sample
-    // point slides up to 35% toward the current position along the stroke.
-    // MELTED broad chains re-mix much harder — one brush-load carried across a
-    // smooth gradient reads as a feathery streak on the wash.
-    float wsl = softRamp ? 1.0 : (liner ? 0.35 * tt : ((melt > 0.0) ? 0.85 * melt * tt : 0.0));   // SOFT RAMP re-loads LOCAL colour (no meeting line to carry)
-    if (phase == 1) emitSplat(px, py, cpx + bax + wsl*(px - cpx), cpy + bay + wsl*(py - cpy), sz, D, snoise, tnoise, al * ascale, hb, traw, tcap, 1.0 - melt);
-    emitted++;
-    // bend gated by coherence, physical size AND the wavelet edge map (mirror
-    // seed): a chain riding a real edge traces it straight; offset by a per-seed
-    // phase so neighbours decorrelate into natural wobble instead of a weave
-    float bend = u_curv * 0.9 * bendf * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)
-               * (1.0 - 0.7*tc.y)
-               * (1.0 - clamp((edgeAt(px, py) - 0.3) / 0.3, 0.0, 1.0))
-               * (noise2(0.05*px + 89.0*bph, 0.05*py + 57.0*bph) - 0.5);
-    float cb = cos(bend), sb = sin(bend);
-    float dx0 = cos(tc.x), dy0 = sin(tc.x);
-    float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);
-    float dx1 = sgn*dx0, dy1 = sgn*dy0;
-    float dx = cb*dx1 - sb*dy1, dy = sb*dx1 + cb*dy1;
-    // DIRECTION MOMENTUM (mirror seed): liner strokes carry 65% of the previous
-    // step's direction — a field-noise-driven turn every step waves the line
-    if (liner && q > 0) {
-      float mx = 0.35*dx + 0.65*dxp, my = 0.35*dy + 0.65*dyp;
-      float ml = sqrt(mx*mx + my*my);
-      if (ml > 1e-6) { dx = mx/ml; dy = my/ml; }
-    }
-    // u_stepf is FINAL (layer-params baked Stroke in: span via segs on liners,
-    // step via stepf on broad/mid) — use it as-is, no in-shader stroke factor.
-    float L = ssz2 * stepf;
-    // TURN-KILL (mirror seed): when the field turns sharper than cos ~35deg per
-    // step the chain hit a CORNER or junction - long chains plowed through on
-    // momentum and flew off tangentially at pointed contours (eye corners),
-    // scribbling their dark load onto the ground. The brush dries fast instead.
-    if (liner && q > 0 && abs(dx0*dxp + dy0*dyp) < 0.82) fade *= 0.3;
-    px = clamp(px + L*dx, 0.0, float(u_H - 1));
-    py = clamp(py + L*dy, 0.0, float(u_W - 1));
-    if (snapE) { vec2 sp3 = edgeSnap(px, py, liner ? 0.35 : 0.65); px = sp3.x; py = sp3.y; }
-    // side offset along the stroke's OWN motion perpendicular (mirror seed) —
-    // the path is a stable frame; a per-step theta resample wobbled the line
-    if (side != 0.0) {
-      px = clamp(px + sidem * 0.55 * ssz2 * (-dy), 0.0, float(u_H - 1));
-      py = clamp(py + sidem * 0.55 * ssz2 * ( dx), 0.0, float(u_W - 1));
-    }
-    dxp = dx; dyp = dy;
-  }
-  if (phase == 0) ascale = (lvl >= 2 && emitted < 3) ? 0.5 : 1.0;
+    if (phase == 0) finalLen = emitted;
   }
 }")
 
