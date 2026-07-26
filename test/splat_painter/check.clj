@@ -153,6 +153,7 @@
     (assert-contains gs-src "float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt)) * hw;" "both-ends stroke width taper (seed-jittered size)")
     (assert-contains gs-src "float lal = (lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;" "per-physical-size glaze alpha")
     (assert-contains gs-src "float traw = (lvl <= 1) ? 0.0 : (ssz2 < 1.5) ? 0.85 : (ssz2 < 3.5) ? 0.7 : (ssz2 < 8.0) ? 0.45 : 0.0;" "per-physical-size raw floor")
+    (assert-contains gs-src "if (lvl >= 2) traw *= 1.0 - 0.7 * sharpAt(cx, cy);" "density-scaled traw: trust region colour where fine detail crowds")
     (assert-contains gs-src "if (lvl > 0 && lvl <= 2 && k > 0) {" "subdivision claim gated to broad/mid tiers")
     (assert-contains gs-src "float bend = u_curv * 0.9 * bendf * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)" "coherence-gated Perlin stroke bend")
     (assert-contains gs-src "float bph = hash01(i*67 + lvl, j, 53);" "per-seed bend phase hash (decorrelates neighbours)")

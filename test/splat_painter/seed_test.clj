@@ -4,7 +4,8 @@
             [splat-painter.wavelet :as wavelet]
             [splat-painter.structure :as structure]
             [splat-painter.gaussian :as g]
-            [splat-painter.shader :as shader]))
+            [splat-painter.shader :as shader]
+            [splat-painter.image :as image]))
 
 (defn- approx= [tol a b] (< (Math/abs (- (double a) (double b))) tol))
 (defn- solid [H W [r g b :as c]]
@@ -1084,3 +1085,47 @@
       ;; seeds whose eigenvector sign points into the bend), not a guaranteed shorter
       ;; length. The :corner stops above (co-corner>=2) are the real corner signal.
       (is (pos? co-len) (str "corner chains still emit — the tracer rides the L; median " co-len " of " (count co))))))
+
+;; --- lip-band / dark-mark: detail-stroke raw-fidelity scales with fine-detail density ---
+;; (spec-lip-band) A ~1.4px detail stroke takes raw-floor 0.85, so 85% of its colour is a
+;; single RAW sample. Where features crowd (a shadow / lip line 3-5px from the next
+;; feature) that sample is a foreign dark value, and the stroke carrying it paints a dark
+;; mark across lighter neighbours -- the band above the upper lip. density-scaled-traw
+;; scales the floor by the finest wavelet band (:sharp), so detail strokes there trust the
+;; bilateral (region) colour more; an isolated crisp feature keeps full fidelity.
+;;
+;; Why this verifies the MECHANISM rather than an end-to-end render: the artifact is a
+;; 1024px real-image boundary phenomenon that cannot be reproduced synthetically at a
+;; renderable size. Three pipeline interactions defeat any small synthetic fixture:
+;;   (1) :sharp is ~0 below ~1024px (no sub-2px detail for the finest band);
+;;   (2) the bilateral is edge-aware, so it PRESERVES any hard-edge synthetic texture
+;;       (bilat=raw), which makes traw a no-op (colour = t*raw + (1-t)*raw);
+;;   (3) the blend t = max(traw, 0.15+0.85*max(coh,dlev)) is floored by traw only where
+;;       dlev/coherence are low, but raw!=bilateral (the thing traw acts on) needs high
+;;       detail, which raises dlev past traw -- a catch-22 in the synthetic regime.
+;; The 1024px composite is itself infeasible in the harness (splat-intensities is O(splats
+;; x pixels) full-frame). So this pins the fix FORMULA on the extracted helper -- the exact
+;; value applied per detail segment, mirrored in gen.clj (verified by check.clj). It
+;; DISCRIMINATES: with the 0.7 density constant set to 0.0 (no fix) the crowded case
+;; returns the unscaled 0.85 and the test fails -- confirmed by toggling 0.7->0.0 and
+;; re-running (see the round report).
+(deftest density-scaled-traw-follows-fine-detail-band
+  (let [f @#'splat-painter.seed/density-scaled-traw]
+    ;; coverage tiers (lvl 0-1) are NEVER scaled: faithful colour by role
+    (is (approx= 1e-9 0.85 (f 0 0.85 1.0)) "base (lvl 0): unscaled even at max density")
+    (is (approx= 1e-9 0.70 (f 1 0.70 1.0)) "broad (lvl 1): unscaled even at max density")
+    ;; detail tiers (lvl>=2), isolated crisp feature (sharp-at 0): full raw fidelity
+    (is (approx= 1e-9 0.85 (f 2 0.85 0.0)) "isolated feature (sharp 0): keeps full fidelity")
+    (is (approx= 1e-9 0.85 (f 3 0.85 0.0)) "isolated feature (sharp 0): keeps full fidelity")
+    ;; detail tiers in a CROWDED region (sharp-at high): trust the region colour more.
+    ;; floor 0.85 * (1 - 0.7*0.9) = 0.85 * 0.37 = 0.3145 -- the mark the fix removes.
+    (is (approx= 1e-9 (* 0.85 (- 1.0 (* 0.7 0.9))) (f 2 0.85 0.9))
+        "crowded region (sharp 0.9): floor pulled toward the region colour")
+    (is (approx= 1e-9 (* 0.70 (- 1.0 (* 0.7 0.9))) (f 2 0.70 0.9))
+        "scaling applies regardless of the base floor")
+    ;; monotone in density: more crowded -> less raw (stronger pull to region)
+    (is (> (f 2 0.85 0.3) (f 2 0.85 0.6) (f 2 0.85 0.9))
+        "raw-fidelity floor is strictly decreasing as fine detail crowds")))
+
+
+
