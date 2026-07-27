@@ -298,6 +298,110 @@
   [stroke]
   (+ 0.4 (* 0.24 (double stroke))))
 
+;; --- the EDGE-BAND tier -------------------------------------------------------
+;; A tier that OWNS the silhouette band, laid OVER the coverage tiers. It is NOT part
+;; of the coarse→fine ladder: it is placed by the raw EDGE channel, born strongly
+;; elongated ALONG the edge (thin ACROSS it), and pushed CLEAR of the ridge onto one
+;; side, so it restates a boundary with that side's OWN colour instead of straddling it.
+;;
+;; Why a separate tier at all (spec-coat-edge-fuzz — twelve measured rejections):
+;; a stroke straddling a soft silhouette carries ONE colour across a body that spans
+;; the whole ramp, so it paints the ramp's MID value on the dark side. Level 1 alone
+;; lifts the outward band +49.6 luma at coat-likeness 1.11. Shrinking those strokes,
+;; suppressing them, clipping their reach and densifying the fine tier were all
+;; measured WORSE — suppression just hands coverage to level 0, which reaches further.
+;; This tier differs in KIND on four counts, each one answering a rejected attempt:
+;;   • placed off :edge, not :sharp — the edge channel LOCALIZES the silhouette (it
+;;     peaks on the ridge and dies in flat ground), so a threshold on it seeds strokes
+;;     on the boundary itself rather than across whatever is textured nearby. NOT
+;;     because the sharp band is weak there: it is not — sharp-at saturates on a soft
+;;     ramp (pinned in edge-band-tier-places-off-the-raw-edge-channel), so absence is
+;;     not what made a denser :sharp tier measure worse;
+;;   • it always takes a SIDE, including on a soft ramp where the liner tier gives up;
+;;   • the side push is ≥ its own 2σ across, so it cannot straddle what it restates;
+;;   • born at a fixed elongation, not the coherence-derived one, so the thinness is
+;;     a property of the tier rather than of the local tensor.
+;;
+;; MEASURED (1024×1024 portrait, Size 6 / tiers 0.4 / Detail 1 / 600k / Stroke 1.5 /
+;; Contrast 1 / Hardness 2.5), band tier off vs on, everything else identical:
+;;   outward band bleed   +7.35 -> +5.13 luma   (-30%)
+;;   whole-image delta    -0.56 -> -0.31        (inside the ±0.3 tolerance)
+;;   coat-likeness         0.13 ->  0.10
+;;   emitted splats     418,997 -> 534,594      (cap 786,432; budget 600,000)
+;; By ring, outward from the silhouette: 1px -3%, 2px 28%, 3px 52%, 4px 49%, 5px 35%,
+;; 6px 24%, then ~0 past 7px. The tier cuts the bleed roughly in half exactly where it
+;; reaches, and the residual is dominated by two things it does NOT address: the first
+;; pixel out (its push starts at ~1.2px, clear of its own 2σ) and the far field past
+;; 7px, which is the BASE tier's own reach (σ 7.2 ⇒ a 25px quad), not a band artifact.
+;; This is the first of thirteen attempts on this artifact to move the metric the RIGHT
+;; way; the twelve rejected ones are tabulated in .dirge/spec-coat-edge-fuzz.md.
+(def ^:private band-detail-min 0.75)  ; below this Detail the tier does not exist: a refinement, not a change of look
+(def ^:private band-th 0.30)          ; edge strength a band seed needs (raw :edge, unnormalized)
+(def ^:private band-se 2.6)           ; forced elongation: sx = s0·se, sy = s0/se (NOT coherence-derived)
+(def ^:private band-sideo 1.4)        ; side push in units of ssz, jittered ×0.6–3.15 per seed (see soff)
+(def ^:private band-ssz-max 1.6)      ; the band paints a LINE; above this it would read as a daub
+(def ^:private band-lvl 7)            ; outside the ladder's 0..6, so poshash streams can never collide
+(def ^:private band-share 0.25)       ; hard ceiling on the band tier's slice of the working budget
+(def ^:private band-ovl 0.45)
+;; ^ seed spacing coefficient, sp = band-ovl·√band-segs·ssz. Deliberately far tighter
+;; than the ladder's 0.7–1.25: a band seed only survives on the ridge, which is a
+;; ~2px-wide sliver of the image, so image-wide spacing that looks dense is sparse
+;; ALONG a contour. Measured at 1.1 (sp 5.33px): the tier covered 18.2% of the outward
+;; band and 33% of its worst 1–3px zone, and cut the bleed there by only 16–19% —
+;; the mechanism worked wherever it landed and mostly did not land. At 0.45 the
+;; nx-cap below binds instead, so band-share is what actually sets the density.
+(def ^:private band-segs 12)
+;; ^ the band tier's NOMINAL traced length, governing both its seed spacing and its
+;; budget term (they have to agree — see expected-segs). It is NOT expected-segs: that
+;; 4 was measured for :sharp-placed strokes, which stop as soon as the fine-band ridge
+;; dies. A band stroke follows a SILHOUETTE, which is long and smooth by construction,
+;; so it traces much further before the ridge dies or the tangent breaks. 12 is an
+;; estimate, not a measurement — re-measure the mean traced length of this tier once
+;; the render is visually right, the way expected-segs was swept.
+
+(defn- band-level
+  "The edge-band level map, or nil when the tier should not exist. `finest` is the
+   finest admitted LADDER stdev — the band sits at or below it so it reads as a line
+   drawn over the ladder's finest marks, never as a competing daub. The tier exists
+   only where the ladder ITSELF is painting lines (finest below liner-threshold): at a
+   budget so small that even the finest rung is a fat daub there is no fine detail for
+   a band to sharpen, and one thin overlay tier would just eat the budget.
+
+   Budget: candidates are gated on the EDGE-map fraction, so a tier that only ever
+   paints a thin band cannot charge the budget as though it covered the image; the
+   estimate is then capped at `band-share` of the working budget outright, and
+   `:demand` is charged against the detail tier's slice by the caller so the band
+   comes OUT of the budget rather than on top of it."
+  [dmap detail area budget finest]
+  (when (and (>= (double detail) band-detail-min)
+             (< (double finest) liner-threshold))
+    (let [frac (detail-fraction dmap :edge band-th)]
+      (when (pos? frac)
+        (let [ssz    (max 1.0 (min band-ssz-max (double finest)))
+              sp     (* band-ovl (Math/sqrt (double band-segs)) ssz)
+              nx-nat (Math/ceil (/ (double area) (* sp sp)))
+              ;; splats ≈ nx · frac · band-segs, so invert that for the cap
+              nx-cap (/ (* band-share (double budget)) (* frac (double band-segs)))
+              nx     (long (max 0.0 (min nx-nat nx-cap)))]
+          (when (pos? nx)
+            {:lvl band-lvl :ssz ssz :sp sp :th band-th
+             :nx nx :ny 1 :offset 0
+             :segs max-segs :stepf (step-frac band-lvl) :bendf 0.0
+             :map-kind :edge :traw (raw-floor band-lvl ssz)
+             :sideo band-sideo :selong band-se :band true
+             :demand (* (double nx) frac (double band-segs))}))))))
+
+(defn- band-prepend
+  "Put the edge-band level at the FRONT of a finest-first level vector (index 0 =
+   topmost, so it covers the coverage tiers' bleed), shifting every existing
+   candidate offset past its own block. A standalone top-level fn rather than a
+   let-wrap inside layer-params' level loop — demoting that loop out of tail
+   position is what sends the jolt compiler pathological (see stub-glaze)."
+  [levels band]
+  (if (nil? band)
+    levels
+    (let [n (long (:nx band))]
+      (into [band] (mapv (fn [l] (update l :offset + n)) levels)))))
 
 (defn layer-params
   "Pure per-level placement parameters — THE SHARED SPEC for the CPU loop
@@ -567,6 +671,11 @@
                          acc                                  ; drop this + every finer
                          (recur (inc lvl) ssz (if fine? (- rem cost) rem)
                                 (conj acc [(long lvl) ssz]))))))
+        ;; the EDGE-BAND overlay, sized off the finished ladder's finest rung. Computed
+        ;; HERE (not at the end) so its demand can be charged against the detail tier's
+        ;; slice below — the band comes out of the budget, not on top of it.
+        band (band-level dmap detail area budget
+                         (reduce min (map (fn [[_ ssz]] (double ssz)) admitted)))
         ;; build FINEST-FIRST with cumulative candidate offsets, so GPU gl_VertexID
         ;; order == CPU emission order == paint order. :lvl stays the ORIGINAL index so
         ;; both paths' tiering (liner?, map-kind, raw-floor, …) still keys on it; :nlev
@@ -615,7 +724,10 @@
                       (* (double nx) (double surv) segs-per-seed)))
         cov-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (< (long lvl) 2) (demand lvl ssz) 0.0)) admitted))
         det-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (>= (long lvl) 2) (demand lvl ssz) 0.0)) admitted))
-        det-budget (max (* 0.1 (double budget)) (- (double budget) cov-demand))
+        ;; the band overlay is charged here alongside coverage, so admitting it thins
+        ;; the detail tier instead of pushing the field past the budget.
+        det-budget (max (* 0.1 (double budget))
+                        (- (double budget) cov-demand (double (or (:demand band) 0.0))))
         cand-thin  (if (> det-demand det-budget) (/ det-budget det-demand) 1.0)
         levels (loop [rem (rseq admitted) off 0 out []]
                  (if (empty? rem)
@@ -630,7 +742,12 @@
                                        :nx nx :ny 1 :offset off
                                        :segs segs :stepf stepf
                                        :bendf (bend-frac lvl) :map-kind (level-map-kind lvl ssz)
-                                       :traw (raw-floor lvl ssz)})))))]
+                                       :traw (raw-floor lvl ssz)
+                                       ;; ladder levels keep the liner side push and take
+                                       ;; their elongation from local coherence (selong 0)
+                                       :sideo 0.55 :selong 0.0 :band false})))))
+        ;; the EDGE-BAND tier rides at index 0 (topmost) over the finished ladder.
+        levels (band-prepend levels band)]
     {:nlev (clojure.core/count levels) :warp warp :scale scale :levels levels
      :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))}))
 
@@ -667,6 +784,10 @@
   (cond
     (= kind :sharp) (wavelet/sharp-at dmap x y)
     (= kind :mid)   (wavelet/mid-at dmap x y)
+    ;; the EDGE-BAND tier places off raw edge strength — UNNORMALIZED, unlike the
+    ;; three wavelet bands (edge-at does not divide by dmax), so the GLSL twin must
+    ;; route sel 3 through edgeAt rather than through mapAt's /u_dmax tail.
+    (= kind :edge)  (wavelet/edge-at dmap x y)
     :else           (wavelet/detail-at dmap x y)))
 
 (defn- edge-near
@@ -718,7 +839,7 @@
    edge strokes alternate the two sides' colours as centres jittered across the
    contour — a bright/dark bead necklace along every silhouette).
    Returns [[x y size D sn tn alpha theta coherence hb hx hy]…]."
-  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih lth melt mkind gainv blurd-px bph]
+  [nf dmap lvl x y ssz D sn tn dirsign curvature stroke hd wd segs stepf bendf hb traw sgate blur-px iw ih lth melt mkind gainv blurd-px bph sideo selong]
   (if (zero? (long lvl))
     (let [[th coh] (sample-fields nf x y)]
       ;; melted bokeh daubs ROUND OFF (coherence → 0 kills the elongation and pulls
@@ -726,8 +847,11 @@
       ;; always reads as a directional streak, however faithful its colour.
       ;; base tier returns the SAME [rows reason] shape as the traced branch — a bare
       ;; row vector here made the call site read one row as the whole row list.
-      [[[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap lvl ssz)]] :base])
-    (let [          lal  (level-alpha lvl ssz)
+      [[[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap lvl ssz) 0.0]] :base])
+    (let [          ;; the BAND tier is opaque by ROLE, like the coverage tiers: it exists
+                    ;; to COVER the outward bleed, and a glaze alpha there just averages
+                    ;; the bleed back in at the exact spot it is meant to replace.
+                    lal  (if (pos? (double selong)) 1.0 (level-alpha lvl ssz))
           ;; fine strokes snap onto the edge ridge at the seed and after every step
           ;; (predictor: tangent step; corrector: ridge snap) — the stroke GLUES to
           ;; the line it is painting instead of braiding beside it.
@@ -738,6 +862,10 @@
           ;; accent chain must follow the original detail exactly — momentum,
           ;; gentle ridge snap, line-hold, no Perlin — or it reads as waviness.
           liner? (liner-scale? lvl ssz)
+          ;; the EDGE-BAND tier (selong > 0: born elongated rather than taking its
+          ;; elongation from the local tensor). It restates ONE side of a boundary,
+          ;; so unlike an ordinary liner it must take a side even on a soft ramp.
+          band? (pos? (double selong))
           ;; NO tensor-coherence gate on chain length. It was tried (ramp segs 20%→100%
           ;; over coherence 0.30→0.60, on the theory that a "line" only exists where the
           ;; tensor is coherent) and it does not work, because coherence does not
@@ -793,19 +921,39 @@
           ;; IMPASTO meeting line: bodied liner strokes keep to THEIR side of the ridge.
           ;; Suppressed on a SOFT RAMP (side=0, no geometric backoff) — a gradient has no
           ;; meeting line to draw; thin-line/crisp edges keep today's displacement sign.
-          side (if (and snap? liner? (not soft-ramp?))
+          ;; the BAND tier always takes a side — a soft silhouette is exactly where it
+          ;; exists to work, and a band stroke with no side sits on the ridge and paints
+          ;; the two sides' mix outward, which is the artifact itself. A seed that lands
+          ;; exactly on the ridge (d≈0) falls back to its own direction hash, so the two
+          ;; sides get restated in roughly equal numbers with no side detection at all.
+          side (if (and snap? liner? (or band? (not soft-ramp?)))
                  (let [[th0 _] (sample-fields nf x y)
                        snx (- (Math/sin th0)) sny (Math/cos th0)
                        d   (+ (* (- cx0 x) snx) (* (- cy0 y) sny))]
-                   (cond (> d 1e-9) 1.0 (< d -1e-9) -1.0 :else 0.0))
+                   (cond (> d 1e-9) 1.0
+                         (< d -1e-9) -1.0
+                         :else (if band? (double dirsign) 0.0)))
                  0.0)
+          ;; how far off the ridge the stroke sits, in units of its own stdev. A liner
+          ;; nudges 0.55σ (enough to keep to its side of a meeting line); the BAND is
+          ;; pushed clear — at selong 2.6 its across-body σ is ssz/2.6, so even the
+          ;; smallest push here (0.6·1.4 = 0.84σ_ssz ≈ 2.2σ across) keeps the stroke off
+          ;; the ridge it restates. The push is jittered by the seed's bend hash (bendf
+          ;; is 0 for the band, so bph is otherwise unused) so band strokes TILE the band
+          ;; instead of stacking into one hard line — SQUARED, so the distribution
+          ;; crowds the near zone: the measured outward excess falls off steeply with
+          ;; distance (+19.8 luma at 1px, +2.8 at 10px), so uniform spreading spends most
+          ;; of the tier's paint where there is least to cover.
+          soff (if band?
+                 (* (double sideo) (+ 0.6 (* 2.55 (double bph) (double bph))))
+                 (double sideo))
           offset (fn [ox oy]
                    (if (zero? (double side))
                      [ox oy]
                      (let [[th0 _] (sample-fields nf ox oy)
                            snx (- (Math/sin th0)) sny (Math/cos th0)]
-                       [(max 0.0 (min hd (+ ox (* (double side) 0.55 ssz snx))))
-                        (max 0.0 (min wd (+ oy (* (double side) 0.55 ssz sny))))])))
+                       [(max 0.0 (min hd (+ ox (* (double side) soff ssz snx))))
+                        (max 0.0 (min wd (+ oy (* (double side) soff ssz sny))))])))
           [x y] (offset x y)
           ;; the side sign relative to the stroke's MOTION frame: at the head the
           ;; motion perpendicular is dirsign·(field normal), so side·dirsign along
@@ -839,7 +987,13 @@
           ;; the drift reference + probes read the FORGIVING box field (blurd-px):
           ;; on the razor-sharp bilateral paint field any probe wobble across a
           ;; boundary trips the lift instantly and dashes contour chains into beads
-          [hr hg hb0] (sample-arr blurd-px iw ih (+ cx0 bax) (+ cy0 bay))]
+          ;; the drift reference belongs where the stroke actually STARTS. For a band
+          ;; stroke that is the pushed-off-ridge head (x,y): referencing the pre-snap
+          ;; seed, which can sit on the FAR side of the boundary, makes the chroma
+          ;; backstop fire on step 1 and the band never traces at all.
+          [hr hg hb0] (sample-arr blurd-px iw ih
+                                  (if band? x (+ cx0 bax))
+                                  (if band? y (+ cy0 bay)))]
       (let [traced (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
                      (if (> k kmax)
                        [acc :cap]
@@ -926,8 +1080,8 @@
                                      [nx1 ny1] (if snap? (edge-snap dmap nf nx0 ny0 1.75 hd wd sgain) [nx0 ny0])
                                      [nx2 ny2] (if (zero? (double side))
                                                  [nx1 ny1]
-                                                 [(max 0.0 (min hd (+ nx1 (* sidem 0.55 ssz (- dy)))))
-                                                  (max 0.0 (min wd (+ ny1 (* sidem 0.55 ssz dx))))])]
+                                                 [(max 0.0 (min hd (+ nx1 (* sidem soff ssz (- dy)))))
+                                                  (max 0.0 (min wd (+ ny1 (* sidem soff ssz dx))))])]
                                  (recur (inc k) nx2 ny2 dx dy fade (conj acc pre)))))))))]
         ;; FINALIZE: taper follows the ACTUAL traced length. A stroke that stopped at a corner
         ;; still gets a full head->tail profile (tt = k/(finalLen-1)), not the truncated profile
@@ -961,7 +1115,7 @@
                                  oby (* (double bay) (double (if (< wsl 1.0) 1.0 0.0)))
                                  cxs (+ cx0 obx (* wsl (- (double px) (double cx0))))
                                  cys (+ cy0 oby (* wsl (- (double py) (double cy0))))]
-                             [px py sz D0 sn0 tn0 al th chb hb cxs cys traw (spec-cap lvl ssz)]))
+                             [px py sz D0 sn0 tn0 al th chb hb cxs cys traw (spec-cap lvl ssz) selong]))
                          pre-records)]
           [rows reason])))))
 
@@ -1002,7 +1156,7 @@
         {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke tier-muls count H W)]
     (persistent!
       (reduce
-        (fn [acc [idx {:keys [lvl ssz sp th nx ny segs stepf bendf map-kind traw]}]]
+        (fn [acc [idx {:keys [lvl ssz sp th nx ny segs stepf bendf map-kind traw sideo selong]}]]
           (loop [i 0 acc acc]
             (if (>= i nx)
               acc
@@ -1085,13 +1239,17 @@
                               ;; glazes overlap the mid strokes and mix instead of
                               ;; replacing them.
                               claimed? (and (pos? (long lvl)) (<= (long lvl) 2) (pos? (long idx))
-                                            (let [fl (nth levels (dec (long idx)))
-                                                  ;; the finer level is always ≥2, so its
-                                                  ;; claim carries the same subject gate
-                                                  fdv (* (map-at dmap (:map-kind fl) cx cy)
-                                                         (+ 0.25 (* 0.75 sgate)) bgate)]
-                                              (>= fdv (* (:th fl)
-                                                         (+ 0.75 (* 0.5 (hash01 (+ (* i 47) lvl) j 23)))))))]
+                                            (let [fl (nth levels (dec (long idx)))]
+                                              ;; the EDGE-BAND tier is NOT a rung of the
+                                              ;; ladder — it overlays it — so it never
+                                              ;; claims a cell away from the level below.
+                                              (and (not (:band fl))
+                                                   ;; the finer level is always ≥2, so its
+                                                   ;; claim carries the same subject gate
+                                                   (let [fdv (* (map-at dmap (:map-kind fl) cx cy)
+                                                                (+ 0.25 (* 0.75 sgate)) bgate)]
+                                                     (>= fdv (* (:th fl)
+                                                                (+ 0.75 (* 0.5 (hash01 (+ (* i 47) lvl) j 23)))))))))]
                           (if (or thin?
                                   (and (pos? (long lvl)) (or claimed? (< (* dv gain) thd))))
                             (recur (inc j) acc)      ; thinned bokeh / not detailed enough
@@ -1186,7 +1344,8 @@
                                                            ;; raw sample is unreliable, so trust the region more
                                                            (density-scaled-traw lvl traw (wavelet/sharp-at dmap cx cy))
                                                          sgate blur-px iw ih th melt
-                                                         map-kind gain blurd-px (hash01 (+ (* i 67) lvl) j 53))]
+                                                         map-kind gain blurd-px (hash01 (+ (* i 67) lvl) j 53)
+                                                         (double sideo) (double selong))]
                                           (stub-glaze lvl reason rows)))]
                           (recur (inc j) (reduce conj! acc emitted)))))))))))))
         (transient [])
@@ -1306,10 +1465,14 @@
                  blur in flat regions (seamless gradients, no stroke banding), raw at
                  edges/detail;
                  contrast about 0.5; tone = 1 + variation·0.3·tnoise."
-  [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast traw tcap]
+  [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast traw tcap selong]
   (let [coh (+ min-coh (* (- 1.0 min-coh) coherence))
         e   (+ 1.0 (* (min (double stroke) 1.5) coh (+ 0.25 (* 0.75 (double dlev)))))
-        se  (Math/sqrt e)
+        ;; `selong` > 0 forces the elongation instead of deriving it from the local
+        ;; tensor — the EDGE-BAND tier is BORN long-and-thin so that its across-edge
+        ;; sigma is a property of the tier (ssz/selong) and not of whatever coherence
+        ;; happens to be at that spot. 0 keeps the coherence-derived elongation.
+        se  (if (pos? (double selong)) (double selong) (Math/sqrt e))
         s0  (* csz (+ 1.0 (* variation 0.5 (* 2.0 snoise))))
         sx  (* s0 se)                 ; long axis along θ
         sy  (/ s0 se)                 ; short axis across the stroke
@@ -1376,7 +1539,7 @@
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
-                     (for [[x y csz dlev sn tn alpha theta coherence hb hx hy traw tcap] segments
+                     (for [[x y csz dlev sn tn alpha theta coherence hb hx hy traw tcap selong] segments
                            :let [bilat-rgb (sample-arr blur-px width height hx hy)
                                  blur-rgb  (if (and hb (pos? (double hb)))
                                              (sample-arr blurh-px width height hx hy)
@@ -1401,7 +1564,7 @@
                                           (+ (* (- 1.0 w) rb) (* w bcb))]]]
                        (assoc (splat-record x y csz dlev theta coherence sn tn
                                             blur-rgb raw-rgb stroke variation contrast
-                                            (or traw 0.0) (or tcap 1.0))
+                                            (or traw 0.0) (or tcap 1.0) (or selong 0.0))
                               :alpha (double alpha))))
         ;; PAINT ORDER needs NO sort: `layered-means` emits finest level first, so the field is
         ;; already small→large. The shader composites front-to-back (index 0 = topmost), so the

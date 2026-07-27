@@ -151,10 +151,20 @@
     ;; the brush-stroke trace (mirror of seed/stroke-segments)
     (assert-contains gs-src "layout(points, max_vertices = 32) out;" "gen GS emits stroke chains (32 liner segments)")
     (assert-contains gs-src "float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt)) * hw;" "both-ends stroke width taper (seed-jittered size)")
-    (assert-contains gs-src "float lal = (lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;" "per-physical-size glaze alpha")
+    (assert-contains gs-src "float lal = (band || lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;" "per-physical-size glaze alpha; band tier opaque by role")
+    (assert-contains gs-src "float soff = band ? u_sideo[k] * (0.6 + 2.55 * bph * bph) : u_sideo[k];" "band push distribution crowds the near zone (squared jitter)")
     (assert-contains gs-src "float traw = (lvl <= 1) ? 0.0 : (ssz2 < 1.5) ? 0.85 : (ssz2 < 3.5) ? 0.7 : (ssz2 < 8.0) ? 0.45 : 0.0;" "per-physical-size raw floor")
     (assert-contains gs-src "if (lvl >= 2) traw *= 1.0 - 0.7 * sharpAt(cx, cy);" "density-scaled traw: trust region colour where fine detail crowds")
-    (assert-contains gs-src "if (lvl > 0 && lvl <= 2 && k > 0) {" "subdivision claim gated to broad/mid tiers")
+    (assert-contains gs-src "if (lvl > 0 && lvl <= 2 && k > 0 && u_selong[k-1] <= 0.0) {" "subdivision claim gated to broad/mid tiers, and never claimed by the edge-band overlay")
+    ;; EDGE-BAND tier (mirror seed/layer-params + splat-record + stroke-segments): placed
+    ;; off the raw edge channel, always takes a side, pushed clear of the ridge, and born
+    ;; elongated rather than inheriting the local tensor's anisotropy.
+    (assert-contains gs-src "if (sel == 3) return t.b;" "map select 3 = raw edge channel, unnormalized (mirror wavelet/edge-at)")
+    (assert-contains gs-src "float se  = (selong > 0.0) ? selong : sqrt(e);" "forced elongation replaces the coherence-derived one for the band tier")
+    (assert-contains gs-src "side = (dd > 1e-9) ? 1.0 : (dd < -1e-9) ? -1.0 : (band ? dirsign : 0.0);" "a band seed on the ridge falls back to its direction hash, so both sides get restated")
+    (assert-contains gs-src "vec2 so0 = sideOffset(x2, y2, side, soff * ssz2);" "head pushed off the ridge by the level's own side offset")
+    (assert-contains gs-src "px = clamp(px + sidem * soff * ssz2 * (-dy), 0.0, float(u_H - 1));" "the side push is re-applied after every in-trace ridge snap")
+    (assert-contains gs-src "vec3 headBlur = sampleRGB(u_blurDTex, band ? x2 : cpx + bax, band ? y2 : cpy + bay);" "band drift reference taken at the pushed head, not the pre-snap seed")
     (assert-contains gs-src "float bend = u_curv * 0.9 * bendf * clamp((ssz2 - 2.5) / 2.5, 0.0, 1.0)" "coherence-gated Perlin stroke bend")
     (assert-contains gs-src "float bph = hash01(i*67 + lvl, j, 53);" "per-seed bend phase hash (decorrelates neighbours)")
     (assert-contains gs-src "(1.0 - clamp((ev - 0.3) / 0.3, 0.0, 1.0))" "bend gated by wavelet edge map (ev cached once)")
