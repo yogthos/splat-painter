@@ -254,11 +254,18 @@
     ;; (219649.771→220003.611), which is the signature of many LOW-det splats — a band
     ;; stroke is ssz/selong ≈ 0.54px across. Anything that moved Σdet materially here
     ;; would NOT be the band tier and should be investigated rather than re-pinned.
-    (is (= 953 (count splats)))
-    (is (approx= 0.5  20866.513  sx) "Σ mean-x")
-    (is (approx= 0.5  29212.777  sy) "Σ mean-y")
-    (is (approx= 1.0  220003.611 sd) "Σ det(cov)")
-    (is (approx= 0.05 1107.802   sc) "Σ colour")))
+    ;; (953→850) the fine tier is ADMITTED AND THINNED instead of dropped whole, and the
+    ;; two detail slices now PARTITION the detail budget instead of each thinning against
+    ;; all of it. This fixture gains a level-4 rung and the mid tier pays for it, so the
+    ;; count falls while the field reaches finer. Σdet moves 0.02% (220003.611→219958.654):
+    ;; the strokes traded are the same size class, which is what a slice reallocation
+    ;; between two adjacent rungs looks like. A materially different Σdet here would mean
+    ;; something other than the reallocation moved and should be investigated.
+    (is (= 850 (count splats)))
+    (is (approx= 0.5  19111.677  sx) "Σ mean-x")
+    (is (approx= 0.5  25937.161  sy) "Σ mean-y")
+    (is (approx= 1.0  219958.654 sd) "Σ det(cov)")
+    (is (approx= 0.05 933.485    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments

@@ -723,32 +723,35 @@
         keep-ratio 0.95
         ssz0  (* (scale-of 0) (nsize 0))
         ;; broad/mid tier 0..broad-end-1 is ALWAYS admitted — scale-c sized it to fit and
-        ;; the two-tier budget guarantees raising Detail never coarsens those levels. Only
-        ;; the fine tier (4+) is gated: keep it iff it is meaningfully finer than the
-        ;; previous (keep-ratio) AND its clamped survivor demand fits the fine remaining
-        ;; budget. Dropping a fine level drops every finer one too.
+        ;; the two-tier budget guarantees raising Detail never coarsens those levels.
         broad-end (long (min nlev 4))
         ;; admitted: coarse→fine vector of [lvl ssz] (ssz already clamped to the monotone
         ;; ladder + min-phys floor during admission).
-        admitted (loop [lvl 1 prev (double ssz0) rem (double fine-rem)
+        admitted (loop [lvl 1 prev (double ssz0)
                         acc [[(long 0) ssz0]]]
                    (if (>= lvl nlev)
                      acc
                      (let [raw (* (scale-of lvl) (nsize lvl))
-                           ssz (max min-phys (min raw (* step-ratio prev)))
-                           {:keys [segs sp]} (phys-spec lvl ssz)
-                           cost (/ (* (double segs) (lvl-frac lvl) area) (* sp sp))
-                           fine? (>= lvl broad-end)]
-                       ;; REDUNDANCY drop applies at every level: once min-phys clamps
-                       ;; two levels to the same physical size (Size 6 + tiers 0.4 puts
-                       ;; both 2 and 3 on the floor) the finer one is a duplicate pass,
-                       ;; not extra detail. Dropping it cannot coarsen anything — it is
-                       ;; the same size as its parent. The BUDGET drop stays fine-tier
-                       ;; only, so raising Detail still never coarsens levels 0-3.
-                       (if (or (>= ssz (* keep-ratio prev))
-                               (and fine? (> cost rem)))
+                           ssz (max min-phys (min raw (* step-ratio prev)))]
+                       ;; REDUNDANCY is now the ONLY drop: once min-phys clamps two levels
+                       ;; to the same physical size (Size 6 + tiers 0.4 puts both 2 and 3 on
+                       ;; the floor) the finer one is a duplicate pass, not extra detail.
+                       ;; Dropping it cannot coarsen anything — it is the same size as its
+                       ;; parent — and it is what terminates the ladder: the level after the
+                       ;; one that lands on min-phys is always redundant, so the ladder ends
+                       ;; a rung past the floor however high Detail goes.
+                       ;;
+                       ;; The fine tier used to be dropped outright when its cost exceeded
+                       ;; the remaining budget, which is why Detail did nothing above 0.6:
+                       ;; at Size 13.66 on a 1MP frame level 4 wants ~182k candidates and
+                       ;; was 41x over its slice, so it was dropped whole and the slider had
+                       ;; no levels left to add. It is now ADMITTED AND THINNED against that
+                       ;; slice like levels 2-3 are against theirs (fine-thin below), so it
+                       ;; contributes detail in proportion to what the budget affords instead
+                       ;; of nothing at all.
+                       (if (>= ssz (* keep-ratio prev))
                          acc                                  ; drop this + every finer
-                         (recur (inc lvl) ssz (if fine? (- rem cost) rem)
+                         (recur (inc lvl) ssz
                                 (conj acc [(long lvl) ssz]))))))
         ;; the EDGE-BAND overlay, sized off the finished ladder's finest rung. Computed
         ;; HERE (not at the end) so its demand can be charged against the detail tier's
@@ -807,12 +810,33 @@
                                                  (double (seg-count lvl)))]
                       (* (double nx) (double surv) segs-per-seed)))
         cov-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (< (long lvl) 2) (demand lvl ssz) 0.0)) admitted))
-        det-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (>= (long lvl) 2) (demand lvl ssz) 0.0)) admitted))
+        ;; the detail demand splits by tier, and each tier is thinned against its OWN
+        ;; slice. That split is what keeps the two-tier budget's promise now that the fine
+        ;; tier is admitted rather than dropped: if both tiers shared one cand-thin, adding
+        ;; a level 4 would thin levels 2-3 by the same factor and raising Detail would
+        ;; coarsen the mid painting — exactly what the two-tier budget exists to prevent.
+        mid-demand  (reduce + 0.0 (map (fn [[lvl ssz]] (if (and (>= (long lvl) 2) (< (long lvl) broad-end))
+                                                         (demand lvl ssz) 0.0)) admitted))
+        fine-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (>= (long lvl) broad-end) (demand lvl ssz) 0.0)) admitted))
+        det-demand (+ mid-demand fine-demand)
         ;; the band overlay is charged here alongside coverage, so admitting it thins
         ;; the detail tier instead of pushing the field past the budget.
         det-budget (max (* 0.1 (double budget))
                         (- (double budget) cov-demand (double (or (:demand band) 0.0))))
-        cand-thin  (if (> det-demand det-budget) (/ det-budget det-demand) 1.0)
+        ;; the two slices PARTITION det-budget — they must not both spend it. The fine tier
+        ;; takes fine-rem (the slice scale-f already sized for it, floored at 15% of the
+        ;; budget) and the mid tier keeps the rest. Letting each thin against the whole
+        ;; detail budget independently overspends by the smaller slice: at Splats 1000 on
+        ;; the guard fixture it put the field at 1662 against a 1500 bound, because dropping
+        ;; the fine tier's demand out of the mid denominator handed levels 2-3 a 25x denser
+        ;; candidate pool than the budget had paid for.
+        fine-slice (min (double fine-rem) det-budget)
+        mid-slice  (max (* 0.1 (double budget)) (- det-budget fine-slice))
+        cand-thin  (if (> mid-demand mid-slice) (/ mid-slice mid-demand) 1.0)
+        ;; the fine tier is thinned to ITS slice. Its levels sit at the min-phys floor, so
+        ;; their candidate pool does not shrink with the budget the way the coarser rungs'
+        ;; does — without this they would swamp the field at low Splats.
+        fine-thin  (if (> fine-demand fine-slice) (/ fine-slice fine-demand) 1.0)
         levels (loop [rem (rseq admitted) off 0 out []]
                  (if (empty? rem)
                    out
@@ -820,7 +844,9 @@
                          lvl (long lvl)
                          {:keys [segs stepf sp]} (phys-spec lvl ssz)
                          raw-nx (long (Math/ceil (/ area (* sp sp))))
-                         nx (long (if (>= lvl 2) (Math/ceil (* (double raw-nx) (double cand-thin))) raw-nx))]
+                         nx (long (cond (>= lvl broad-end) (Math/ceil (* (double raw-nx) (double fine-thin)))
+                                        (>= lvl 2)         (Math/ceil (* (double raw-nx) (double cand-thin)))
+                                        :else              raw-nx))]
                      (recur (rest rem) (+ off nx)
                             (conj out {:lvl lvl :ssz ssz :sp sp :th (thresh lvl)
                                        :nx nx :ny 1 :offset off
