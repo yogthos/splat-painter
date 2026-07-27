@@ -890,11 +890,11 @@ void main(){
   [gen fields controls tf-buf q vao {:keys [height width]}]
   (let [{:keys [program locs]} gen
         {:keys [count size stroke detail variation curvature contrast
-                size-broad size-mid size-fine]} controls
+                size-broad size-mid size-fine edge-band]} controls
         H (long height) W (long width)
         params (seed/layer-params (:dmap fields) detail size variation curvature stroke
                                   [(double (or size-broad 1.0)) (double (or size-mid 1.0))
-                                   (double (or size-fine 1.0))]
+                                   (double (or size-fine 1.0)) (double (or edge-band 1.0))]
                                   count H W)
         {:keys [nlev warp levels total]} params
         ;; finest-first level arrays, padded to max-levels

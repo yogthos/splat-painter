@@ -54,8 +54,9 @@
 (deftest settings-snapshot-round-trip
   (testing "snapshot then restore reproduces every control atom exactly"
     (let [saved (core/snapshot-settings)]
-      (is (= 14 (count saved)))                  ; count size broad mid fine detail
-      (core/restore-settings! (vec (repeat 14 0.37))) ; variation curvature stroke contrast
+      (is (= 15 (count saved)))                  ; count size broad mid fine detail
+      (core/restore-settings! (vec (repeat 15 0.37))) ; variation curvature stroke contrast
+                                                 ; hardness cutin tex-streak/grain/edge
       (is (every? #(== 0.37 %) (core/snapshot-settings))) ; hardness tex-streak/grain/edge
       (core/restore-settings! saved)
       (is (= saved (core/snapshot-settings))))))

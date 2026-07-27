@@ -247,11 +247,18 @@
     ;; aspect-bounded liner span (≤12px) + coherence gate (short chains on incoherent
     ;; texture) cut emitted segments — count drops sharply; Σdet/Σcolour move with the
     ;; shorter, more isotropic chains and the bilinear colours. Re-pinned once (jolt -M:pin).
-    (is (= 529 (count splats)))
-    (is (approx= 0.5  11293.829  sx) "Σ mean-x")
-    (is (approx= 0.5  16109.012  sy) "Σ mean-y")
-    (is (approx= 1.0  219649.771 sd) "Σ det(cov)")
-    (is (approx= 0.05 610.920   sc) "Σ colour")))
+    ;; (529→953) the EDGE-BAND tier reaches this fixture. It shipped gated at Detail 0.75
+    ;; and this golden runs at 0.6, so it was previously absent here; the Cut-in dial
+    ;; replaced that gate, and at the default dial (1.0) the tier now paints. The jump is
+    ;; all thin band strokes: count and Σcolour nearly double while Σdet moves 0.16%
+    ;; (219649.771→220003.611), which is the signature of many LOW-det splats — a band
+    ;; stroke is ssz/selong ≈ 0.54px across. Anything that moved Σdet materially here
+    ;; would NOT be the band tier and should be investigated rather than re-pinned.
+    (is (= 953 (count splats)))
+    (is (approx= 0.5  20866.513  sx) "Σ mean-x")
+    (is (approx= 0.5  29212.777  sy) "Σ mean-y")
+    (is (approx= 1.0  220003.611 sd) "Σ det(cov)")
+    (is (approx= 0.05 1107.802   sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -283,7 +290,11 @@
           "nlev is the ADMITTED level count (was 1+round(detail*6); the monotone/admission gate now drops levels the budget cannot reach)")
       (is (<= nlev requested) "admission can only drop, never add, levels")
       (is (<= 2 nlev) "at least the base + one detail level admit"))
-    (is (apply < (map :ssz levels)) "levels finest-first: ssz strictly increasing coarseward (first = smallest stdev)")
+    ;; the ladder is strictly finer-first; the EDGE-BAND overlay is excluded because it
+    ;; is sized AT the ladder's finest rung by design (it draws a line over the finest
+    ;; marks), so it ties rather than strictly decreasing. Its own placement at index 0
+    ;; is pinned by edge-band-tier-is-drawn-topmost.
+    (is (apply < (map :ssz (remove :band levels))) "ladder levels finest-first: ssz strictly increasing coarseward")
     (is (= 0 (:lvl (last levels)))  "base level last")
     (is (= -1.0 (:th (last levels))) "base keeps all cells")
     (is (= 0 (:offset (first levels))))
@@ -1169,9 +1180,11 @@
                             tex  (if (and (< x 230.0) (odd? (quot (long x) 3))) 0.06 0.0)]
                         (max 0.0 (min 1.0 (+ (* 0.7 ramp) tex)))))))
 
-(defn- band-of [dmap detail H W]
-  (first (filter :band (:levels (seed/layer-params dmap detail 6.0 0.5 0.5 2.5
-                                                   [0.4 0.4 0.4] 600000 H W)))))
+(defn- band-of
+  "The edge-band level at Cut-in `dial` (tier-muls[3]), or nil when the tier is absent."
+  [dmap dial H W]
+  (first (filter :band (:levels (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.5
+                                                   [0.4 0.4 0.4 dial] 600000 H W)))))
 
 (deftest edge-band-tier-places-off-the-raw-edge-channel
   ;; map-at :edge must be wavelet/edge-at EXACTLY — unnormalized, unlike the three
@@ -1221,7 +1234,7 @@
     (is (> (double selong) (Math/sqrt 2.5))
         "forced elongation exceeds anything the coherence-derived formula can reach")))
 
-(deftest edge-band-tier-needs-edges-and-detail
+(deftest edge-band-tier-needs-edges-and-the-cutin-dial
   (let [flat  (gray-img 512 512 (fn [_ _] 0.5))
         edged (band-img)
         dmap-flat  (wavelet/placement-map flat  (structure/analyze flat))
@@ -1230,8 +1243,18 @@
         "a flat image has no edges, so the band tier does not exist")
     (is (some? (band-of dmap-edged 1.0 512 512))
         "an image with a silhouette DOES get the tier — the flat case above is not vacuous")
-    (is (nil? (band-of dmap-edged 0.5 512 512))
-        "below the Detail gate the tier does not exist: it is a refinement, not a change of look")))
+    ;; the Cut-in dial is the control: 0 is off, and it scales DENSITY above that. There
+    ;; is deliberately no Detail gate — a dial that silently did nothing below another
+    ;; slider's threshold would be worse than no dial.
+    (is (nil? (band-of dmap-edged 0.0 512 512))
+        "Cut-in 0 turns the tier off entirely")
+    (let [half (band-of dmap-edged 0.5 512 512)
+          full (band-of dmap-edged 1.0 512 512)]
+      (is (some? half) "a partial Cut-in still places the tier")
+      (is (< (long (:nx half)) (long (:nx full)))
+          (str "Cut-in scales density: " (:nx half) " candidates at 0.5 vs " (:nx full) " at 1.0"))
+      (is (= (:ssz half) (:ssz full))
+          "Cut-in scales DENSITY, not stroke geometry — the measured lever is coverage"))))
 
 (deftest edge-band-tier-is-drawn-topmost
   ;; levels are finest-first and composited front-to-back, so index 0 is the topmost
@@ -1262,12 +1285,12 @@
   ;; 1.44x. That test is the end-to-end guard; this one pins the mechanism.
   (let [img  (band-img)
         dmap (wavelet/placement-map img (structure/analyze img))
-        lp   (fn [detail] (seed/layer-params dmap detail 6.0 0.5 0.5 2.5 [0.4 0.4 0.4] 72000 512 512))
+        lp   (fn [cutin] (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.5 [0.4 0.4 0.4 cutin] 72000 512 512))
         det-cand (fn [p] (->> p :levels (remove :band) (filter #(>= (long (:lvl %)) 2))
                               (map #(long (:nx %))) (reduce + 0)))
-        off (lp 0.7) on (lp 1.0)]
-    (is (nil? (first (filter :band (:levels off)))) "Detail 0.7 is below the gate")
-    (is (some? (first (filter :band (:levels on)))) "Detail 1.0 is above it")
+        off (lp 0.0) on (lp 1.0)]
+    (is (nil? (first (filter :band (:levels off)))) "Cut-in 0: no band tier")
+    (is (some? (first (filter :band (:levels on)))) "Cut-in 1: the tier is admitted")
     (is (< (det-cand on) (det-cand off))
         (str "admitting the band thins the ladder's detail tier: "
              (det-cand off) " -> " (det-cand on) " candidates"))))

@@ -34,14 +34,15 @@ lines at a couple-of-pixels width that follow contours while the orientation fie
 stays coherent, carry nearly opaque paint on strong edges, and keep to their own side
 of the ridge so the two sides' colours meet at the edge instead of crossing it.
 
-Above Detail 0.75 an **edge-band tier** is laid over the top. A stroke that straddles
+The **Cut-in** slider adds an **edge-band tier** over the top. A stroke that straddles
 a soft silhouette carries one colour across a body spanning the whole transition, so
 it paints the transition's mid value onto the darker side — the grey fringe outside a
 coat or hair against an out-of-focus background. This tier restates the boundary from
 its own sides instead: placed off the raw edge channel, pushed clear of the ridge by
 more than its own width, born long and thin along the edge, and painted opaque and
-last. Measured on a test portrait it cuts the outward bleed by ~30% (+7.35 → +5.13
-luma) for ~28% more splats.
+last. Measured on a test portrait it cuts the outward bleed by ~30% (+7.28 → +5.39
+luma) for ~28% more splats; the effect saturates near Cut-in 1.0, because what is left
+sits where band strokes do not reach at all rather than where they reach too thinly.
 
 Rendering (GPU): one blended quad per splat (premultiplied over, back-to-front —
 the buffer is already in paint order), so cost scales with painted area, not
@@ -72,6 +73,9 @@ Sliders (live):
 - **Stroke** — stroke length (chain step scaling)
 - **Contrast** — per-channel contrast
 - **Hardness** — edge crispness of detail strokes (tiny marks stay soft — antialiased)
+- **Cut-in** — edge-band tier strength: restates silhouettes from their own sides, so
+  a coat or hair against an out-of-focus background loses its grey fringe. 0 turns it
+  off; the effect saturates around 1.0 (the default)
 
 **Save PNG…** exports at the input's native resolution. If GSettings schemas are
 missing (the GTK file dialog would abort), it saves `<image>-splats.png` next to the
@@ -79,7 +83,7 @@ source instead.
 
 Headless overrides (for scripting/testing): `GA_PAINTER_SAVE_PNG`,
 `GA_PAINTER_QUIT_MS`, `GA_PAINTER_COUNT`, `GA_PAINTER_SIZE`, `GA_PAINTER_DETAIL`,
-`GA_PAINTER_STROKE`, `GA_PAINTER_VAR`, `GA_PAINTER_BROAD/MID/FINE`,
+`GA_PAINTER_STROKE`, `GA_PAINTER_VAR`, `GA_PAINTER_BROAD/MID/FINE`, `GA_PAINTER_CUTIN`,
 `GA_PAINTER_CPU_GEN` (CPU reference path), `GA_PAINTER_GPU_VERIFY`,
 `GA_PAINTER_LOOP_RENDER`, `GA_PAINTER_TF_SMOKE`.
 

@@ -37,6 +37,7 @@
 (defonce broad-atom    (r/atom 1.0))   ; per-tier size multipliers: background/large
 (defonce mid-atom      (r/atom 1.0))   ; features vs mid structure vs the finest
 (defonce fine-atom     (r/atom 1.0))   ; details, each loosened/focused independently
+(defonce cutin-atom    (r/atom 1.0))   ; edge-band tier strength — restate silhouettes from their own sides; 0 = off
 (defonce hardness-atom (r/atom 1.7))   ; edge crispness of detail strokes; large strokes always
                                        ; soften to a round gaussian (u_hard_soft fixed at 1.0)
 ;; paint-texture experiment (render-time, quad shader only): pigment-like variance
@@ -150,6 +151,7 @@
 (defn- cur-broad  [] (or (some-> (System/getenv "GA_PAINTER_BROAD")  Double/parseDouble)      @broad-atom))
 (defn- cur-mid    [] (or (some-> (System/getenv "GA_PAINTER_MID")    Double/parseDouble)      @mid-atom))
 (defn- cur-fine   [] (or (some-> (System/getenv "GA_PAINTER_FINE")   Double/parseDouble)      @fine-atom))
+(defn- cur-cutin  [] (or (some-> (System/getenv "GA_PAINTER_CUTIN")  Double/parseDouble)      @cutin-atom))
 (defn- cur-tex-streak [] (or (some-> (System/getenv "GA_PAINTER_TEX_STREAK") Double/parseDouble) @tex-streak-atom))
 (defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
 (defn- cur-tex-edge   [] (or (some-> (System/getenv "GA_PAINTER_TEX_EDGE")   Double/parseDouble) @tex-edge-atom))
@@ -166,7 +168,8 @@
                            :contrast  @contrast-atom
                            :size-broad (cur-broad)
                            :size-mid   (cur-mid)
-                           :size-fine  (cur-fine)})))
+                           :size-fine  (cur-fine)
+                           :edge-band  (cur-cutin)})))
 
 (defn- request-render! []
   (when-let [a @area-atom] (glx/gtk-gl-area-queue-render a)))
@@ -409,7 +412,8 @@
 (defn- gpu-controls []
   {:count (cur-count) :size (cur-size) :stroke (cur-stroke) :detail (cur-detail)
    :variation (cur-var) :curvature @curvature-atom :contrast @contrast-atom
-   :size-broad (cur-broad) :size-mid (cur-mid) :size-fine (cur-fine)})
+   :size-broad (cur-broad) :size-mid (cur-mid) :size-fine (cur-fine)
+   :edge-band (cur-cutin)})
 
 (defn field-tex-ids
   "The per-image GL texture ids owned by a `fields` map (as produced by
@@ -711,13 +715,13 @@
   "The slider atoms a committed layer must snapshot so re-selecting it reproduces the
    pass deterministically. Positional — snapshot-settings / restore-settings! use the
    same order. (count size broad mid fine detail variation curvature stroke contrast
-   hardness tex-streak tex-grain tex-edge.)"
+   hardness cutin tex-streak tex-grain tex-edge.)"
   [count-atom size-atom broad-atom mid-atom fine-atom detail-atom variation-atom
-   curvature-atom stroke-atom contrast-atom hardness-atom
+   curvature-atom stroke-atom contrast-atom hardness-atom cutin-atom
    tex-streak-atom tex-grain-atom tex-edge-atom])
 
 (defn snapshot-settings
-  "Snapshot every placement slider atom into a 14-vector. Stored on a committed layer
+  "Snapshot every placement slider atom into a 15-vector. Stored on a committed layer
    so re-selecting it restores the exact field that generated it."
   []
   (vec (for [a settings-atoms] @a)))
@@ -1029,6 +1033,7 @@
    [slider "Stroke"    1.0  4.0   0.05  stroke-atom]   ; <1 degenerates chains to bead dots
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
    [slider "Hardness"  1.0  4.0   0.05  hardness-atom]   ; detail-stroke crispness (big strokes stay round)
+   [slider "Cut-in"    0.0  1.5   0.05  cutin-atom]     ; edge-band tier: restate silhouettes from their own sides; 0 = off
    [:separator {}]
    [slider "Streak"    0.0  0.6   0.02  tex-streak-atom]  ; bristle tonal grooves along the drag
    [slider "Grain"     0.0  0.5   0.02  tex-grain-atom]   ; canvas-tooth brightness/colour mottle
