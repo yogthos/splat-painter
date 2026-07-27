@@ -13,7 +13,8 @@
   only where the wavelet detail map (splat-painter.wavelet) is high, so detail sits on top
   of an unbroken underpainting. There is no cell grid, so no grid facets; Perlin noise
   (splat-painter.noise) warps flat-region strokes and varies their flow so the field never
-  reads as a lattice.
+  reads as a lattice. How much of that noise is the image-INDEPENDENT Perlin field, as
+  opposed to the image's own edge-seeded flow and per-seed hashes, is the :swirl dial.
 
   Controls:
     :count      density / overlap of the layers (Splats slider). Higher = tighter
@@ -24,6 +25,11 @@
                 layer only (flat); 1 = up to 4 levels of accumulating detail. default 0.6.
     :variation  0..1 Perlin flat-region position warp + per-stroke size/tone jitter.
                 0 = none. default 0.5.
+    :swirl      0..1 how much of the placement noise is the image-INDEPENDENT Perlin
+                field: 1 = the flat-region flow swirl + coherent position warp (the
+                painterly default), 0 = orientation from the edge-seeded flow alone and
+                a per-seed hashed warp, so the lattice is still broken but nothing drifts
+                the photo's structure around. default 1.0.
     :opacity    per-splat alpha 0..1, passed through into the returned field.
                 default 0.9.
     :contrast   0.5..2.0 per-channel contrast about 0.5. 1.0 = no change.
@@ -75,6 +81,22 @@
                                 (mod (* (long salt) 2654435769) 4294967296)))
                9))
      8388608.0))
+
+(defn warp-noise
+  "One axis of the flat-region position warp, in [0,1) — THE SPEC the GPU mirrors.
+   At Swirl 1 it is the Perlin field at (fx,fy): neighbouring seeds share a drift
+   direction, which is what makes the warp read as brushwork rather than as jitter. At
+   Swirl 0 it is the seed's own avalanche hash — same envelope, but neighbours move
+   independently, so the warp still breaks the level lattice (its actual job) without
+   carrying a silhouette with it. The dial matters most at large strokes: the amplitude
+   aw = warp·(1−D)·ssz grows with Size while the Perlin wavelength (~17px at the 0.06
+   frequency below) does not, so the coherent displacement map folds and the painting
+   melts around weak edges. hash01 would NOT do here — as a position generator its linear
+   mix lays points on Marsaglia lines (see poshash)."
+  [swirl i lvl salt fx fy]
+  (let [s (double swirl)]
+    (+ (* s (noise/noise2 fx fy))
+       (* (- 1.0 s) (poshash i lvl salt)))))
 
 (defn- blend-angle
   "Undirected-orientation blend between t1 and t2 weighted by w.
@@ -1170,9 +1192,10 @@
    the surviving seed, then hand it to `stroke-segments` (base fill vs traced brush stroke).
    Emits [x y size D sn tn alpha theta coherence] per SEGMENT (D = effective detail 0..1;
    sn/tn = per-seed size/tone jitter hashes in [-0.5,0.5])."
-  [dmap nf detail size variation curvature stroke tier-muls count H W blur-px blurd-px]
+  [dmap nf detail size variation curvature stroke swirl tier-muls count H W blur-px blurd-px]
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
         iw   (long W) ih (long H)
+        swirl (double swirl)
         deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
         rr   (/ (double H) 24.0)                    ; subjectness tap radius
         bmul (double (nth tier-muls 0))
@@ -1282,15 +1305,19 @@
                               ;; hashed positions need no jitter — they ARE the noise
                               x  cx y cy
                               D  (deff dv)
-                              ;; flat-region Perlin warp breaks any residual level lattice;
+                              ;; flat-region warp breaks any residual level lattice;
                               ;; detail strokes (D≈1) stay put → faithful edges. The liner
                               ;; tier gets NO warp at all — fine seeds must land exactly on
-                              ;; the detail they trace (see bend-frac).
+                              ;; the detail they trace (see bend-frac). Swirl picks the
+                              ;; displacement's spatial coherence (warp-noise): Perlin at 1,
+                              ;; the seed's own hash at 0 — same amplitude either way.
                               aw (if (liner-scale? lvl ssz) 0.0 (* warp (- 1.0 D) ssz))
                               x2 (if (< aw 0.2) x
-                                   (+ x (* aw (noise/noise2 (* 0.06 x) (* 0.06 y)))))
+                                   (+ x (* aw (warp-noise swirl i lvl 61
+                                                          (* 0.06 x) (* 0.06 y)))))
                               y2 (if (< aw 0.2) y
-                                   (+ y (* aw (noise/noise2 (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))
+                                   (+ y (* aw (warp-noise swirl i lvl 67
+                                                          (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))
                               sn0 (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
                               ;; MELT: how much a flat-region broad stroke should sink into
                               ;; the wash. Grows only past Broad 1.0 (below that, strokes
@@ -1390,15 +1417,23 @@
    coarse angle grid stair-steps stroke orientation along every contour, which reads
    as a regular sawtooth/zipper in the render. Per-stroke size/tone jitter is NOT a
    field any more — it's per-seed hash01 in layered-means (jitter should be
-   independent per stroke, not spatially smooth). Returns
-   {:h :w :src-h :src-w :c2 :s2 :coherence}."
+   independent per stroke, not spatially smooth).
+
+   BOTH ends of the Swirl dial are baked: :c2/:s2 carry the orientation WITH the Perlin
+   flow swirl (Swirl 1 — the shipped look) and :c2s/:s2s the same blend with the swirl
+   removed, i.e. the edge-seeded diffused flow alone (Swirl 0). The dial then mixes two
+   precomputed fields (see with-swirl) instead of re-baking one: the two noise2 calls per
+   texel cost 2.3s on a 1MP photo, far past a live slider drag, while the swirl-free pair
+   rides along for the price of one more blend. Returns
+   {:h :w :src-h :src-w :c2 :s2 :c2s :s2s :coherence}."
   [sfield]
   (let [H (:h sfield) W (:w sfield)
         srch (double (or (:src-h sfield) H)) srcw (double (or (:src-w sfield) W))
         n (* H W) fs 0.004
         ^doubles s-theta (:theta sfield) ^doubles s-coh (:coherence sfield)
         ^doubles f-theta (:flow-theta sfield) ^doubles f-str (:flow-str sfield)
-        c2 (double-array n) s2 (double-array n) cohr (double-array n)]
+        c2 (double-array n) s2 (double-array n) cohr (double-array n)
+        c2s (double-array n) s2s (double-array n)]
     (dotimes [xi H]
       (dotimes [yi W]
         (let [idx (+ (* xi W) yi)
@@ -1408,12 +1443,39 @@
               flow-t (Math/atan2 fvy fvx)
               coherence (aget s-coh idx)
               flow-base (blend-angle flow-t (aget f-theta idx) (min 1.0 (* 2.5 (aget f-str idx))))
-              theta (blend-angle flow-base (aget s-theta idx) coherence)]
+              theta (blend-angle flow-base (aget s-theta idx) coherence)
+              ;; Swirl 0: the flow weight goes to 1, so the flat-region orientation is
+              ;; the diffused tensor's own direction — the nearby edges' direction voted
+              ;; into the flat area — with no image-independent field in the blend.
+              theta-s (blend-angle (aget f-theta idx) (aget s-theta idx) coherence)]
           (aset c2 idx (Math/cos (* 2.0 theta)))
           (aset s2 idx (Math/sin (* 2.0 theta)))
+          (aset c2s idx (Math/cos (* 2.0 theta-s)))
+          (aset s2s idx (Math/sin (* 2.0 theta-s)))
           (aset cohr idx coherence))))
     {:h H :w W :src-h (:src-h sfield) :src-w (:src-w sfield)
-     :c2 c2 :s2 s2 :coherence cohr}))
+     :c2 c2 :s2 s2 :c2s c2s :s2s s2s :coherence cohr}))
+
+(defn with-swirl
+  "Mix prep-noise's two baked orientation fields by the Swirl dial and return the nf map
+   the samplers read. 1.0 = the Perlin flow swirl (the map verbatim — no work, no drift
+   from the shipped field), 0.0 = the edge-seeded flow alone. The mix is linear in the
+   double-angle components, the same representation sample-fields interpolates spatially,
+   so mixing the fields here and mixing per texel fetch (what the geometry shader does,
+   which is the only way it can stay live without a re-upload) produce the same field:
+   bilinear and mix are both linear, so they commute."
+  [nf swirl]
+  (let [s (double swirl)
+        ^doubles c2s (:c2s nf) ^doubles s2s (:s2s nf)]
+    (if (or (>= s 1.0) (nil? c2s))
+      nf
+      (let [^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf)
+            n (alength c2)
+            mc (double-array n) ms (double-array n)]
+        (dotimes [i n]
+          (aset mc i (+ (* s (aget c2 i)) (* (- 1.0 s) (aget c2s i))))
+          (aset ms i (+ (* s (aget s2 i)) (* (- 1.0 s) (aget s2s i)))))
+        (assoc nf :c2 mc :s2 ms)))))
 
 (defn- sample-fields
   "[theta coherence] at full-image (x,y), BILINEARLY interpolated from the prep-noise
@@ -1538,10 +1600,10 @@
   "Build a splat field from `image` (see ns doc) and `controls` (see ns doc).
    Returns {:splats […] :background [r g b] :height :width :opacity}."
   [{:keys [height width pixels] :as image} controls]
-  (let [{:keys [count size stroke detail variation curvature opacity contrast background
+  (let [{:keys [count size stroke detail variation curvature swirl opacity contrast background
                 size-broad size-mid size-fine edge-band]
          :or   {count 6000 size 3.0 stroke 2.0 detail 0.6 variation 0.5 curvature 0.5
-                opacity 0.9 contrast 1.0 background 0.0
+                swirl 1.0 opacity 0.9 contrast 1.0 background 0.0
                 size-broad 1.0 size-mid 1.0 size-fine 1.0 edge-band 1.0}} controls
         n          (long (or count 6000))
         size       (double (or size 3.0))
@@ -1549,6 +1611,7 @@
         detail     (double detail)
         variation  (double variation)
         curvature  (double curvature)
+        swirl      (double swirl)
         contrast   (double contrast)
         sfield     (or (:structure image) (structure/analyze image))
         dmap       (or (:detail image)    (wavelet/placement-map image sfield))
@@ -1556,8 +1619,11 @@
         ^doubles blur-px (or (:blur image) pixels)
         ^doubles blurh-px (or (:blur-heavy image) blur-px)
         ^doubles blurd-px (or (:blur-drift image) blur-px)
-        nf         (or (:noise-fields image) (prep-noise sfield))
-        segments   (layered-means dmap nf detail size variation curvature stroke
+        ;; the orientation field is baked per image at BOTH ends of the Swirl dial;
+        ;; mixing them is O(texels) arithmetic, cheap enough to redo per render, so the
+        ;; dial stays live without the 2.3s re-bake (see prep-noise / with-swirl).
+        nf         (with-swirl (or (:noise-fields image) (prep-noise sfield)) swirl)
+        segments   (layered-means dmap nf detail size variation curvature stroke swirl
                                   [(double size-broad) (double size-mid) (double size-fine)
                                    (double edge-band)]
                                   n height width blur-px blurd-px)

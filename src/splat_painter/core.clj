@@ -38,6 +38,8 @@
 (defonce mid-atom      (r/atom 1.0))   ; features vs mid structure vs the finest
 (defonce fine-atom     (r/atom 1.0))   ; details, each loosened/focused independently
 (defonce cutin-atom    (r/atom 1.0))   ; edge-band tier strength — restate silhouettes from their own sides; 0 = off
+(defonce swirl-atom    (r/atom 1.0))   ; share of the image-INDEPENDENT Perlin field in the flow
+                                       ; orientation + position warp; 0 = structure only
 (defonce hardness-atom (r/atom 1.7))   ; edge crispness of detail strokes; large strokes always
                                        ; soften to a round gaussian (u_hard_soft fixed at 1.0)
 ;; paint-texture experiment (render-time, quad shader only): pigment-like variance
@@ -152,6 +154,7 @@
 (defn- cur-mid    [] (or (some-> (System/getenv "GA_PAINTER_MID")    Double/parseDouble)      @mid-atom))
 (defn- cur-fine   [] (or (some-> (System/getenv "GA_PAINTER_FINE")   Double/parseDouble)      @fine-atom))
 (defn- cur-cutin  [] (or (some-> (System/getenv "GA_PAINTER_CUTIN")  Double/parseDouble)      @cutin-atom))
+(defn- cur-swirl  [] (or (some-> (System/getenv "GA_PAINTER_SWIRL")  Double/parseDouble)      @swirl-atom))
 (defn- cur-tex-streak [] (or (some-> (System/getenv "GA_PAINTER_TEX_STREAK") Double/parseDouble) @tex-streak-atom))
 (defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
 (defn- cur-tex-edge   [] (or (some-> (System/getenv "GA_PAINTER_TEX_EDGE")   Double/parseDouble) @tex-edge-atom))
@@ -169,7 +172,8 @@
                            :size-broad (cur-broad)
                            :size-mid   (cur-mid)
                            :size-fine  (cur-fine)
-                           :edge-band  (cur-cutin)})))
+                           :edge-band  (cur-cutin)
+                           :swirl      (cur-swirl)})))
 
 (defn- request-render! []
   (when-let [a @area-atom] (glx/gtk-gl-area-queue-render a)))
@@ -413,7 +417,7 @@
   {:count (cur-count) :size (cur-size) :stroke (cur-stroke) :detail (cur-detail)
    :variation (cur-var) :curvature @curvature-atom :contrast @contrast-atom
    :size-broad (cur-broad) :size-mid (cur-mid) :size-fine (cur-fine)
-   :edge-band (cur-cutin)})
+   :edge-band (cur-cutin) :swirl (cur-swirl)})
 
 (defn field-tex-ids
   "The per-image GL texture ids owned by a `fields` map (as produced by
@@ -424,7 +428,7 @@
    — deleting :perm corrupts every later generate!, and deleting :dmax (a long)
    would release an unrelated texture id."
   [fields]
-  (mapv fields [:detail :subject :noise :blur :blur-drift :blur-heavy :raw]))
+  (mapv fields [:detail :subject :noise :noise-swirl0 :blur :blur-drift :blur-heavy :raw]))
 
 (defn- delete-field-textures!
   "Free the per-image texture objects of `fields`. Caller must have made the GL
@@ -715,13 +719,13 @@
   "The slider atoms a committed layer must snapshot so re-selecting it reproduces the
    pass deterministically. Positional — snapshot-settings / restore-settings! use the
    same order. (count size broad mid fine detail variation curvature stroke contrast
-   hardness cutin tex-streak tex-grain tex-edge.)"
+   hardness cutin swirl tex-streak tex-grain tex-edge.)"
   [count-atom size-atom broad-atom mid-atom fine-atom detail-atom variation-atom
-   curvature-atom stroke-atom contrast-atom hardness-atom cutin-atom
+   curvature-atom stroke-atom contrast-atom hardness-atom cutin-atom swirl-atom
    tex-streak-atom tex-grain-atom tex-edge-atom])
 
 (defn snapshot-settings
-  "Snapshot every placement slider atom into a 15-vector. Stored on a committed layer
+  "Snapshot every placement slider atom into a 16-vector. Stored on a committed layer
    so re-selecting it restores the exact field that generated it."
   []
   (vec (for [a settings-atoms] @a)))
@@ -1034,6 +1038,7 @@
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
    [slider "Hardness"  1.0  4.0   0.05  hardness-atom]   ; detail-stroke crispness (big strokes stay round)
    [slider "Cut-in"    0.0  1.5   0.05  cutin-atom]     ; edge-band tier: restate silhouettes from their own sides; 0 = off
+   [slider "Swirl"     0.0  1.0   0.02  swirl-atom]    ; Perlin share of the flow + position warp; 0 = image structure only
    [:separator {}]
    [slider "Streak"    0.0  0.6   0.02  tex-streak-atom]  ; bristle tonal grooves along the drag
    [slider "Grain"     0.0  0.5   0.02  tex-grain-atom]   ; canvas-tooth brightness/colour mottle

@@ -1294,3 +1294,117 @@
     (is (< (det-cand on) (det-cand off))
         (str "admitting the band thins the ladder's detail tier: "
              (det-cand off) " -> " (det-cand on) " candidates"))))
+
+;; --- Swirl: the dial on the image-INDEPENDENT Perlin noise ------------------
+;; Two placement terms are steered by a Perlin field rather than by the photo: the
+;; flat-region flow that orients strokes where the tensor has no opinion, and the
+;; position warp that pushes flat-region seeds off the level lattice. Both are
+;; spatially COHERENT — neighbours drift and turn together — which is what makes
+;; them read as brushwork, and also what lets them carry structure away from where
+;; the photo put it. Swirl is the dial: 1.0 is the shipped look, 0.0 keeps the
+;; lattice-breaking but sources it from the image (orientation) or from each seed's
+;; own hash (position) instead of a shared field.
+
+(defn- swirl-img []
+  ;; CROSSED bars: each bar is high-coherence (the tensor decides orientation on it,
+  ;; whatever Swirl says), and because their directions cancel in the diffused tensor
+  ;; the flat ground between them has weak flow strength — which is exactly where the
+  ;; Perlin swirl takes over. A single bar will NOT do: its orientation diffuses over
+  ;; the whole frame at full strength (flow-str ≥ 0.99 everywhere), the swirl gets zero
+  ;; weight, and every assertion below passes vacuously.
+  (gray-img 128 128 (fn [x y] (if (or (and (> x 54) (< x 60)) (and (> y 30) (< y 36)))
+                                0.9 0.35))))
+
+(deftest prep-noise-bakes-both-ends-of-the-swirl-dial
+  ;; The flow field is baked once per image (2.3s on a 1MP photo — far too slow to
+  ;; re-bake on a slider drag), so prep-noise bakes BOTH extremes and the dial mixes
+  ;; them. The mix is linear in the double-angle components, which is what lets the
+  ;; GPU mix per texel fetch instead: bilinear and mix are both linear, so
+  ;; mix(bilerp(A),bilerp(B)) = bilerp(mix(A,B)) and the paths cannot diverge.
+  (let [sfield (structure/analyze (swirl-img))
+        nf     (seed/prep-noise sfield)
+        n      (count (:c2 nf))
+        coh    (vec (:coherence nf))
+        c2 (vec (:c2 nf)) s2 (vec (:s2 nf))
+        c2s (vec (:c2s nf)) s2s (vec (:s2s nf))]
+    (is (= n (count c2s)) "the swirl-free pair is baked at the flow field's resolution")
+    (is (= n (count s2s)))
+    ;; not vacuous: over the weak-flow ground the two ends of the dial point elsewhere
+    (let [dev (mapv (fn [a b c d] (Math/sqrt (+ (* (- a b) (- a b)) (* (- c d) (- c d)))))
+                    c2 c2s s2 s2s)
+          moved (count (filter #(> (double %) 0.02) dev))]
+      (is (> (/ (double moved) n) 0.1)
+          (str "the Perlin swirl really does steer the flat regions away from the "
+               "edge-seeded flow (" moved "/" n " texels move)")))
+    ;; ...but never on a bar, where the tensor is coherent and structure wins in both
+    (let [on-edge (keep-indexed (fn [i c] (when (> (double c) 0.95) i)) coh)]
+      (is (seq on-edge) "the bars give us coherent texels to check")
+      (is (every? (fn [i] (and (approx= 0.12 (nth c2 i) (nth c2s i))
+                               (approx= 0.12 (nth s2 i) (nth s2s i))))
+                  on-edge)
+          "on a coherent edge both ends of the dial agree — Swirl cannot rotate a silhouette"))))
+
+(deftest with-swirl-mixes-the-orientation-fields
+  (let [sfield (structure/analyze (swirl-img))
+        nf     (seed/prep-noise sfield)
+        c2 (vec (:c2 nf)) c2s (vec (:c2s nf))]
+    (is (identical? nf (seed/with-swirl nf 1.0))
+        "Swirl 1.0 is the shipped field verbatim — no mix, no allocation, bit-identical")
+    (is (= c2s (vec (:c2 (seed/with-swirl nf 0.0))))
+        "Swirl 0 hands the sampler the edge-seeded field")
+    (is (every? true? (map (fn [a b m] (approx= 1e-12 m (* 0.5 (+ a b))))
+                           c2 c2s (vec (:c2 (seed/with-swirl nf 0.5)))))
+        "and mixes linearly between them")
+    (is (= (vec (:coherence nf)) (vec (:coherence (seed/with-swirl nf 0.3))))
+        "coherence is a property of the photo — the dial does not touch it")))
+
+(deftest swirl-decorrelates-the-position-warp
+  ;; The warp is what breaks the residual level lattice, so it has to keep its
+  ;; amplitude at Swirl 0 — only its spatial coherence changes. At 1.0 it is the
+  ;; Perlin field: over its ~17px wavelength neighbouring seeds drift together, and
+  ;; since the amplitude scales with stroke size (aw = warp·(1−D)·ssz), a large Size
+  ;; makes the displacement map fold — that is the "melted" look at scale. At 0.0
+  ;; each seed reads its own avalanche hash: same envelope, no shared direction.
+  (let [aw 8.0
+        row (fn [swirl salt] (mapv (fn [i] (* aw (seed/warp-noise swirl i 0 salt
+                                                                  (* 0.06 (double i)) 0.0)))
+                                   (range 400)))
+        pearson (fn [v]
+                  (let [a (butlast v) b (rest v) n (count a)
+                        ma (/ (reduce + a) n) mb (/ (reduce + b) n)
+                        num (reduce + (map (fn [x y] (* (- x ma) (- y mb))) a b))
+                        da (Math/sqrt (reduce + (map #(let [d (- % ma)] (* d d)) a)))
+                        db (Math/sqrt (reduce + (map #(let [d (- % mb)] (* d d)) b)))]
+                    (/ num (max 1e-9 (* da db)))))
+        coherent (row 1.0 61)
+        hashed   (row 0.0 61)]
+    (is (> (pearson coherent) 0.9)
+        (str "Perlin warp: adjacent seeds drift together (r=" (pearson coherent) ")"))
+    (is (< (Math/abs (pearson hashed)) 0.2)
+        (str "hashed warp: adjacent seeds are independent (r=" (pearson hashed) ")"))
+    (is (every? #(within? 0.0 aw %) hashed) "the displacement envelope is unchanged")
+    (is (every? #(within? 0.0 aw %) coherent))
+    ;; both ends still cover the cell — a dial that killed the warp would re-expose
+    ;; the lattice the warp exists to hide
+    (is (> (apply max hashed) (* 0.8 aw)) "the hashed warp still spans its amplitude")
+    (is (not= (row 0.0 61) (row 0.0 67)) "the two axes draw independent streams")))
+
+(deftest swirl-is-a-live-control-on-the-field
+  ;; end-to-end: the dial reaches splat-field, defaults to the shipped look, and
+  ;; actually moves paint at 0.
+  (let [img (gray-img 64 64 (fn [x y] (if (and (> x 20) (< x 44) (> y 20) (< y 44))
+                                        0.85 (* 0.4 (/ (double (+ x y)) 128.0)))))
+        ctl {:count 3000 :size 6.0 :stroke 2.5 :detail 0.6 :variation 0.5
+             :curvature 0.5 :opacity 0.9 :contrast 1.0}
+        means (fn [c] (mapv :mean (:splats (seed/splat-field img c))))
+        default (means ctl)
+        one     (means (assoc ctl :swirl 1.0))
+        zero    (means (assoc ctl :swirl 0.0))]
+    (is (= default one) "Swirl defaults to 1.0 — the shipped field is untouched")
+    (is (not= one zero) "and 0 places paint somewhere else")
+    ;; the dial re-aims strokes rather than re-budgeting them: a warped seed lands on a
+    ;; different detail value, so the dithered thresholds admit a slightly different
+    ;; set, but the ladder and its budget are untouched.
+    (is (< (Math/abs (- (count one) (count zero))) (* 0.1 (count one)))
+        (str "the dial moves strokes, it does not re-budget them: "
+             (count one) " -> " (count zero) " splats"))))

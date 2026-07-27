@@ -54,9 +54,9 @@
 (deftest settings-snapshot-round-trip
   (testing "snapshot then restore reproduces every control atom exactly"
     (let [saved (core/snapshot-settings)]
-      (is (= 15 (count saved)))                  ; count size broad mid fine detail
-      (core/restore-settings! (vec (repeat 15 0.37))) ; variation curvature stroke contrast
-                                                 ; hardness cutin tex-streak/grain/edge
+      (is (= 16 (count saved)))                  ; count size broad mid fine detail
+      (core/restore-settings! (vec (repeat 16 0.37))) ; variation curvature stroke contrast
+                                                 ; hardness cutin swirl tex-streak/grain/edge
       (is (every? #(== 0.37 %) (core/snapshot-settings))) ; hardness tex-streak/grain/edge
       (core/restore-settings! saved)
       (is (= saved (core/snapshot-settings))))))
@@ -175,16 +175,16 @@
 
 (deftest field-tex-ids-excludes-perm-and-non-textures
   (testing "field-tex-ids returns exactly the per-image texture ids, never :perm or :dmax"
-    ;; mirrors gen/upload-fields! (gen.clj:737): 7 per-image textures allocated via
+    ;; mirrors gen/upload-fields!: 8 per-image textures allocated via
     ;; new-tex, plus :perm (the shared Perlin texture, uploaded ONCE by upload-perm!
     ;; and reused across images), :dmax (a float), :dmap (a map), dim vectors and
     ;; :H/:W. Freeing :perm corrupts every later generate!; freeing (long :dmax) would
     ;; delete an unrelated texture id. Both must be excluded by an explicit allow-list.
-    (let [fields {:detail 22 :subject 23 :noise 24 :blur 25 :blur-drift 26
+    (let [fields {:detail 22 :subject 23 :noise 24 :noise-swirl0 29 :blur 25 :blur-drift 26
                   :blur-heavy 27 :raw 28 :perm 3 :dmax 1.0 :dmap {:h 64 :w 64}
                   :detail-dim [64.0 64.0] :detail-src [1024.0 1024.0]
                   :noise-dim [32.0 32.0] :noise-src [1024.0 1024.0] :H 1024 :W 1024}
           ids (core/field-tex-ids fields)]
-      (is (= [22 23 24 25 26 27 28] ids))   ; every per-image texture key, in order
+      (is (= [22 23 24 29 25 26 27 28] ids))   ; every per-image texture key, in order
       (is (not-any? #(= 3 %) ids))            ; :perm shared texture never freed
       (is (not-any? #(= 1 %) ids)))))         ; :dmax (1.0) never freed
