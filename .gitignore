@@ -21,3 +21,8 @@ DrawingWithGaussians/
 img/
 output/
 blog.md
+post.md
+
+# jolt build output
+/splat-painter
+splat-painter.build/
