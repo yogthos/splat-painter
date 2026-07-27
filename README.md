@@ -63,6 +63,16 @@ Sliders (live):
 - **Detail** — how many finer levels are painted (up to seven)
 - **Variation** — per-stroke size/tone jitter
 - **Curvature** — Perlin bend of stroke traces (gated off on strong edges)
+- **Swirl** — how much of the placement noise is the image-INDEPENDENT Perlin field.
+  Two things ride on it: the flat-region flow that orients strokes where the tensor has
+  no opinion, and the coherence (not the size) of the position warp that pushes seeds
+  off the level lattice. At 1.0 (the default) both come from one smooth Perlin field, so
+  neighbouring strokes turn and drift together — that is the organic look, and also what
+  swims structure around in hazy, low-contrast regions where the detail map does not
+  pin strokes down. At 0 the orientation comes from the edge-seeded flow (nearby edges
+  voted into the flat areas) and the warp from each seed's own hash: the lattice still
+  breaks, but nothing carries the photo's shapes with it. Coherent edges are unaffected
+  either way — the tensor already owns those.
 - **Stroke** — stroke length (chain step scaling)
 - **Contrast** — per-channel contrast
 - **Hardness** — edge crispness of detail strokes (tiny marks stay soft — antialiased)
@@ -85,6 +95,7 @@ Dev/debug entry points live under `test/`; only the app ships from `src/`.
 Headless overrides (for scripting/testing): `GA_PAINTER_SAVE_PNG`,
 `GA_PAINTER_QUIT_MS`, `GA_PAINTER_COUNT`, `GA_PAINTER_SIZE`, `GA_PAINTER_DETAIL`,
 `GA_PAINTER_STROKE`, `GA_PAINTER_VAR`, `GA_PAINTER_BROAD/MID/FINE`, `GA_PAINTER_CUTIN`,
+`GA_PAINTER_SWIRL`,
 `GA_PAINTER_CPU_GEN` (CPU reference path), `GA_PAINTER_GPU_VERIFY`,
 `GA_PAINTER_LOOP_RENDER`, `GA_PAINTER_TF_SMOKE`.
 

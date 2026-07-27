@@ -14,7 +14,10 @@
 
    Field textures (uploaded once per image load, all RGBA32F, texelFetch nearest):
      u_detail  W_d×H_d  .r = wavelet detail; normalized by u_dmax
-     u_noise   W_n×H_n  .rgba = (theta, coherence, snoise, tnoise) from prep-noise
+     u_noise   W_n×H_n  .rgb = (cos2θ, sin2θ, coherence) from prep-noise
+     u_noiseS  W_n×H_n  the same field with the Perlin swirl removed — fieldsAt mixes
+                        the two by u_swirl, which is how that dial stays live (re-baking
+                        one field costs 2.3s on a 1MP photo)
      u_blur    W×H      .rgb = smooth base colour (light); u_blurH = heavy (broad strokes)
      u_raw     W×H      .rgb = crisp pixel colour
      u_perm    512×1    .r = Perlin permutation (0..255)
@@ -85,6 +88,8 @@ uniform float u_contrast;
 uniform float u_detail;   // the Detail slider (deff scale)
 uniform float u_curv;     // Curvature raw 0..1 — Perlin bend of the stroke trace
 uniform float u_broad;    // Broad slider — bokeh-adaptive broad-tier multiplier
+uniform float u_swirl;    // Swirl 0..1 — share of the IMAGE-INDEPENDENT Perlin field in
+                          // the flow orientation and the position warp (mirror seed)
 
 // fields
 uniform sampler2D u_detailTex;
@@ -93,6 +98,11 @@ uniform float u_dmax;
 uniform vec2  u_detailDim;   // (H_d, W_d)
 uniform vec2  u_detailSrc;   // (src_h, src_w) = image (H, W)
 uniform sampler2D u_noiseTex;
+// the SAME orientation field with the Perlin swirl removed (edge-seeded flow only) —
+// the Swirl 0 end of the dial. prep-noise bakes both because re-baking one per drag is
+// 2.3s on a 1MP photo; fieldsAt mixes them per fetch, so the dial stays live with no
+// re-upload (mirror seed/with-swirl).
+uniform sampler2D u_noiseSTex;
 uniform vec2  u_noiseDim;
 uniform vec2  u_noiseSrc;
 uniform sampler2D u_blurTex;  // W×H edge-aware light blur (fine strokes' smooth base)
@@ -149,6 +159,14 @@ float poshash(int n, int lvl, int salt){
 float hash01(int a, int b, int salt){
   uint h = uint(a)*73856093u + uint(b)*19349663u + uint(salt)*83492791u; // wraps mod 2^32
   return float(h) / 4294967296.0;
+}
+
+// one axis of the flat-region position warp (mirror of seed/warp-noise): the Perlin
+// field at Swirl 1 (neighbouring seeds drift together — brushwork), the seed's own
+// avalanche hash at Swirl 0 (same envelope, independent neighbours — the level lattice
+// still breaks, but nothing drags the photo's structure with it).
+float warpNoise(int i, int lvl, int salt, float fx, float fy){
+  return u_swirl * noise2(fx, fy) + (1.0 - u_swirl) * poshash(i, lvl, salt);
 }
 
 // bilinear-map a full-image (x,y) into a reduced field grid (dim=(rows,cols),
@@ -229,15 +247,18 @@ float subjectAt(float x, float y){
 // sin2θ / coherence — double-angle components interpolate undirected orientations
 // (0 ≡ π) smoothly, where nearest-sampled raw angles stair-step along contours.
 // Returns (theta, coherence).
+// The Swirl mix happens PER FETCH here while the CPU (seed/with-swirl) mixes the whole
+// field once up front. Both give the same orientation: mix and bilinear are linear in
+// the double-angle components, so they commute, and the ½·atan2 comes after either way.
 vec2 fieldsAt(float x, float y){
   float fx = clamp(x * u_noiseDim.x / u_noiseSrc.x, 0.0, u_noiseDim.x - 1.0);
   float fy = clamp(y * u_noiseDim.y / u_noiseSrc.y, 0.0, u_noiseDim.y - 1.0);
   int i0 = int(fx); int i1 = min(i0 + 1, int(u_noiseDim.x) - 1); float wx = fx - float(i0);
   int j0 = int(fy); int j1 = min(j0 + 1, int(u_noiseDim.y) - 1); float wy = fy - float(j0);
-  vec3 v00 = texelFetch(u_noiseTex, ivec2(j0, i0), 0).xyz;
-  vec3 v01 = texelFetch(u_noiseTex, ivec2(j1, i0), 0).xyz;
-  vec3 v10 = texelFetch(u_noiseTex, ivec2(j0, i1), 0).xyz;
-  vec3 v11 = texelFetch(u_noiseTex, ivec2(j1, i1), 0).xyz;
+  vec3 v00 = mix(texelFetch(u_noiseSTex, ivec2(j0, i0), 0).xyz, texelFetch(u_noiseTex, ivec2(j0, i0), 0).xyz, u_swirl);
+  vec3 v01 = mix(texelFetch(u_noiseSTex, ivec2(j1, i0), 0).xyz, texelFetch(u_noiseTex, ivec2(j1, i0), 0).xyz, u_swirl);
+  vec3 v10 = mix(texelFetch(u_noiseSTex, ivec2(j0, i1), 0).xyz, texelFetch(u_noiseTex, ivec2(j0, i1), 0).xyz, u_swirl);
+  vec3 v11 = mix(texelFetch(u_noiseSTex, ivec2(j1, i1), 0).xyz, texelFetch(u_noiseTex, ivec2(j1, i1), 0).xyz, u_swirl);
   vec3 b = mix(mix(v00, v01, wy), mix(v10, v11, wy), wx);
   return vec2(0.5 * atan(b.y, b.x), clamp(b.z, 0.0, 1.0));
 }
@@ -436,8 +457,8 @@ void main(){
   // no Perlin warp on liner-scale levels (mirror seed/liner-scale?): fine seeds land exactly on
   // the detail they trace; noise variation belongs to large/medium strokes
   float aw = (lvl >= 2 && ssz < 3.5) ? 0.0 : u_warp * (1.0 - D) * ssz;   // no Perlin warp on liner-scale levels (mirror seed/liner-threshold)
-  float x2 = (aw < 0.2) ? x : x + aw * noise2(0.06*x, 0.06*y);
-  float y2 = (aw < 0.2) ? y : y + aw * noise2(41.3 + 0.06*x, 17.9 + 0.06*y);
+  float x2 = (aw < 0.2) ? x : x + aw * warpNoise(i, lvl, 61, 0.06*x, 0.06*y);
+  float y2 = (aw < 0.2) ? y : y + aw * warpNoise(i, lvl, 67, 41.3 + 0.06*x, 17.9 + 0.06*y);
   x2 = clamp(x2, 0.0, float(u_H - 1));
   y2 = clamp(y2, 0.0, float(u_W - 1));
 
@@ -746,10 +767,11 @@ void main(){
 
 (def ^:private gen-uniform-names
   ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv" "u_broad"
+   "u_swirl"
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
    "u_segs" "u_stepf" "u_bendf" "u_sharp" "u_sideo" "u_selong"
    "u_detailTex" "u_subjTex" "u_dmax" "u_detailDim" "u_detailSrc"
-   "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurDTex" "u_blurHTex" "u_rawTex" "u_permTex"])
+   "u_noiseTex" "u_noiseSTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurDTex" "u_blurHTex" "u_rawTex" "u_permTex"])
 
 (defn sources
   "Return {:vs-src :gs-src} — pure, no GL context (for headless inspection/tests)."
@@ -815,7 +837,9 @@ void main(){
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
         ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
-        detail-t (new-tex) subj-t (new-tex) noise-t (new-tex) blur-t (new-tex) blurd-t (new-tex) blurh-t (new-tex) raw-t (new-tex)]
+        ^doubles c2s (or (:c2s nf) c2) ^doubles s2s (or (:s2s nf) s2)
+        detail-t (new-tex) subj-t (new-tex) noise-t (new-tex) noises-t (new-tex)
+        blur-t (new-tex) blurd-t (new-tex) blurh-t (new-tex) raw-t (new-tex)]
     ;; .r = aggregate map, .g = sharp fine-band, .b = raw edge strength, .a = MID band
     (upload-rgba! detail-t Wd Hd (rgba-ptr Hd Wd (fn [i] [(aget dd i) (aget ds i) (aget de i) (aget dm2 i)])))
     ;; ABSOLUTE subjectness (.r) — the broad tier's bokeh gate (same grid as detail)
@@ -823,11 +847,15 @@ void main(){
     ;; orientation as double-angle components (cos2θ, sin2θ) + coherence — the GS
     ;; bilinearly blends the components (fieldsAt), never the raw angle.
     (upload-rgba! noise-t  Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget c2 i) (aget s2 i) (aget co i) 0.0])))
+    ;; the Swirl 0 end of the same field (edge-seeded flow, no Perlin). Coherence is
+    ;; NOT dialled, so it rides in both and fieldsAt's vec3 mix leaves it alone.
+    (upload-rgba! noises-t Wn Hn (rgba-ptr Hn Wn (fn [i] [(aget c2s i) (aget s2s i) (aget co i) 0.0])))
     (upload-rgba! blur-t   W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blur b) (aget blur (+ b 1)) (aget blur (+ b 2)) 1.0]))))
     (upload-rgba! blurd-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurd b) (aget blurd (+ b 1)) (aget blurd (+ b 2)) 1.0]))))
     (upload-rgba! blurh-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurh b) (aget blurh (+ b 1)) (aget blurh (+ b 2)) 1.0]))))
     (upload-rgba! raw-t    W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget raw b) (aget raw (+ b 1)) (aget raw (+ b 2)) 1.0]))))
-    {:detail detail-t :subject subj-t :noise noise-t :blur blur-t :blur-drift blurd-t :blur-heavy blurh-t :raw raw-t :perm perm-tex
+    {:detail detail-t :subject subj-t :noise noise-t :noise-swirl0 noises-t
+     :blur blur-t :blur-drift blurd-t :blur-heavy blurh-t :raw raw-t :perm perm-tex
      :dmap dmap                              ; the CPU detail map, for layer-params' budget
      :dmax (double (:dmax dmap))
      :detail-dim [(double Hd) (double Wd)] :detail-src [(double H) (double W)]
@@ -890,7 +918,7 @@ void main(){
   [gen fields controls tf-buf q vao {:keys [height width]}]
   (let [{:keys [program locs]} gen
         {:keys [count size stroke detail variation curvature contrast
-                size-broad size-mid size-fine edge-band]} controls
+                size-broad size-mid size-fine edge-band swirl]} controls
         H (long height) W (long width)
         params (seed/layer-params (:dmap fields) detail size variation curvature stroke
                                   [(double (or size-broad 1.0)) (double (or size-mid 1.0))
@@ -927,6 +955,7 @@ void main(){
     (gl/gl-uniform-1f (:u_detail locs) (double detail))
     (gl/gl-uniform-1f (:u_curv locs) (double curvature))
     (gl/gl-uniform-1f (:u_broad locs) (double (or size-broad 1.0)))
+    (gl/gl-uniform-1f (:u_swirl locs) (double (or swirl 1.0)))
     (set-1fv! (:u_ssz locs) ssz)
     (set-1fv! (:u_sp locs) sp)
     (set-1fv! (:u_th locs) th)
@@ -949,6 +978,7 @@ void main(){
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 6)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:blur-heavy fields)) (gl/gl-uniform-1i (:u_blurHTex locs) 6)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 7)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:subject fields))    (gl/gl-uniform-1i (:u_subjTex locs) 7)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 8)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:blur-drift fields)) (gl/gl-uniform-1i (:u_blurDTex locs) 8)
+    (gl/gl-active-texture (+ gl/GL-TEXTURE0 9)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:noise-swirl0 fields)) (gl/gl-uniform-1i (:u_noiseSTex locs) 9)
     (gl/gl-uniform-1f (:u_dmax locs) (double (:dmax fields)))
     (gl/gl-uniform-2f (:u_detailDim locs) (double (nth (:detail-dim fields) 0)) (double (nth (:detail-dim fields) 1)))
     (gl/gl-uniform-2f (:u_detailSrc locs) (double (nth (:detail-src fields) 0)) (double (nth (:detail-src fields) 1)))

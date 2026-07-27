@@ -115,6 +115,14 @@
     (assert-contains gs-src "float cx = float(u_H) * poshash(i, lvl, 29);" "avalanche-hashed candidate positions")
     (assert-contains gs-src "uint wang32(uint v){" "Wang avalanche hash")
     (assert-contains gs-src "float aw = (lvl >= 2 && ssz < 3.5) ? 0.0 : u_warp * (1.0 - D) * ssz;" "gen warp zeroed on physical liner-scale levels")
+    ;; SWIRL (mirror seed/warp-noise + seed/with-swirl): the warp's spatial coherence is
+    ;; the dial, its amplitude is not — Perlin at 1, per-seed avalanche hash at 0.
+    (assert-contains gs-src "return u_swirl * noise2(fx, fy) + (1.0 - u_swirl) * poshash(i, lvl, salt);" "gen warp noise mixes Perlin with the seed's own hash")
+    (assert-contains gs-src "float x2 = (aw < 0.2) ? x : x + aw * warpNoise(i, lvl, 61, 0.06*x, 0.06*y);" "gen position warp goes through warpNoise")
+    ;; the orientation half of the dial: the geometry shader mixes the two baked fields
+    ;; per fetch (the CPU mixes the arrays once — linear either way, so they agree)
+    (assert-contains gs-src "uniform sampler2D u_noiseSTex;" "gen swirl-free orientation field")
+    (assert-contains gs-src "vec3 v00 = mix(texelFetch(u_noiseSTex, ivec2(j0, i0), 0).xyz, texelFetch(u_noiseTex, ivec2(j0, i0), 0).xyz, u_swirl);" "gen fieldsAt mixes the two orientation fields by Swirl")
     ;; Round 2: liner? is a pure physical-size predicate (lvl>=2 && ssz<3.5), mirrored in the GS.
     (assert-contains gs-src "bool liner = (lvl >= 2 && ssz2 < 3.5);" "gen physical liner predicate (mirror seed/liner-scale?)")
     (assert-not-contains gs-src "(lvl >= 4) || (lvl >= 2" "old lvl>=4 liner disjunct removed (raw-floor/melt still key on lvl)")
