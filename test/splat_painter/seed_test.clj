@@ -1186,6 +1186,20 @@
   (first (filter :band (:levels (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.5
                                                    [0.4 0.4 0.4 dial] 600000 H W)))))
 
+(defn- disk-field
+  "A grid of small bright disks on dark ground: each disk's silhouette is a tight closed
+   curve, so a band stroke turn-kills (cos 35°/step) after a couple of segments — the
+   short, photo-like trace length that band-img's single straight ramp does NOT exercise.
+   Used to calibrate/check the band's demand against its real per-candidate yield."
+  [H W cell rad]
+  (gray-img H W (fn [x y]
+                  (let [centres (for [i (range 0 H cell) j (range 0 W cell)]
+                                  [(double (+ i (/ cell 2.0))) (double (+ j (/ cell 2.0)))])
+                        inside? (some (fn [[cx cy]]
+                                        (<= (+ (* (- x cx) (- x cx)) (* (- y cy) (- y cy))) (* rad rad)))
+                                      centres)]
+                    (if inside? 0.9 0.25)))))
+
 (deftest edge-band-tier-places-off-the-raw-edge-channel
   ;; map-at :edge must be wavelet/edge-at EXACTLY — unnormalized, unlike the three
   ;; wavelet bands. The GLSL twin is pinned separately in check.clj ("if (sel == 3)").
@@ -1294,6 +1308,48 @@
     (is (< (det-cand on) (det-cand off))
         (str "admitting the band thins the ladder's detail tier: "
              (det-cand off) " -> " (det-cand on) " candidates"))))
+
+(deftest edge-band-demand-tracks-what-the-tier-paints
+  ;; The band's :demand is subtracted from the detail slice (see ...comes-out-of-the-budget),
+  ;; so it must predict what the tier ACTUALLY emits. The old nx·frac·band-segs term is
+  ;; cap-bound at exactly band-share·budget (18000 at Splats 72000) regardless of the realised
+  ;; yield, which over-charged ~2.2× — the band truly paints ~8200 splats at 1024px
+  ;; (DSC_8428), not the 18000 it was charged — and the over-charge came straight out of the
+  ;; detail tier's candidate allowance (cand-thin). Calibrated band-trace against the band's
+  ;; MEASURED mean traced length on two photos (DSC_8428 ~5.3, coyote ~8.6 segs/survivor);
+  ;; band-segs (12) still sets spacing and the nx cap, so the tier paints identically — only
+  ;; its charge drops. This pins the RELATIONSHIP: demand within 1.5× of the splats the tier
+  ;; actually contributes on a fixture where it is live. The bound is deliberately that tight
+  ;; — measured demand/pure runs 0.92 here (0.67 coyote 512, 1.12 DSC 1024) while the old
+  ;; band-segs charge measures 1.83 here (1.34 / 2.25), so a looser 3× would admit the very
+  ;; over-charge this test exists to catch.
+  ;;
+  ;; "What it contributes" is the band's PURE segment count — segments whose level carries
+  ;; selong>0 (band = band-se 2.6; ladder = 0) — counted straight out of layered-means. NOT
+  ;; the Cut-in on/off field delta: that is confounded, because the demand it tests changes
+  ;; cand-thin between the on/off runs (a too-high charge starves the detail tier in the ON
+  ;; run, so the delta under-counts the band). band-img's single straight ramp traces far too
+  ;; long (rt≈28) to exercise this, so a disk field supplies the short photo-like traces.
+  (let [img  (disk-field 256 256 14 3)
+        sfield (structure/analyze img)
+        dmap (wavelet/placement-map img sfield)
+        nf   (seed/prep-noise sfield)
+        px   (:pixels img)
+        cnt  72000  H 256 W 256  area (* H W)
+        layered-means #'splat-painter.seed/layered-means
+        band-level    #'splat-painter.seed/band-level
+        segs (layered-means dmap nf 0.6 6.0 0.5 0.5 2.5 1.0 [1.0 1.0 1.0 1.0] cnt H W px px)
+        pure (count (filter (fn [s] (pos? (double (nth s 14)))) segs))
+        lp   (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 1.0 1.0 1.0] cnt H W)
+        finest (->> lp :levels (remove :band) (map :ssz) (reduce min))
+        demand (double (:demand (band-level dmap 1.0 area cnt finest)))]
+    (is (pos? pure) "the band tier is live on this fixture")
+    (is (<= demand (* 1.5 pure))
+        (str "demand must not over-charge: demand " demand " vs pure " pure
+             " (x" (/ demand (double pure)) ")"))
+    (is (>= demand (/ pure 1.5))
+        (str "demand must not under-charge: demand " demand " vs pure " pure
+             " (x" (/ demand (double pure)) ")"))))
 
 ;; --- Swirl: the dial on the image-INDEPENDENT Perlin noise ------------------
 ;; Two placement terms are steered by a Perlin field rather than by the photo: the
