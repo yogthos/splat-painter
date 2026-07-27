@@ -379,13 +379,26 @@
 ;; the mechanism worked wherever it landed and mostly did not land. At 0.45 the
 ;; nx-cap below binds instead, so band-share is what actually sets the density.
 (def ^:private band-segs 12)
-;; ^ the band tier's NOMINAL traced length, governing both its seed spacing and its
-;; budget term (they have to agree — see expected-segs). It is NOT expected-segs: that
-;; 4 was measured for :sharp-placed strokes, which stop as soon as the fine-band ridge
-;; dies. A band stroke follows a SILHOUETTE, which is long and smooth by construction,
-;; so it traces much further before the ridge dies or the tangent breaks. 12 is an
-;; estimate, not a measurement — re-measure the mean traced length of this tier once
-;; the render is visually right, the way expected-segs was swept.
+;; ^ the band tier's NOMINAL traced length, governing its SEED SPACING and the nx CAP
+;; (band-share·budget is the density ceiling — see nx-cap below). NOT the charged demand:
+;; that uses band-trace (the MEASURED traced length), which is far shorter. It is NOT
+;; expected-segs either: that 4 was measured for :sharp-placed strokes, which stop as soon
+;; as the fine-band ridge dies. A band stroke follows a SILHOUETTE, nominally long and
+;; smooth, so 12 sets a generous density; what it actually EMITS is much less (band-trace).
+(def ^:private band-trace 6.0)
+;; ^ the band tier's MEAN traced length per SURVIVING seed — the budget DEMAND term only.
+;; Measured directly by counting emitted segments with selong>0 (band strokes only),
+;; ÷ survivors (survivors ≈ frac·nx, since candidates land uniformly so survival ≈ frac):
+;;   DSC_8428  5.16 segs at 512px / 5.46 at 1024px   (8194 band splats of 40991 at 1024)
+;;   coyote    8.94 at 512px / 8.26 at 1024px
+;; Stable across resolution; varies ~5–9 by image (smoother silhouettes trace longer). 6.0
+;; is a round central value, within 1.5× of all four measurements. This is the band's TRUE
+;; paint count — NOT the Cut-in on/off field delta, which under-counts it: the old 12-based
+;; charge (18000 at Splats 72000) starved the detail tier so badly that turning the band ON
+;; shrank detail more than the band added, so the field delta (2213 at DSC 1024) read ~8×
+;; below the 18000 charge when the real over-charge was 18000/8194 ≈ 2.2×. Spacing and the
+;; nx cap still key on band-segs (12), so the tier paints EXACTLY the same — only its charge
+;; drops toward what it emits, freeing the fine tier's candidate slice (cand-thin).
 
 (defn- band-level
   "The edge-band level map, or nil when the tier should not exist. `finest` is the
@@ -421,7 +434,8 @@
               sp     (/ (* band-ovl (Math/sqrt (double band-segs)) ssz)
                         (Math/sqrt (double strength)))
               nx-nat (Math/ceil (/ (double area) (* sp sp)))
-              ;; splats ≈ nx · frac · band-segs, so invert that for the cap
+              ;; the cap inverts the NOMINAL nx·frac·band-segs model so band-share·budget is
+              ;; the density ceiling; the charged :demand below uses the measured band-trace
               nx-cap (/ (* band-share (double strength) (double budget))
                         (* frac (double band-segs)))
               nx     (long (max 0.0 (min nx-nat nx-cap)))]
@@ -431,7 +445,10 @@
              :segs max-segs :stepf (step-frac band-lvl) :bendf 0.0
              :map-kind :edge :traw (raw-floor band-lvl ssz)
              :sideo band-sideo :selong band-se :band true
-             :demand (* (double nx) frac (double band-segs))}))))))
+             ;; charge the MEASURED yield (nx·frac·band-trace), not nominal band-segs —
+             ;; nx, spacing and the cap above are unchanged, so the tier paints identically;
+             ;; only its budget charge drops to what it actually emits.
+             :demand (* (double nx) frac (double band-trace))}))))))
 
 (defn- band-prepend
   "Put the edge-band level at the FRONT of a finest-first level vector (index 0 =
