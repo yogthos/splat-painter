@@ -796,6 +796,81 @@
       (is (<= n (* 1.5 cnt)) (str "count " cnt ": survivor count within 1.5× of the budget"))
       (is (<= n shader/max-splats) (str "count " cnt ": never exceeds shader/max-splats")))))
 
+(defn- ladder-img []
+  ;; multi-scale texture: a coarse ramp the base tier answers plus a 2-3px checker the
+  ;; detail tiers reach for. Its detail runs out around level 4, so the ladder hits the
+  ;; min-phys floor there — the DSC_8428-at-Size-13.66 case.
+  (gray-img 256 256 (fn [x y]
+                      (let [coarse (* 0.25 (+ 1.0 (Math/sin (* 0.04 (+ x y)))))
+                            fine  (if (odd? (+ (quot x 2) (quot y 3))) 0.12 -0.12)]
+                        (max 0.0 (min 1.0 (+ coarse fine)))))))
+
+(defn- dense-img []
+  ;; FULL-CONTRAST 2px checker: every rung of the ladder has detail to answer, so the fine
+  ;; tier's natural density (17060 candidates at level 6) runs ~1700x over the slice the
+  ;; budget affords it. This is the fixture where the old drop-whole gate bit: it cut the
+  ;; ladder at 4 rungs with a 3.59px floor, where admit-and-thin reaches 7 rungs at 1.40.
+  (gray-img 256 256 (fn [x y] (if (odd? (+ (quot x 2) (quot y 2))) 0.9 0.1))))
+
+(deftest fine-tier-is-admitted-and-thinned-not-dropped
+  ;; The fine tier (lvl >= broad-end) was dropped OUTRIGHT when its cost exceeded the
+  ;; remaining budget, which is what made Detail inert above 0.6: the level the slider
+  ;; wanted to add was tens of times over its slice, so it never appeared at any Detail. It
+  ;; is now admitted and thinned against that slice the way levels 2-3 are thinned against
+  ;; theirs, so it contributes in proportion to what the budget affords.
+  ;;
+  ;; Discriminating: restore the old `(and fine? (> cost rem))` drop and this fixture comes
+  ;; back 4 rungs with a 3.59px floor, so both the seq and the floor assertion fail.
+  (let [H 256 W 256 area (* H W)
+        img (dense-img)
+        dmap (wavelet/placement-map img (structure/analyze img))
+        levels (:levels (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.5 [1.0 1.0 1.0 1.0] 4000 H W))
+        ladder (remove :band levels)
+        ;; the density the level's own spacing asks for, before any thinning
+        natural (fn [l] (Math/ceil (/ (double area) (* (double (:sp l)) (double (:sp l))))))
+        thin    (fn [l] (/ (double (:nx l)) (natural l)))
+        fine (filter #(>= (long (:lvl %)) 4) ladder)
+        mid  (filter #(and (>= (long (:lvl %)) 2) (< (long (:lvl %)) 4)) ladder)]
+    (is (seq fine) "the fine tier is admitted, not dropped whole")
+    (is (every? #(< (thin %) 0.1) fine)
+        (str "...and thinned hard to fit its slice: " (mapv thin fine)))
+    (is (every? pos? (map :nx fine)) "thinned to a real candidate pool, not to nothing")
+    (is (seq mid) "the mid tier is still there")
+    ;; INDEPENDENT slices. One shared cand-thin would drag the mid tier down with the fine
+    ;; tier's demand — the coarsening the two-tier budget exists to prevent — while letting
+    ;; each thin against the WHOLE detail budget overspends it (Splats 1000 hit 1662 against
+    ;; the 1500 bound above). Here the mid tier fits its slice untouched while the fine tier
+    ;; thins ~100x, which only separate slices can produce.
+    (is (every? #(> (thin %) (* 10.0 (thin (first fine)))) mid)
+        (str "mid and fine thin by their own factors: mid " (mapv thin mid)
+             " vs fine " (mapv thin fine)))
+    ;; the ladder now descends to the min-paintable floor instead of stopping short of it
+    (is (approx= 1e-9 1.4 (reduce min (map :ssz ladder)))
+        (str "the finest rung sits on the min-phys floor (1.4), got "
+             (reduce min (map :ssz ladder))))))
+
+(deftest ladder-depth-is-bounded-by-the-floor-not-by-detail
+  ;; Redundancy is the only drop left, and it is also what TERMINATES the ladder: the level
+  ;; after the one landing on min-phys is always within keep-ratio of it, so the ladder ends
+  ;; one rung past the floor however high Detail goes. Where an image's detail runs out at
+  ;; the floor (ladder-img, the DSC_8428 case) Detail above 0.6 therefore adds no rungs —
+  ;; the slider's advertised seven levels are bounded by Size and min-phys, not by Detail.
+  ;; Pins the bound so a future change to the drop rules cannot reopen the ladder into
+  ;; sub-paintable dust. (On dense-img, where detail survives past the floor, Detail DOES
+  ;; still add rungs — see fine-tier-is-admitted-and-thinned-not-dropped, 7 of them.)
+  (let [dmap (wavelet/placement-map (ladder-img) (structure/analyze (ladder-img)))
+        ladder-at (fn [det] (->> (seed/layer-params dmap det 6.0 0.5 0.5 2.5 [1.0 1.0 1.0 1.0] 4000 256 256)
+                                 :levels (remove :band) (mapv :ssz)))]
+    (is (= (ladder-at 0.6) (ladder-at 1.0))
+        (str "Detail 0.6 and 1.0 admit the same ladder: " (ladder-at 0.6) " vs " (ladder-at 1.0)))
+    (is (= (ladder-at 0.8) (ladder-at 1.0)) "and every Detail in between")
+    ;; strictly finer per rung, so no two rungs are the duplicate pass the redundancy rule
+    ;; is there to drop (:levels is finest-first, so the sigmas run increasing)
+    (is (apply < (ladder-at 1.0)) "rungs stay strictly finer, finest-first")
+    (is (every? (fn [[fine coarse]] (< fine (* 0.95 coarse)))
+                (partition 2 1 (ladder-at 1.0)))
+        "each rung clears keep-ratio against the one above it")))
+
 (deftest budget-cap-holds-at-both-ends-of-the-splats-range
   ;; Regression guard for the budget cap (spec-offset-and-repin, Item 2): the min-phys
   ;; floor pins the finest levels at fixed spacing that does NOT scale with the budget.
