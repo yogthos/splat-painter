@@ -34,6 +34,15 @@ lines at a couple-of-pixels width that follow contours while the orientation fie
 stays coherent, carry nearly opaque paint on strong edges, and keep to their own side
 of the ridge so the two sides' colours meet at the edge instead of crossing it.
 
+Above Detail 0.75 an **edge-band tier** is laid over the top. A stroke that straddles
+a soft silhouette carries one colour across a body spanning the whole transition, so
+it paints the transition's mid value onto the darker side — the grey fringe outside a
+coat or hair against an out-of-focus background. This tier restates the boundary from
+its own sides instead: placed off the raw edge channel, pushed clear of the ridge by
+more than its own width, born long and thin along the edge, and painted opaque and
+last. Measured on a test portrait it cuts the outward bleed by ~30% (+7.35 → +5.13
+luma) for ~28% more splats.
+
 Rendering (GPU): one blended quad per splat (premultiplied over, back-to-front —
 the buffer is already in paint order), so cost scales with painted area, not
 pixels × splats.
@@ -45,8 +54,8 @@ float precision — see `test/splat_painter/check.clj` and `GA_PAINTER_GPU_VERIF
 ## Run
 
 ```sh
-joltc -M:run                       # open the window, click "Open Image…"
-joltc -M:run path/to/image.jpeg    # load an image immediately
+jolt -M:run                       # open the window, click "Open Image…"
+jolt -M:run path/to/image.jpeg    # load an image immediately
 ```
 
 Sliders (live):
@@ -77,18 +86,18 @@ Headless overrides (for scripting/testing): `GA_PAINTER_SAVE_PNG`,
 ## Test & check
 
 ```sh
-joltc -M:test      # unit + golden-field regression tests
-joltc -M:check     # headless: shader GLSL structure, packing, full pipeline
-joltc -M:preview   # CPU render to PNG (no GL needed)
-joltc -M:prof      # analysis/placement profiling
-joltc -M:pin       # print the golden fixture's actual checksums (for re-pinning)
+jolt -M:test      # unit + golden-field regression tests
+jolt -M:check     # headless: shader GLSL structure, packing, full pipeline
+jolt -M:preview   # CPU render to PNG (no GL needed)
+jolt -M:prof      # analysis/placement profiling
+jolt -M:pin       # print the golden fixture's actual checksums (for re-pinning)
 ```
 
 Dev/debug entry points live under `test/`; only the app ships from `src/`.
 
 ## REPL-driven development
 
-`joltc nrepl-server` (default port 7888, writes `.nrepl-port`) resolves `deps.edn`
+`jolt nrepl-server` (default port 7888, writes `.nrepl-port`) resolves `deps.edn`
 and parks the main thread on a pump, so an eval can start the GTK loop and jolt
 marshals the blocking main loop onto the main thread — the window comes up and the
 launching eval returns, leaving the REPL live. Connect any editor / nREPL client:
@@ -115,10 +124,10 @@ abort.
 
 ## Build
 
-A standalone binary (no `joltc` needed to run it) is compiled with `joltc build`:
+A standalone binary (no `jolt` needed to run it) is compiled with `jolt build`:
 
 ```sh
-joltc build -m splat-painter.core -o splat-painter --opt
+jolt build -m splat-painter.core -o splat-painter --opt
 ./splat-painter path/to/image.jpeg
 ```
 

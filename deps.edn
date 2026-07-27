@@ -27,7 +27,7 @@
            ;; print the actual golden-fixture checksums, for re-pinning seed-test
            :pin   {:extra-paths ["test"] :main-opts ["-m" "splat-painter.pin"]}}
 
- :tasks {run   "joltc -M:run"
-         check "joltc -M:check"
-         test  "joltc -M:test"}}
+ :tasks {run   "jolt -M:run"
+         check "jolt -M:check"
+         test  "jolt -M:test"}}
 
