@@ -221,6 +221,24 @@
 ;; 8.70, nx 13866) stays soft, 6 (sp 6.74, nx 23110) is intermediate, 4 (sp 5.50, nx
 ;; 34664) is where the camera strap, the phone edge and the lips come back. Re-measure
 ;; this if the stop rules change — it is the mean stroke length they produce.
+(def ^:private det-yield 1.8)
+;; ^ the MEAN splats emitted per DETAIL candidate (lvl>=2, non-band), for the budget's
+;; det-demand term ONLY — expected-segs (4) above still drives seed spacing + the k-of term,
+;; the way band-trace carries the band's measured length beside band-segs. expected-segs is
+;; the NOMINAL traced length of a stroke; the tier paints far fewer per candidate, because
+;; survival is partial (a candidate emits only if its wavelet detail clears the dithered
+;; threshold) and surviving strokes die short at corners. Measured by counting emitted
+;; segments out of layered-means against the full candidate pool (cand-thin 1, so the ratio
+;; is yield itself): DSC_8428 ~1.3 (512px 1.12, 1024px 1.28), coyote ~1.9 (512 1.90, 1024
+;; 1.66), crow 0.80 — budget-invariant across 36k-600k. The ~0.8-2.0 spread is image texture
+;; (survival), which one constant cannot fold out. 1.8 is the LOWEST value that still holds
+;; the count=1000 ≤1500 guard (survivor-count-tracks-budget): at 1.5 the detail cap stops
+;; firing at the low end and Splats=1000 emits 1670, so the slider stops tracking the count.
+;; So 1.8, not the 1.3 the photos average: it leans high to keep the Splats slider honest at
+;; the low end, at the cost of a smoother image spending a little under budget. On DSC_8428
+;; 512px that lifts budget spend 52%→68% (cand-thin saturates to 1 there, so 1.5/1.8 are
+;; identical at that size) and fine-detail coverage 79.2%→98.6%. Charging the old
+;; expected-segs (4) over-stated demand ~2-3x and cand-thin sat near 0.24.
 (def ^:private edge-floor 0.10)    ; ridge-alive stop: the edge is dead below this, the feature has ended
 (def ^:private bend-cos 0.90)      ; bend-break: |dot(field-dir, prev-step)| below this (~26°/step) is a corner
 (def ^:private runaway 0.60)       ; chroma BACKSTOP only: the stroke has wandered into a foreign colour region
@@ -782,7 +800,10 @@
                           ;; COVERAGE: bokeh-thinned survivors (bmin^2). DETAIL: full
                           ;; candidate pool (lvl-frac under-predicts dithered survival).
                           surv (if detail? 1.0 (surv-frac lvl))
-                          segs-per-seed (if detail? (double expected-segs)
+                          ;; COVERAGE survivors x their seg-count; DETAIL full pool x the
+                          ;; MEASURED per-candidate yield (det-yield) — NOT expected-segs,
+                          ;; which sets spacing but over-counts what the tier paints ~2-3x.
+                          segs-per-seed (if detail? (double det-yield)
                                                  (double (seg-count lvl)))]
                       (* (double nx) (double surv) segs-per-seed)))
         cov-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (< (long lvl) 2) (demand lvl ssz) 0.0)) admitted))
@@ -812,7 +833,8 @@
         ;; the EDGE-BAND tier rides at index 0 (topmost) over the finished ladder.
         levels (band-prepend levels band)]
     {:nlev (clojure.core/count levels) :warp warp :scale scale :levels levels
-     :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))}))
+     :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))
+     :det-demand det-demand :cand-thin cand-thin}))
 
 (declare sample-fields)
 
