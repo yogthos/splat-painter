@@ -12,7 +12,10 @@ permissions:
   contents: write   # create the release and upload assets
 
 env:
-  JOLT_VERSION: v0.4.15   # pinned joltc used to compile the binary
+  # Pinned to the version the suite is actually validated against locally. Upstream
+  # renamed both the binary and the release asset at 0.5.0, so moving this pin across
+  # that boundary means updating the asset name and every invocation below with it.
+  JOLT_VERSION: v0.5.1
 
 jobs:
   build:
@@ -50,22 +53,22 @@ jobs:
           cache=$(find /usr/lib -path '*gdk-pixbuf*' -name loaders.cache 2>/dev/null | head -1)
           echo "GDK_PIXBUF_MODULE_FILE=$cache" >> "$GITHUB_ENV"
 
-      - name: Install joltc
+      - name: Install jolt
         run: |
-          url="https://github.com/jolt-lang/jolt/releases/download/${JOLT_VERSION}/joltc-${JOLT_VERSION}-${{ matrix.target }}.tar.gz"
-          curl -fsSL -o joltc.tar.gz "$url"
-          mkdir -p "$HOME/.joltc"
-          tar xzf joltc.tar.gz -C "$HOME/.joltc" --strip-components=1
-          echo "$HOME/.joltc" >> "$GITHUB_PATH"
+          url="https://github.com/jolt-lang/jolt/releases/download/${JOLT_VERSION}/jolt-${JOLT_VERSION}-${{ matrix.target }}.tar.gz"
+          curl -fsSL -o jolt.tar.gz "$url"
+          mkdir -p "$HOME/.jolt-dist"
+          tar xzf jolt.tar.gz -C "$HOME/.jolt-dist" --strip-components=1
+          echo "$HOME/.jolt-dist" >> "$GITHUB_PATH"
 
-      - name: joltc version
-        run: joltc --version
+      - name: jolt version
+        run: jolt --version
 
       - name: Test (headless)
-        run: joltc -M:test
+        run: jolt -M:test
 
       - name: Build binary
-        run: joltc build -m splat-painter.core -o splat-painter --opt
+        run: jolt build -m splat-painter.core -o splat-painter --opt
 
       - name: Package
         run: |
