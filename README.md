@@ -1,56 +1,49 @@
 # splat-painter
 
-A GUI tool that repaints an image as a field of 2D Gaussian splats — an oil-painting
-look built by progressive refinement: an opaque underpainting of large soft strokes,
-then successively finer, more translucent layers of brush strokes traced along the
-image's edges. Built in [Jolt](https://github.com/jolt-lang/jolt) (Clojure on Chez
+A GUI tool that uses a field of 2D Gaussian splats to create an oil-painting
+look built by progressive refinement. The painting starts wth an opaque underpainting
+of large soft strokes, then successively finer, more translucent layers of brush strokes
+traced along the image's edges.
+
+Built in [Jolt](https://github.com/jolt-lang/jolt) (Clojure on Chez
 Scheme) with [glimmer](https://github.com/jolt-lang/glimmer) (GTK4) and
 [glimmer-gl](https://github.com/jolt-lang/glimmer-gl) (OpenGL).
 
 The covariance math (Σ = R·diag(s²)·Rᵀ, closed-form 2×2 precision) follows the 2D
-Gaussian splatting formulation of DrawingWithGaussians / 3DGS.
+Gaussian splatting formulation of [DrawingWithGaussians](https://github.com/belkakari/DrawingWithGaussians)
+and 3DGS.
+
+## Examples
+
+Each row below shows the source image, then the splat-painted result.
+
+| Source | Splat-painted |
+| --- | --- |
+| ![](examples/hk-original.jpg) | ![](examples/hk.png) |
+| ![](examples/loki-original.jpg) | ![](examples/loki.jpg) |
+| ![](examples/phone-original.jpg) | ![](examples/phone.jpg) |
+| ![](examples/photog-original.jpg) | ![](examples/photog.jpg) |
 
 ## How it paints
 
-Analysis (once per image load, CPU):
+Analysis is done once per image load on the CPU, and this step takes a minute:
 
 - **colour structure tensor** (Di Zenzo — per-channel Sobel, gamma-corrected) gives
-  per-pixel edge orientation, coherence, and strength; chroma edges (lips vs skin)
-  count like luma edges
+  per-pixel edge orientation, coherence, and strength; chroma edges count like luma edges
 - **Haar wavelet detail maps** at three scales (aggregate / mid bands / fine bands),
   luma-relative so dark regions keep their detail, fused with locally-normalized
   edge strength
-- light + heavy blur colour fields (the heavy one edge-preserving)
+- light + heavy blur colour fields
 
-Generation (per render, GPU): a vertex+geometry transform-feedback pass turns
-candidate positions into splats — up to seven coarse-to-fine levels. The base level
-fully covers the image (no gaps by construction); each finer level places only where
-its scale-matched detail map says so — the broad/mid tiers subdivide, while from
-level 3 up the layers overlap and mix. Fine seeds trace **brush strokes**: chains of
-tapered gaussian segments stepped along the edge tangent (ridge-snapped, colour from
-the stroke's own side of the edge, fading out like a drying brush). Mid levels make
-short translucent glazes; the finest levels are **impasto liner strokes** — long thin
-lines at a couple-of-pixels width that follow contours while the orientation field
-stays coherent, carry nearly opaque paint on strong edges, and keep to their own side
-of the ridge so the two sides' colours meet at the edge instead of crossing it.
-
-The **Cut-in** slider adds an **edge-band tier** over the top. A stroke that straddles
-a soft silhouette carries one colour across a body spanning the whole transition, so
-it paints the transition's mid value onto the darker side — the grey fringe outside a
-coat or hair against an out-of-focus background. This tier restates the boundary from
-its own sides instead: placed off the raw edge channel, pushed clear of the ridge by
-more than its own width, born long and thin along the edge, and painted opaque and
-last. Measured on a test portrait it cuts the outward bleed by ~30% (+7.28 → +5.39
-luma) for ~28% more splats; the effect saturates near Cut-in 1.0, because what is left
-sits where band strokes do not reach at all rather than where they reach too thinly.
-
-Rendering (GPU): one blended quad per splat (premultiplied over, back-to-front —
-the buffer is already in paint order), so cost scales with painted area, not
-pixels × splats.
-
-The CPU implementation of the same pipeline is the tested reference; the GPU is
-verified to produce the identical field (exact survivor counts, aggregate sums to
-float precision — see `test/splat_painter/check.clj` and `GA_PAINTER_GPU_VERIFY`).
+The rendering is done on the GPU using a vertex+geometry transform-feedback pass which turns
+candidate positions into splats with up to seven coarse-to-fine levels. The base level
+fully covers the image to ensure there are no gaps by construction. Then, each finer level
+adds progressive details where its scale-matched detail map says so.
+The broad tiers subdivide, while medium layers overlap and mix. Fine seeds trace brush strokes using 
+chains of tapered gaussian segments is stepped along the edge tangent.
+Making them ridge-snapped ensures that colour from the stroke's own side of the edge, fading out like a drying brush.
+Mid levels make short translucent glazes while the finest levels are impasto liner strokes using long thin
+lines at a couple-of-pixels width that follow contours inferred from the orientation field.
 
 ## Run
 
@@ -77,16 +70,6 @@ Sliders (live):
   a coat or hair against an out-of-focus background loses its grey fringe. 0 turns it
   off; the effect saturates around 1.0 (the default)
 
-**Save PNG…** exports at the input's native resolution. If GSettings schemas are
-missing (the GTK file dialog would abort), it saves `<image>-splats.png` next to the
-source instead.
-
-Headless overrides (for scripting/testing): `GA_PAINTER_SAVE_PNG`,
-`GA_PAINTER_QUIT_MS`, `GA_PAINTER_COUNT`, `GA_PAINTER_SIZE`, `GA_PAINTER_DETAIL`,
-`GA_PAINTER_STROKE`, `GA_PAINTER_VAR`, `GA_PAINTER_BROAD/MID/FINE`, `GA_PAINTER_CUTIN`,
-`GA_PAINTER_CPU_GEN` (CPU reference path), `GA_PAINTER_GPU_VERIFY`,
-`GA_PAINTER_LOOP_RENDER`, `GA_PAINTER_TF_SMOKE`.
-
 ## Test & check
 
 ```sh
@@ -99,12 +82,17 @@ jolt -M:pin       # print the golden fixture's actual checksums (for re-pinning)
 
 Dev/debug entry points live under `test/`; only the app ships from `src/`.
 
+Headless overrides (for scripting/testing): `GA_PAINTER_SAVE_PNG`,
+`GA_PAINTER_QUIT_MS`, `GA_PAINTER_COUNT`, `GA_PAINTER_SIZE`, `GA_PAINTER_DETAIL`,
+`GA_PAINTER_STROKE`, `GA_PAINTER_VAR`, `GA_PAINTER_BROAD/MID/FINE`, `GA_PAINTER_CUTIN`,
+`GA_PAINTER_CPU_GEN` (CPU reference path), `GA_PAINTER_GPU_VERIFY`,
+`GA_PAINTER_LOOP_RENDER`, `GA_PAINTER_TF_SMOKE`.
+
 ## REPL-driven development
 
 `jolt nrepl-server` (default port 7888, writes `.nrepl-port`) resolves `deps.edn`
 and parks the main thread on a pump, so an eval can start the GTK loop and jolt
-marshals the blocking main loop onto the main thread — the window comes up and the
-launching eval returns, leaving the REPL live. Connect any editor / nREPL client:
+marshals the blocking main loop onto the main thread. Connect any editor / nREPL client:
 
 ```clojure
 (require 'splat-painter.core)
@@ -123,8 +111,7 @@ launching eval returns, leaving the REPL live. Connect any editor / nREPL client
 
 `glimmer.core/reload!` re-renders the mounted panel after you redefine the `app`
 component. Quit through the app (close from its own menu / auto-quit) rather than
-destroying the window from the REPL — a raw `gtk_window_destroy` trips a teardown
-abort.
+destroying the window from the REPL.
 
 ## Build
 
@@ -146,20 +133,5 @@ Prebuilt binaries for macOS (arm64) and Linux (x86_64) are attached to each
 
 ## Dependencies
 
-glimmer and glimmer-gl are git deps pinned in `deps.edn`. gdk-pixbuf (image decode)
-is declared as a `:jolt/native` lib. GTK4/OpenGL/GLib come in transitively. macOS
-OpenGL is 4.1 (no compute shaders); GPU generation uses geometry-shader +
-transform-feedback compaction instead.
-
-## Layout
-
-- `src/splat_painter/gaussian.clj` — covariance/precision + CPU reference rasterizers
-- `src/splat_painter/image.clj` — gdk-pixbuf load + downscale
-- `src/splat_painter/structure.clj` — colour structure tensor, blurs, flow fields
-- `src/splat_painter/wavelet.clj` — Haar detail maps (aggregate/mid/sharp/edge)
-- `src/splat_painter/noise.clj` — Perlin noise (Ken Perlin's reference permutation)
-- `src/splat_painter/seed.clj` — the shared placement + brush-stroke spec (CPU reference)
-- `src/splat_painter/gen.clj` — GPU splat generation (vertex+geometry, transform feedback)
-- `src/splat_painter/shader.clj` — render shaders (per-splat quads + loop fallbacks)
-- `src/splat_painter/png.clj` — PNG export
-- `src/splat_painter/core.clj` — the glimmer app (dialogs, control panel, GL loop)
+Glimmer and glimmer-gl are git deps pinned in `deps.edn`. gdk-pixbuf (image decode)
+is declared as a `:jolt/native` lib. GTK4/OpenGL/GLib come in transitively.
