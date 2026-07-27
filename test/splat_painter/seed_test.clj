@@ -1351,6 +1351,71 @@
         (str "demand must not under-charge: demand " demand " vs pure " pure
              " (x" (/ demand (double pure)) ")"))))
 
+(deftest detail-demand-tracks-what-the-tier-paints
+  ;; DETAIL-tier twin of edge-band-demand-tracks-what-the-tier-paints. det-demand charges
+  ;; the FULL candidate pool (surv 1.0 — lvl-frac under-predicted dithered survival ~20x,
+  ;; see layer-params) x a per-candidate YIELD constant (det-yield). It must predict what
+  ;; the tier ACTUALLY emits, because cand-thin = det-budget/det-demand: an inflated demand
+  ;; throttles the placed candidate pool by the same factor and the field lands far under the
+  ;; requested count. The old charge was expected-segs (4), which sets SEED SPACING and the
+  ;; k-of term and must stay — but measured detail emission is only ~1.1-2.0 splats per
+  ;; candidate (DSC_8428 ~1.3, coyote ~1.9 at 512/1024px, budget-invariant across 36k-600k),
+  ;; so 4 over-charged ~2-3x and cand-thin sat near 0.24, spending ~52% of budget. det-yield
+  ;; carries the MEASURED yield for the demand term only, the way band-trace carries the
+  ;; band's measured length; expected-segs still drives spacing.
+  ;;
+  ;; Emission counted straight out of layered-means with stroke-segments wrapped to tag each
+  ;; segment row with its level (index 15): detail = selong==0 (excludes the band, which is
+  ;; charged by band-trace) and lvl>=2 (excludes coverage 0-1). NOT a Cut-in on/off delta —
+  ;; that is confounded, because the demand it tests moves cand-thin between the two runs.
+  ;; cand-thin is 1 here (small fixture, high count) so emission = raw_nx x yield and the
+  ;; demand/emission ratio is exactly charge/yield — which is why flipping det-yield back to
+  ;; expected-segs (4) trips the upper bound (ratio ~2.5) while the calibrated value sits
+  ;; inside [0.67, 1.5].
+  (let [img (gray-img 128 128 (fn [x y] (if (odd? (+ (int (quot x 8)) (int (quot y 8)))) 0.15 0.85)))
+        sfield (structure/analyze img)
+        dmap (wavelet/placement-map img sfield)
+        nf (seed/prep-noise sfield)
+        px (:pixels img)
+        cnt 72000  H 128  W 128
+        layered-means #'splat-painter.seed/layered-means
+        orig @#'splat-painter.seed/stroke-segments
+        segs (with-redefs [splat-painter.seed/stroke-segments
+                           (fn [& args]
+                             (let [lvl (long (nth args 2))
+                                   [rows reason] (apply orig args)]
+                               [(mapv (fn [r] (conj r lvl)) rows) reason]))]
+              (layered-means dmap nf 0.6 6.0 0.5 0.5 2.5 1.0 [1.0 1.0 1.0 1.0] cnt H W px px))
+        emitted (count (filter (fn [s] (and (zero? (double (nth s 14)))
+                                            (>= (long (nth s 15)) 2))) segs))
+        lp (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 1.0 1.0 1.0] cnt H W)
+        demand (double (:det-demand lp))]
+    (is (pos? emitted) "the detail tier is live on this fixture")
+    (is (<= demand (* 1.5 emitted))
+        (str "detail demand must not over-charge: demand " demand " vs emitted " emitted
+             " (x" (/ demand (double emitted)) ")"))
+    (is (>= demand (/ emitted 1.5))
+        (str "detail demand must not under-charge: demand " demand " vs emitted " emitted
+             " (x" (/ demand (double emitted)) ")"))))
+
+(deftest detail-budget-spend-not-throttled-by-overcharge
+  ;; cand-thin = det-budget/det-demand, so a det-demand inflated ~2-3x over real emission
+  ;; cuts the placed detail candidate pool by the same factor and the WHOLE field lands far
+  ;; under the requested count (the measured ~52% at Splats 72000). On a textured image
+  ;; where the detail tier dominates the field, spend must reach a healthy fraction of the
+  ;; budget — not the ~50% the old expected-segs(4) charge left it at. 70% is the honest
+  ;; floor for a single per-candidate constant across images whose yield spans ~1.1-2.0
+  ;; (see detail-demand-tracks-what-the-tier-paints): raising the charge to chase 100% on a
+  ;; low-yield image under-charges a high-yield one past the budget, which is just as wrong.
+  (let [img (gray-img 256 256 (fn [x y] (if (odd? (+ (int (quot x 8)) (int (quot y 8)))) 0.15 0.85)))
+        cnt 20000
+        {:keys [splats]} (seed/splat-field img {:count cnt :size 6.0 :detail 0.6 :stroke 2.5})]
+    (is (>= (count splats) (* 0.70 cnt))
+        (str "field must spend most of the budget: " (count splats) " of " cnt
+             " (" (* 100.0 (/ (double (count splats)) cnt)) "%)"))))
+
+
+
 ;; --- Swirl: the dial on the image-INDEPENDENT Perlin noise ------------------
 ;; Two placement terms are steered by a Perlin field rather than by the photo: the
 ;; flat-region flow that orients strokes where the tensor has no opinion, and the
