@@ -335,13 +335,19 @@
 ;; 7px, which is the BASE tier's own reach (σ 7.2 ⇒ a 25px quad), not a band artifact.
 ;; This is the first of thirteen attempts on this artifact to move the metric the RIGHT
 ;; way; the twelve rejected ones are tabulated in .dirge/spec-coat-edge-fuzz.md.
-(def ^:private band-detail-min 0.75)  ; below this Detail the tier does not exist: a refinement, not a change of look
 (def ^:private band-th 0.30)          ; edge strength a band seed needs (raw :edge, unnormalized)
 (def ^:private band-se 2.6)           ; forced elongation: sx = s0·se, sy = s0/se (NOT coherence-derived)
 (def ^:private band-sideo 1.4)        ; side push in units of ssz, jittered ×0.6–3.15 per seed (see soff)
 (def ^:private band-ssz-max 1.6)      ; the band paints a LINE; above this it would read as a daub
 (def ^:private band-lvl 7)            ; outside the ladder's 0..6, so poshash streams can never collide
 (def ^:private band-share 0.25)       ; hard ceiling on the band tier's slice of the working budget
+;; The Cut-in dial scales this tier's density. Measured sweep on the test portrait
+;; (outward band delta): 0.0 +7.28, 0.5 +5.56, 1.0 +5.39, 2.0 +5.39. It SATURATES at
+;; about 1.0 — doubling to 2.0 spends another ~220k candidates for nothing, because the
+;; residual sits where band strokes do not reach at all (the first pixel out, and the
+;; far field past 7px, which is the base tier's own 25px reach) rather than where they
+;; reach too thinly. Do not chase this artifact with more band density; the slider is
+;; capped at 1.5 for the same reason.
 (def ^:private band-ovl 0.45)
 ;; ^ seed spacing coefficient, sp = band-ovl·√band-segs·ssz. Deliberately far tighter
 ;; than the ladder's 0.7–1.25: a band seed only survives on the ridge, which is a
@@ -362,26 +368,40 @@
 (defn- band-level
   "The edge-band level map, or nil when the tier should not exist. `finest` is the
    finest admitted LADDER stdev — the band sits at or below it so it reads as a line
-   drawn over the ladder's finest marks, never as a competing daub. The tier exists
-   only where the ladder ITSELF is painting lines (finest below liner-threshold): at a
-   budget so small that even the finest rung is a fat daub there is no fine detail for
-   a band to sharpen, and one thin overlay tier would just eat the budget.
+   drawn over the ladder's finest marks, never as a competing daub.
+
+   `strength` is the Cut-in dial (tier-muls[3]): 0 turns the tier off entirely and
+   otherwise it scales the tier's share of the budget, i.e. its DENSITY — which the
+   ring measurements show is what governs how much of the band it actually covers,
+   not its geometry. There is deliberately no Detail gate: Detail decides how many
+   LADDER rungs get painted, and a control that silently did nothing below some other
+   slider's threshold would be a worse dial than no dial. The one structural
+   precondition stays — the ladder must itself be painting lines (finest below
+   liner-threshold), because a band drawn at daub scale is not a band.
 
    Budget: candidates are gated on the EDGE-map fraction, so a tier that only ever
    paints a thin band cannot charge the budget as though it covered the image; the
    estimate is then capped at `band-share` of the working budget outright, and
    `:demand` is charged against the detail tier's slice by the caller so the band
    comes OUT of the budget rather than on top of it."
-  [dmap detail area budget finest]
-  (when (and (>= (double detail) band-detail-min)
+  [dmap strength area budget finest]
+  (when (and (pos? (double strength))
              (< (double finest) liner-threshold))
     (let [frac (detail-fraction dmap :edge band-th)]
       (when (pos? frac)
         (let [ssz    (max 1.0 (min band-ssz-max (double finest)))
-              sp     (* band-ovl (Math/sqrt (double band-segs)) ssz)
+              ;; the dial scales DENSITY, so it divides the spacing by √strength
+              ;; (candidates ∝ 1/sp²  ⇒  nx ∝ strength) and scales the budget cap by the
+              ;; same factor. Scaling only the cap did nothing wherever the natural
+              ;; spacing was the binding constraint, which at a roomy budget is always —
+              ;; the dial measured identical at 0.5 and 1.0. At strength 1.0 both terms
+              ;; are exactly the shipped values, so the default look is unchanged.
+              sp     (/ (* band-ovl (Math/sqrt (double band-segs)) ssz)
+                        (Math/sqrt (double strength)))
               nx-nat (Math/ceil (/ (double area) (* sp sp)))
               ;; splats ≈ nx · frac · band-segs, so invert that for the cap
-              nx-cap (/ (* band-share (double budget)) (* frac (double band-segs)))
+              nx-cap (/ (* band-share (double strength) (double budget))
+                        (* frac (double band-segs)))
               nx     (long (max 0.0 (min nx-nat nx-cap)))]
           (when (pos? nx)
             {:lvl band-lvl :ssz ssz :sp sp :th band-th
@@ -406,6 +426,8 @@
 (defn layer-params
   "Pure per-level placement parameters — THE SHARED SPEC for the CPU loop
    (layered-means) and the GPU generation pass, so both enumerate the same cells.
+   `tier-muls` is [broad mid fine cut-in]; the 4th (the edge-band tier's strength)
+   defaults to 1.0 when absent, so three-element callers predating that tier still work.
    `levels` is ordered FINEST-FIRST (index 0 = finest); a consumer that walks
    levels[0]→levels[n-1] emitting each cell gets paint order for free (small strokes
    at the front, over the large base — no sort). Each level is
@@ -674,7 +696,9 @@
         ;; the EDGE-BAND overlay, sized off the finished ladder's finest rung. Computed
         ;; HERE (not at the end) so its demand can be charged against the detail tier's
         ;; slice below — the band comes out of the budget, not on top of it.
-        band (band-level dmap detail area budget
+        ;; tier-muls[3] is the Cut-in dial. Read with a default so the three-element
+        ;; [broad mid fine] callers that predate the tier keep working unchanged.
+        band (band-level dmap (nth tier-muls 3 1.0) area budget
                          (reduce min (map (fn [[_ ssz]] (double ssz)) admitted)))
         ;; build FINEST-FIRST with cumulative candidate offsets, so GPU gl_VertexID
         ;; order == CPU emission order == paint order. :lvl stays the ORIGINAL index so
@@ -1515,10 +1539,10 @@
    Returns {:splats […] :background [r g b] :height :width :opacity}."
   [{:keys [height width pixels] :as image} controls]
   (let [{:keys [count size stroke detail variation curvature opacity contrast background
-                size-broad size-mid size-fine]
+                size-broad size-mid size-fine edge-band]
          :or   {count 6000 size 3.0 stroke 2.0 detail 0.6 variation 0.5 curvature 0.5
                 opacity 0.9 contrast 1.0 background 0.0
-                size-broad 1.0 size-mid 1.0 size-fine 1.0}} controls
+                size-broad 1.0 size-mid 1.0 size-fine 1.0 edge-band 1.0}} controls
         n          (long (or count 6000))
         size       (double (or size 3.0))
         stroke     (double stroke)
@@ -1534,7 +1558,8 @@
         ^doubles blurd-px (or (:blur-drift image) blur-px)
         nf         (or (:noise-fields image) (prep-noise sfield))
         segments   (layered-means dmap nf detail size variation curvature stroke
-                                  [(double size-broad) (double size-mid) (double size-fine)]
+                                  [(double size-broad) (double size-mid) (double size-fine)
+                                   (double edge-band)]
                                   n height width blur-px blurd-px)
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
