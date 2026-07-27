@@ -123,7 +123,7 @@
   ;; comes from the segment chain, not the ellipse); s0=5 (snoise 0);
   ;; t=0.15+0.85·0.5=0.575 (blur-leaning); contrast 1, tone 1 (tnoise 0).
   (let [{:keys [mean cov color]}
-        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0 1.0)
+        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0 1.0 0.0)
         [c00 c01 _ c11] cov
         [cr cg cb] color]
     (is (= [10.0 20.0] mean))
@@ -132,7 +132,18 @@
     (is (approx= 1e-6 15.625  c11))   ; sy² = s0²/e = 25/1.6
     (is (approx= 1e-6 0.63    cr))    ; 0.4·0.425 + 0.8·0.575
     (is (approx= 1e-6 0.285   cg))
-    (is (approx= 1e-6 0.2275  cb))))
+    (is (approx= 1e-6 0.2275  cb)))
+  ;; selong > 0 REPLACES the coherence-derived elongation (the edge-band tier is born
+  ;; long-and-thin rather than inheriting the local tensor's anisotropy): se = selong
+  ;; exactly, so sx² = s0²·selong² and sy² = s0²/selong². Same inputs as above, whose
+  ;; coherence-derived se would be √1.6 ≈ 1.265 — so this discriminates: at selong 2.6
+  ;; the across-axis is 25/6.76 = 3.70, less than a quarter of the 15.625 above.
+  (let [{:keys [cov]}
+        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0 1.0 2.6)
+        [c00 _ _ c11] cov]
+    (is (approx= 1e-6 169.0 c00))     ; sx² = 25·2.6²
+    (is (approx= 1e-6 (/ 25.0 6.76) c11))
+    (is (< c11 15.625) "forced elongation is THINNER across than the coherence-derived one")))
 
 (deftest splat-field-golden
   ;; whole-generation regression guard (placement + covariance + colour). Pins the splat count
@@ -563,7 +574,7 @@
                           traw*  (if (>= lvl 4) (* traw (+ 0.6 (* 0.4 sgate))) traw)]
                       (count (first (stroke-segments nf dmap lvl cx cy cssz D 0.0 tn ds curvature stroke
                                               hd wd segs stepf bendf hb traw* sgate blur-px iw ih
-                                              th 0.0 map-kind gain blurd-px bph)))))]
+                                              th 0.0 map-kind gain blurd-px bph 0.55 0.0)))))]
     (is liner "settings must yield a liner level (lvl≥2, ssz<3.5)")
     (is (>= segs 10) "liner level keeps a meaningful feature-tracer span")
     (is (< ssz 3.5))
@@ -671,12 +682,17 @@
     [size detail tiers cnt]))
 
 (deftest ladder-is-strictly-finer-per-level
+  ;; The EDGE-BAND tier is excluded: it is an OVERLAY, not a rung. It is sized AT the
+  ;; ladder's finest stdev on purpose (it draws a line over the finest marks), so it
+  ;; is legitimately not 0.95× finer than the level it sits above — the monotonicity
+  ;; rule is about the coarse→fine ladder, which is what `remove :band` leaves.
+  ;; The band tier's own invariants are pinned by edge-band-tier-* below.
   (let [img  (ladder-img)
         dmap (wavelet/placement-map img (structure/analyze img))]
     (doseq [[size detail tiers cnt] ladder-configs
             :let [{:keys [levels]} (seed/layer-params dmap detail size 0.5 0.5 2.5 tiers cnt 512 512)
                   ;; coarse→fine: largest ssz first
-                  coarse-fine (sort-by :ssz > levels)]]
+                  coarse-fine (sort-by :ssz > (remove :band levels))]]
       (doseq [[coarser finer] (partition 2 1 coarse-fine)]
         (is (<= (double (:ssz finer)) (* 0.95 (double (:ssz coarser))))
             (str "size " size " detail " detail " tiers " tiers " count " cnt
@@ -777,9 +793,12 @@
                                          fine  (if (odd? (+ (quot x 2) (quot y 3))) 0.12 -0.12)]
                                      (max 0.0 (min 1.0 (+ coarse fine))))))
         dmap (wavelet/placement-map img (structure/analyze img))
+        ;; `remove :band`: the edge-band overlay carries the highest :lvl of all (it sits
+        ;; outside the ladder's index range so its hash stream cannot collide), so a bare
+        ;; max-key :lvl would measure the OVERLAY here instead of the ladder's finest rung.
         finest-nx (fn [cnt]
                     (->> (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.5 [0.4 0.4 0.4] cnt 1024 1024)
-                         :levels (apply max-key :lvl) :nx long))]
+                         :levels (remove :band) (apply max-key :lvl) :nx long))]
     (is (>= (finest-nx 600000) 50000)
         "high count: the finest level keeps its share — the cap must NOT starve detail")
     (is (< (finest-nx 1000) (finest-nx 600000))
@@ -813,7 +832,7 @@
           head-a (fn [ssz]
                    (let [[rows _reason] (seed/stroke-segments nf dmap 5 16 16 ssz 1.0 0.0 0.5 1 0.5 2.5
                                                     31 31 8 0.9 0.0 0.0 0.5 1.0 px 32 32
-                                                    0.5 0.0 :sharp 1.0 px 0.5)]
+                                                    0.5 0.0 :sharp 1.0 px 0.5 0.55 0.0)]
                      (nth (first rows) 6)))
            a-fat  (head-a 4.0)
            a-thin (head-a 2.0)]
@@ -1065,7 +1084,7 @@
                        [rows reason] (seed/stroke-segments
                                       nf dmap 5 x y 1.0 1.0 0.0 0.5 ds 0.5 2.5
                                       hd wd 24 0.9 0.5 0.0 0.5 1.0 blur W H
-                                      0.5 0.0 :sharp 1.0 blurd 0.5)]
+                                      0.5 0.0 :sharp 1.0 blurd 0.5 0.55 0.0)]
                    {:len (count rows) :reason reason}))
           ;; seeds near the bend on the horizontal arm, both travel directions. On `corner`
           ;; the seed travelling toward the vertex hits the 90deg bend; on `straight` there
@@ -1129,3 +1148,126 @@
 
 
 
+
+;; --- the EDGE-BAND tier -------------------------------------------------------
+;; An OVERLAY, not a rung of the coarse→fine ladder: placed off the raw edge channel,
+;; born long-and-thin, pushed clear of the ridge, drawn topmost. See seed/band-level.
+;; Every assertion below is paired with the case that makes it FAIL if the mechanism
+;; is disabled — a flat image, a low Detail setting, or the coherence-derived elongation.
+
+(defn- band-img
+  "512×512 with ONE straight SOFT silhouette — a bright subject against a dark ground,
+   the transition spread over ~10px the way a defocused background boundary is. The
+   fine texture is confined WELL INSIDE the bright side (x < 230), away from the
+   transition, so the silhouette carries edge-gradient energy but no fine-band energy:
+   that separation is the whole reason a tier keyed on :edge reaches a place a tier
+   keyed on :sharp never does. The texture still gives the ladder a detail rung to
+   admit, so the band has a finest stdev to size itself against."
+  []
+  (gray-img 512 512 (fn [x _y]
+                      (let [ramp (min 1.0 (max 0.0 (/ (- 250.0 (double x)) 10.0)))
+                            tex  (if (and (< x 230.0) (odd? (quot (long x) 3))) 0.06 0.0)]
+                        (max 0.0 (min 1.0 (+ (* 0.7 ramp) tex)))))))
+
+(defn- band-of [dmap detail H W]
+  (first (filter :band (:levels (seed/layer-params dmap detail 6.0 0.5 0.5 2.5
+                                                   [0.4 0.4 0.4] 600000 H W)))))
+
+(deftest edge-band-tier-places-off-the-raw-edge-channel
+  ;; map-at :edge must be wavelet/edge-at EXACTLY — unnormalized, unlike the three
+  ;; wavelet bands. The GLSL twin is pinned separately in check.clj ("if (sel == 3)").
+  (let [img   (band-img)
+        dmap  (wavelet/placement-map img (structure/analyze img))
+        map-at #'splat-painter.seed/map-at]
+    (doseq [[x y] [[245.0 100.0] [247.5 300.0] [40.0 40.0] [500.0 480.0]]]
+      (is (== (double (map-at dmap :edge x y)) (double (wavelet/edge-at dmap x y)))
+          (str "map-at :edge at " [x y] " is the raw edge channel")))
+    ;; NEGATIVE RESULT, pinned so it is not re-assumed: the tier is NOT keyed on :edge
+    ;; because the sharp band is weak at a soft silhouette. It is not — on this fixture
+    ;; sharp-at SATURATES at 1.0 right on the ramp (edge reads 0.46 there), because the
+    ;; locally-normalized bands light up on any local variation. So "a denser :sharp
+    ;; tier never reached the band" is a wrong explanation of the measured +7.28 ->
+    ;; +24.85; whatever made densifying worse, it was not absence.
+    (is (>= (double (map-at dmap :sharp 245.0 100.0)) 0.9)
+        "the sharp band is NOT weak at a soft silhouette — do not key the tier on that premise")
+    ;; What the edge channel actually buys is LOCALIZATION: it peaks on the silhouette
+    ;; and dies in the flat ground, so a threshold on it selects the boundary itself —
+    ;; which is where a tier that restates a boundary has to be seeded.
+    (let [e-ridge (double (map-at dmap :edge 245.0 100.0))
+          e-flat  (double (map-at dmap :edge 400.0 100.0))]
+      (is (>= e-ridge 0.30) (str "the soft silhouette clears the band threshold: " e-ridge))
+      (is (< e-flat 0.30)   (str "the flat ground does not: " e-flat))
+      (is (> e-ridge (* 3.0 (max e-flat 1e-6)))
+          (str "the edge channel localizes the silhouette: ridge " e-ridge " vs ground " e-flat)))
+    (is (= (:map-kind (band-of dmap 1.0 512 512)) :edge)
+        "the band tier is wired to that map")))
+
+(deftest edge-band-tier-is-born-thin-across-the-edge
+  ;; the point of the tier: its across-edge sigma is a property of the TIER
+  ;; (ssz/selong), not of the local tensor, and the push off the ridge exceeds
+  ;; 2 sigma across so the stroke cannot straddle the boundary it restates.
+  (let [img  (band-img)
+        dmap (wavelet/placement-map img (structure/analyze img))
+        {:keys [ssz selong sideo]} (band-of dmap 1.0 512 512)
+        across (/ (double ssz) (double selong))
+        along  (* (double ssz) (double selong))]
+    (is (< across 1.0) (str "across-edge sigma " across " is sub-pixel"))
+    (is (> (/ along across) 6.0) (str "aspect ratio " (/ along across) " is a line, not a daub"))
+    ;; the SMALLEST push (jitter 0.6×, see soff) must still clear 2 sigma across
+    (is (> (* 0.6 (double sideo) (double ssz)) (* 2.0 across))
+        "even the least-pushed band stroke sits more than 2 sigma clear of the ridge")
+    ;; discriminating: the coherence-derived elongation this replaces is far fatter.
+    ;; se = sqrt(1 + min(stroke,1.5)·coh·(0.25+0.75·D)) maxes at sqrt(2.5) ≈ 1.58.
+    (is (> (double selong) (Math/sqrt 2.5))
+        "forced elongation exceeds anything the coherence-derived formula can reach")))
+
+(deftest edge-band-tier-needs-edges-and-detail
+  (let [flat  (gray-img 512 512 (fn [_ _] 0.5))
+        edged (band-img)
+        dmap-flat  (wavelet/placement-map flat  (structure/analyze flat))
+        dmap-edged (wavelet/placement-map edged (structure/analyze edged))]
+    (is (nil? (band-of dmap-flat 1.0 512 512))
+        "a flat image has no edges, so the band tier does not exist")
+    (is (some? (band-of dmap-edged 1.0 512 512))
+        "an image with a silhouette DOES get the tier — the flat case above is not vacuous")
+    (is (nil? (band-of dmap-edged 0.5 512 512))
+        "below the Detail gate the tier does not exist: it is a refinement, not a change of look")))
+
+(deftest edge-band-tier-is-drawn-topmost
+  ;; levels are finest-first and composited front-to-back, so index 0 is the topmost
+  ;; paint. The band exists to COVER the coverage tiers' outward bleed, so it has to
+  ;; sit there — and every other level's candidate offset must shift past its block.
+  (let [img    (band-img)
+        dmap   (wavelet/placement-map img (structure/analyze img))
+        levels (:levels (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.5 [0.4 0.4 0.4] 600000 512 512))
+        band   (first levels)]
+    (is (:band band) "the band tier is level index 0 (topmost)")
+    (is (zero? (long (:offset band))) "and owns the first candidate block")
+    ;; offsets stay a valid cumulative partition after the prepend
+    (is (= (map :offset levels)
+           (reductions + 0 (map #(* (long (:nx %)) (long (:ny %))) (butlast levels))))
+        "candidate offsets remain cumulative across the prepended tier")
+    (is (every? false? (map :band (rest levels)))
+        "exactly one band tier")))
+
+(deftest edge-band-tier-comes-out-of-the-budget
+  ;; The tier must be charged against the detail slice, not added on top of it. This
+  ;; only BITES where the budget cap is already binding — at a slack budget nothing
+  ;; needs to thin and the charge is correctly a no-op — so measure at 72000 on a
+  ;; 512x512, where the detail tier's demand exceeds its slice.
+  ;;
+  ;; Discriminating: with the charge removed (det-budget not subtracting :demand) the
+  ;; suite fails on admitted-levels-fit-the-budget with 118330 splats against a 108000
+  ;; bound — the band's candidates went straight on top of a field that was already at
+  ;; 1.44x. That test is the end-to-end guard; this one pins the mechanism.
+  (let [img  (band-img)
+        dmap (wavelet/placement-map img (structure/analyze img))
+        lp   (fn [detail] (seed/layer-params dmap detail 6.0 0.5 0.5 2.5 [0.4 0.4 0.4] 72000 512 512))
+        det-cand (fn [p] (->> p :levels (remove :band) (filter #(>= (long (:lvl %)) 2))
+                              (map #(long (:nx %))) (reduce + 0)))
+        off (lp 0.7) on (lp 1.0)]
+    (is (nil? (first (filter :band (:levels off)))) "Detail 0.7 is below the gate")
+    (is (some? (first (filter :band (:levels on)))) "Detail 1.0 is above it")
+    (is (< (det-cand on) (det-cand off))
+        (str "admitting the band thins the ladder's detail tier: "
+             (det-cand off) " -> " (det-cand on) " candidates"))))

@@ -25,7 +25,11 @@
             [splat-painter.noise :as noise]
             [jolt.ffi :as ffi]))
 
-(def ^:private max-levels 7)
+;; 8, not 7: the ladder itself tops out at 7 rungs (nlev = 1+round(detail·6)) and the
+;; EDGE-BAND overlay rides on top of it. At 7 the `pad` below would silently TRUNCATE
+;; the finest-first vector, dropping the COARSEST slot — the base fill — and leaving
+;; the image unpainted underneath.
+(def ^:private max-levels 8)
 
 ;; --- generation program: vertex + geometry (transform feedback) --------------
 (def ^:private vs-src
@@ -45,7 +49,7 @@ out vec4 o_a;
 out vec4 o_b;
 out vec4 o_c;
 
-const int   ML      = 7;
+const int   ML      = 8;
 const float MIN_COH = 0.28;
 const int   SEGS    = 32;     // max segments per brush stroke (liner chains, seed/layer-params segs-of cap)
 
@@ -64,6 +68,12 @@ uniform int   u_segs[ML];
 uniform float u_stepf[ML];
 uniform float u_bendf[ML];
 uniform int   u_sharp[ML];
+// EDGE-BAND tier (mirror seed/layer-params): u_sideo is the side push in units of the
+// level's own stdev (0.55 for an ordinary liner, band-sideo for the band); u_selong > 0
+// forces the elongation instead of deriving it from the local tensor, and doubles as
+// the marker for `is this slot the band overlay`.
+uniform float u_sideo[ML];
+uniform float u_selong[ML];
 uniform float u_warp;
 uniform int   u_H;
 uniform int   u_W;
@@ -173,6 +183,10 @@ float sharpAt(float x, float y){
 // 1 = MID band (.a — face-feature frequencies), 2 = sharp fine-band (.g)
 float mapAt(int sel, float x, float y){
   vec4 t = fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc);
+  // sel 3 = the EDGE-BAND tier's raw edge channel (.b), returned UNNORMALIZED —
+  // mirroring wavelet/edge-at, which unlike the three wavelet bands does not divide
+  // by dmax. Routing it through the tail below would silently rescale the tier.
+  if (sel == 3) return t.b;
   float v = (sel == 2) ? t.g : (sel == 1) ? max(t.a, t.g) : t.r;  // mid = union with sharp
   return u_dmax > 0.0 ? min(1.0, v / u_dmax) : 0.0;
 }
@@ -282,7 +296,7 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, 4-tap bilinear (mirr
 // `cohmul` rounds MELTED bokeh strokes off (coherence → 0 kills the elongation
 // and pulls the colour toward the smooth blur): an elongated needle on a soft
 // gradient always reads as a directional streak, however faithful its colour.
-void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap, float cohmul){
+void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap, float cohmul, float selong){
   vec2  tc    = fieldsAt(px, py);
   float theta = tc.x, coh0 = tc.y * cohmul;
   vec3  bilat = sampleRGB(u_blurTex, hx, hy);
@@ -306,7 +320,10 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   raw = mix(raw, bilat, wcl);
   float coh = MIN_COH + (1.0 - MIN_COH) * coh0;
   float e   = 1.0 + min(u_stroke, 1.5) * coh * (0.25 + 0.75 * D);
-  float se  = sqrt(e);
+  // selong > 0 REPLACES the coherence-derived elongation (mirror seed/splat-record):
+  // the EDGE-BAND tier is BORN long-and-thin, so its across-edge sigma is a property
+  // of the tier (csz/selong) rather than of whatever coherence happens to sit there.
+  float se  = (selong > 0.0) ? selong : sqrt(e);
   float s0  = csz * (1.0 + u_variation * 0.5 * (2.0 * sn));
   float sx  = s0 * se;
   float sy  = s0 / se;
@@ -406,7 +423,9 @@ void main(){
   // this coarser level; dithered so the handoff interleaves. From level 3 up there
   // is NO claim — the fine glazes overlap the mid strokes and mix. The finer level
   // is always >= 2 here, so its claim carries the same subject gate.
-  if (lvl > 0 && lvl <= 2 && k > 0) {
+  // u_selong[k-1] <= 0: the EDGE-BAND overlay is not a rung of the ladder, so it never
+  // claims a cell away from the level below it (mirror seed/layered-means claimed?).
+  if (lvl > 0 && lvl <= 2 && k > 0 && u_selong[k-1] <= 0.0) {
     float fdv = mapAt(u_sharp[k-1], cx, cy) * (0.25 + 0.75 * sgate) * bgate;
     if (fdv >= u_th[k-1] * (0.75 + 0.5 * hash01(i*47 + lvl, j, 23))) return;
   }
@@ -480,7 +499,7 @@ void main(){
   // paint AVERAGED colour, mids halfway, fine layers fully specific
   float tcap = (lvl <= 1) ? 0.35 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
-    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt);
+    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt, 0.0);
     return;
   }
 
@@ -501,17 +520,30 @@ void main(){
   // On-ridge colour is the sides' mix and paints silhouettes as drawn outlines.
   float cpx = x2, cpy = y2;
   if (snapE) { vec2 sp2 = edgeSnap(x2, y2, 0.65); x2 = sp2.x; y2 = sp2.y; }
+  // EDGE-BAND tier (mirror seed/stroke-segments): selong > 0 marks the overlay slot.
+  float selong = u_selong[k];
+  bool  band   = selong > 0.0;
   // which side of the ridge did this seed come from? (mirror seed/stroke-segments)
   float side = 0.0;
   // IMPASTO side keys on the LINER discipline (sigma-keyed), not the level index:
-  // small lvl 2-3 chains snap onto the ridge like lvl>=4 liners and keep their side
+  // small lvl 2-3 chains snap onto the ridge like lvl>=4 liners and keep their side.
+  // A BAND seed that lands exactly on the ridge falls back to its own direction hash,
+  // so the two sides get restated in roughly equal numbers with no side detection.
   if (snapE && liner) {
     vec2 tcs = fieldsAt(x2, y2);
     float nsx = -sin(tcs.x), nsy = cos(tcs.x);
     float dd = (cpx - x2)*nsx + (cpy - y2)*nsy;
-    side = (dd > 1e-9) ? 1.0 : (dd < -1e-9) ? -1.0 : 0.0;
+    side = (dd > 1e-9) ? 1.0 : (dd < -1e-9) ? -1.0 : (band ? dirsign : 0.0);
   }
-  vec2 so0 = sideOffset(x2, y2, side, 0.55 * ssz2);
+  // how far off the ridge, in units of the level's own stdev. A liner nudges 0.55 sigma;
+  // the BAND is pushed clear — at selong 2.6 its across-body sigma is ssz/2.6, so even
+  // the smallest push here keeps the stroke off the ridge it restates. Jittered by the
+  // seed's bend hash (bendf is 0 for the band, so bph is otherwise unused) so band
+  // strokes TILE the band instead of stacking into one hard line — SQUARED, so the
+  // distribution crowds the near zone, where the measured outward excess actually is
+  // (+19.8 luma at 1px out, +2.8 at 10px). (mirror seed/stroke-segments)
+  float soff = band ? u_sideo[k] * (0.6 + 2.55 * bph * bph) : u_sideo[k];
+  vec2 so0 = sideOffset(x2, y2, side, soff * ssz2);
   x2 = so0.x; y2 = so0.y;
   // side sign in the stroke's MOTION frame (mirror seed): stays consistent
   // through field sign flips that would wobble a per-step theta resample
@@ -525,7 +557,9 @@ void main(){
   // must stand on its own — glaze alpha there just averages neighbours into mush.
   // coverage tiers (lvl<=1) are fully opaque by role — size-keying at small Size
   // gave the base 0.85 alpha and let the black background through around silhouettes.
-  float lal = (lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;
+  // the BAND tier is opaque by ROLE, like the coverage tiers (mirror seed): it exists to
+  // COVER the outward bleed, and a glaze there averages the bleed back in.
+  float lal = (band || lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;
   float fade = 1.0;
   // NO tensor-coherence gate on chain length (mirror seed/stroke-segments). Tried and
   // removed: coherence does not discriminate a line from a smooth gradient, because a
@@ -588,7 +622,11 @@ void main(){
   // drift reference + probes read the FORGIVING box field (mirror seed): on the
   // razor-sharp bilateral paint field any probe wobble across a boundary trips
   // the lift instantly and dashes contour chains into beads
-  vec3 headBlur = sampleRGB(u_blurDTex, cpx + bax, cpy + bay);
+  // the drift reference belongs where the stroke actually STARTS (mirror seed): for a
+  // band stroke that is the pushed-off-ridge head (x2,y2). Referencing the pre-snap
+  // seed, which can sit on the FAR side of the boundary, would make the chroma backstop
+  // fire on step 1 and the band would never trace at all.
+  vec3 headBlur = sampleRGB(u_blurDTex, band ? x2 : cpx + bax, band ? y2 : cpy + bay);
   // FEATURE-FOLLOWING TRACER (mirror seed/stroke-segments): a stroke ends where the
   // FEATURE ends or turns — CLEAN breaks, no segment emitted at the break — so a contour
   // chunks into the strokes a draughtsman draws (the top of an eye one line, the bottom
@@ -674,7 +712,7 @@ void main(){
         // position, where the fixed offset would draw the dark ground through a lit shape.
         emitSplat(px, py, cpx + bax*(wsl < 1.0 ? 1.0 : 0.0) + wsl*(px - cpx),
                         cpy + bay*(wsl < 1.0 ? 1.0 : 0.0) + wsl*(py - cpy),
-                  sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt);
+                  sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt, selong);
       }
       emitted++;
       // bend gated by coherence, physical size AND the wavelet edge map (mirror seed);
@@ -697,8 +735,8 @@ void main(){
       py = clamp(py + L*dy, 0.0, float(u_W - 1));
       if (snapE) { vec2 sp3 = edgeSnap(px, py, liner ? 0.85 : 0.65); px = sp3.x; py = sp3.y; }
       if (side != 0.0) {
-        px = clamp(px + sidem * 0.55 * ssz2 * (-dy), 0.0, float(u_H - 1));
-        py = clamp(py + sidem * 0.55 * ssz2 * ( dx), 0.0, float(u_W - 1));
+        px = clamp(px + sidem * soff * ssz2 * (-dy), 0.0, float(u_H - 1));
+        py = clamp(py + sidem * soff * ssz2 * ( dx), 0.0, float(u_W - 1));
       }
       dxp = dx; dyp = dy;
     }
@@ -709,7 +747,7 @@ void main(){
 (def ^:private gen-uniform-names
   ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv" "u_broad"
    "u_ssz" "u_sp" "u_th" "u_nx" "u_ny" "u_off" "u_lvl"
-   "u_segs" "u_stepf" "u_bendf" "u_sharp"
+   "u_segs" "u_stepf" "u_bendf" "u_sharp" "u_sideo" "u_selong"
    "u_detailTex" "u_subjTex" "u_dmax" "u_detailDim" "u_detailSrc"
    "u_noiseTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurDTex" "u_blurHTex" "u_rawTex" "u_permTex"])
 
@@ -871,7 +909,11 @@ void main(){
         sgs (pad (map :segs levels) 1)
         stf (pad (map :stepf levels) 1.0)
         bnf (pad (map :bendf levels) 1.0)
-        shp (pad (map (fn [l] (case (:map-kind l) :sharp 2 :mid 1 0)) levels) 0)
+        shp (pad (map (fn [l] (case (:map-kind l) :sharp 2 :mid 1 :edge 3 0)) levels) 0)
+        ;; side push / forced elongation per slot (mirror seed/layer-params). Padding
+        ;; defaults match an ordinary liner: 0.55 sigma push, no forced elongation.
+        sdo (pad (map (fn [l] (double (or (:sideo l) 0.55))) levels) 0.55)
+        sel (pad (map (fn [l] (double (or (:selong l) 0.0))) levels) 0.0)
         [sig-min sig-max] (sig-range levels variation (or size-broad 1.0))]
     (gl/gl-use-program program)
     ;; per-level + controls
@@ -896,6 +938,8 @@ void main(){
     (set-1fv! (:u_stepf locs) stf)
     (set-1fv! (:u_bendf locs) bnf)
     (set-1iv! (:u_sharp locs) shp)
+    (set-1fv! (:u_sideo locs) sdo)
+    (set-1fv! (:u_selong locs) sel)
     ;; field textures on units 1..5 (unit 0 is the render splat buffer)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 1)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:detail fields)) (gl/gl-uniform-1i (:u_detailTex locs) 1)
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 2)) (gl/gl-bind-texture gl/GL-TEXTURE-2D (:noise fields))  (gl/gl-uniform-1i (:u_noiseTex locs) 2)
