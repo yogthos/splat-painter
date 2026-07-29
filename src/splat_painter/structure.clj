@@ -254,6 +254,152 @@
             (aset out (+ b 2) (* (aget out (+ b 2)) inv))))))
     out))
 
+(defn- downsample
+  "Nearest-neighbour downscale of `image` to `sh` rows × `sw` cols. Returns a
+   pseudo-image {:height :width :channels :pixels} the gradient pass can consume.
+   Orientation varies slowly, so a coarse tensor is plenty — and it's ~(H/sh)²
+   cheaper to build than a full-resolution one (jolt has no primitive-array
+   fast path, so the win is purely doing fewer ops)."
+  [image sh sw]
+  (let [H (:height image) W (:width image)
+        ^doubles px (:pixels image)
+        ^doubles out (double-array (* sh sw 3))
+        rx (/ (double H) sh) ry (/ (double W) sw)]
+    (dotimes [r sh]
+      (let [sr (min (dec H) (long (* r rx)))]
+        (dotimes [c sw]
+          (let [sc (min (dec W) (long (* c ry)))
+                sbase (* 3 (+ (* sr W) sc))
+                dbase (* 3 (+ (* r sw) c))]
+            (aset out dbase       (aget px sbase))
+            (aset out (+ dbase 1) (aget px (+ sbase 1)))
+            (aset out (+ dbase 2) (aget px (+ sbase 2)))))))
+    {:height sh :width sw :channels 3 :pixels out}))
+
+(defn- upsample-rgb
+  "Bilinearly resample a flat sh*sw*3 ^doubles buffer up to H×W. The fields built at
+   reduced resolution (see dominant-blur) are window statistics — smooth by
+   construction — so bilinear reconstruction loses nothing a nearest-neighbour
+   expansion would only replace with blocking."
+  [^doubles src sh sw H W]
+  (let [sh (long sh) sw (long sw) H (long H) W (long W)
+        out (double-array (* H W 3))
+        rx (/ (double (dec (max 2 sh))) (double (max 1 (dec H))))
+        ry (/ (double (dec (max 2 sw))) (double (max 1 (dec W))))]
+    (dotimes [x H]
+      (let [fx (min (double (dec sh)) (* x rx))
+            x0 (long fx) x1 (min (dec sh) (inc x0)) tx (- fx x0)]
+        (dotimes [y W]
+          (let [fy (min (double (dec sw)) (* y ry))
+                y0 (long fy) y1 (min (dec sw) (inc y0)) ty (- fy y0)
+                b00 (* 3 (+ (* x0 sw) y0)) b01 (* 3 (+ (* x0 sw) y1))
+                b10 (* 3 (+ (* x1 sw) y0)) b11 (* 3 (+ (* x1 sw) y1))
+                d   (* 3 (+ (* x W) y))]
+            (dotimes [c 3]
+              (let [a (+ (* (- 1.0 ty) (aget src (+ b00 c))) (* ty (aget src (+ b01 c))))
+                    b (+ (* (- 1.0 ty) (aget src (+ b10 c))) (* ty (aget src (+ b11 c))))]
+                (aset out (+ d c) (+ (* (- 1.0 tx) a) (* tx b)))))))))
+    out))
+
+(defn- dominant-blur-full
+  "dominant-blur at the resolution it is handed. See dominant-blur."
+  [image radius p]
+  (let [H (long (:height image)) W (long (:width image))
+        ^doubles px (:pixels image)
+        n (* H W)
+        ^doubles L (luma image)
+        K 9
+        dl (/ 1.0 (double (dec K)))
+        num (double-array (* n 3))
+        den (double-array n)]
+    (dotimes [k K]
+      (let [lk (* (double k) dl)
+            wk (double-array n)
+            wr (double-array n)
+            wg (double-array n)
+            wb (double-array n)]
+        (dotimes [i n]
+          (let [w (max 0.0 (- 1.0 (/ (Math/abs (- (aget L i) lk)) dl)))
+                b (* 3 i)]
+            (aset wk i w)
+            (aset wr i (* w (aget px b)))
+            (aset wg i (* w (aget px (+ b 1))))
+            (aset wb i (* w (aget px (+ b 2))))))
+        (let [^doubles bw (box-blur-2d wk H W radius)
+              ^doubles br (box-blur-2d wr H W radius)
+              ^doubles bg (box-blur-2d wg H W radius)
+              ^doubles bb (box-blur-2d wb H W radius)]
+          ;; bin colour is br/bw; its vote is bw^p. Accumulate bw^p·(br/bw) = bw^(p-1)·br
+          ;; directly so the division never has to be done twice.
+          (dotimes [i n]
+            (let [w (aget bw i)]
+              (when (> w 1e-12)
+                (let [wp (Math/pow w (double p))
+                      f  (/ wp w)
+                      b  (* 3 i)]
+                  (aset num b       (+ (aget num b)       (* f (aget br i))))
+                  (aset num (+ b 1) (+ (aget num (+ b 1)) (* f (aget bg i))))
+                  (aset num (+ b 2) (+ (aget num (+ b 2)) (* f (aget bb i))))
+                  (aset den i (+ (aget den i) wp)))))))))
+    (let [out (double-array (* n 3))]
+      (dotimes [i n]
+        (let [d (max (aget den i) 1e-12) b (* 3 i)]
+          (aset out b       (/ (aget num b) d))
+          (aset out (+ b 1) (/ (aget num (+ b 1)) d))
+          (aset out (+ b 2) (/ (aget num (+ b 2)) d))))
+      out)))
+
+(defn dominant-blur
+  "The DOMINANT tone in a brush-sized window, not the average of it — the colour a
+   coverage-tier stroke should be loaded with.
+
+   The coverage tiers sample an EDGE-PRESERVING blur, which by construction keeps
+   structure FINER than the brush that paints with it. On a drawing that means a
+   σ6 stroke centred on a 5px letter paints solid black over a 12px radius and no
+   later tier repaints the paper around it: letters fatten, counters fill, and the
+   gaps between them close. Preserving edges is right at detail scale and wrong at
+   coverage scale — a fat brush cannot state a feature thinner than itself, so
+   sub-brush structure must drop OUT of its colour rather than be smeared across
+   it (the plain box blur, which halos) or stamped by it (the edge-preserving one).
+
+   Same binned-window machinery as `bilateral-blur`: K luma bins with hat kernels,
+   each bin's weight and weighted colour box-blurred over the window. The one
+   difference is how the bins are recombined — by w^p instead of w. p=1 is exactly
+   the box blur (the window mean); as p rises, a minority population's bin loses
+   against the majority's and drops out. So p is a dial from `average tone` to
+   `modal tone`, and the structure that survives is whatever occupies most of a
+   brush-sized window: big masses stay, thin lines go.
+
+   Large regions keep the halo fix that motivated edge-preserving-blur: a window
+   just inside a silhouette is majority-subject, so the mode is the subject's own
+   colour and nothing bleeds in from across the boundary — bin separation IS the
+   edge preservation, and unlike a blend against the raw pixel it does not carry
+   sub-brush structure back in.
+
+   p=4 is the default: swept 2/4/8/16 against the render. On line art 4 already
+   clears the paper (the gray band around the title is gone and the counters open);
+   8 and 16 clear it no further but start to posterize a photograph, because the
+   winning bin flips abruptly where two modes are close — visible as flat patches
+   in bokeh and a stepped edge on an eyelash by p=8.
+
+   Computed on a DOWNSAMPLED copy and bilinearly upsampled: the result is a window
+   statistic over a ~25px neighbourhood, so it carries nothing near pixel frequency
+   and full-resolution binning is 16x the work for no visible difference (5.5s vs
+   0.4s on a 0.9MP frame — this runs per image load, alongside the bilateral). The
+   downsample is NEAREST-NEIGHBOUR on purpose: area-averaging first would blend a
+   black line into the white paper around it and hand the filter a gray population
+   to find the mode of, which is the halo this exists to remove. Nearest keeps every
+   sample a true pixel, and a thin line simply loses the vote."
+  ([image radius] (dominant-blur image radius 4.0))
+  ([image radius p]
+   (let [step (max 1 (quot (long radius) 3))]
+     (if (> step 1)
+       (let [H (long (:height image)) W (long (:width image))
+             sh (max 1 (quot H step)) sw (max 1 (quot W step))]
+         (upsample-rgb (dominant-blur (downsample image sh sw) (quot (long radius) step) p)
+                       sh sw H W))
+       (dominant-blur-full image radius p)))))
+
 (defn blur-image
   "Box-blur an RGB image's pixels (flat H*W*3 doubles) with `radius`, returning a
    new flat H*W*3 double-array. Computed once per image load so the seed can read
@@ -278,28 +424,6 @@
 ;; ---------------------------------------------------------------------------
 ;; analyze
 ;; ---------------------------------------------------------------------------
-
-(defn- downsample
-  "Nearest-neighbour downscale of `image` to `sh` rows × `sw` cols. Returns a
-   pseudo-image {:height :width :channels :pixels} the gradient pass can consume.
-   Orientation varies slowly, so a coarse tensor is plenty — and it's ~(H/sh)²
-   cheaper to build than a full-resolution one (jolt has no primitive-array
-   fast path, so the win is purely doing fewer ops)."
-  [image sh sw]
-  (let [H (:height image) W (:width image)
-        ^doubles px (:pixels image)
-        ^doubles out (double-array (* sh sw 3))
-        rx (/ (double H) sh) ry (/ (double W) sw)]
-    (dotimes [r sh]
-      (let [sr (min (dec H) (long (* r rx)))]
-        (dotimes [c sw]
-          (let [sc (min (dec W) (long (* c ry)))
-                sbase (* 3 (+ (* sr W) sc))
-                dbase (* 3 (+ (* r sw) c))]
-            (aset out dbase       (aget px sbase))
-            (aset out (+ dbase 1) (aget px (+ sbase 1)))
-            (aset out (+ dbase 2) (aget px (+ sbase 2)))))))
-    {:height sh :width sw :channels 3 :pixels out}))
 
 (defn luma-of
   "Reduced-resolution luminance: downscale `image` to `sh`×`sw` (nearest) and

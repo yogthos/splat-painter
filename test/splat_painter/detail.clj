@@ -6,6 +6,7 @@
   (:require [splat-painter.image :as image]
             [splat-painter.structure :as structure]
             [splat-painter.wavelet :as wavelet]
+            [splat-painter.fields :as fields]
             [splat-painter.seed :as seed]))
 
 (defn- sigma [{:keys [cov]}]
@@ -66,11 +67,7 @@
         H (:height img0) W (:width img0)
         sfield (structure/analyze img0)
         dmap   (wavelet/placement-map img0 sfield)
-        light  (structure/bilateral-blur img0 3)
-        img (assoc img0 :structure sfield :detail dmap :blur light
-                   :blur-drift (structure/blur-image img0 2)
-                   :blur-heavy (structure/edge-preserving-blur img0 light (structure/blur-image img0 (max 6 (quot H 80))))
-                   :noise-fields (seed/prep-noise sfield))
+        img (fields/prepare img0)
         size (if size (Double/parseDouble size) (max 4.0 (/ (double H) 50.0)))]
     (doseq [[cnt cutin det] (if spec (read-string spec) [[72000 1.0 0.6]])]
       (let [ctl {:count cnt :size size :detail det :variation 0.5 :curvature 0.5 :stroke 2.5

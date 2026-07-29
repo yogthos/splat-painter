@@ -20,6 +20,7 @@
             [splat-painter.shader    :as shader]
             [splat-painter.gen       :as gen]
             [splat-painter.image     :as image]
+            [splat-painter.fields    :as fields]
             [splat-painter.seed      :as seed]
             [splat-painter.structure :as structure]
             [splat-painter.wavelet   :as wavelet]
@@ -179,34 +180,13 @@
   (when-let [a @area-atom] (glx/gtk-gl-area-queue-render a)))
 
 (defn- prepare-image
-  "Attach the precomputed placement fields to a loaded image map (edge-orientation
-  tensor, light + heavy blurs, the wavelet detail map, the Perlin flow fields) so
-  live slider drags don't recompute them. Returns the assoc'd map. Reused by
-  on-image-loaded (from a file) and add-layer! (from a captured render), so both
-  paths build identical fields."
+  "Attach the precomputed placement fields to a loaded image map (orientation tensor,
+  the three colour sources, the wavelet detail map, the Perlin flow fields) so live
+  slider drags don't recompute them. Reused by on-image-loaded (from a file) and
+  add-layer! (from a captured render), so both paths build identical fields — and it
+  is `fields/prepare` so the tests and diagnostics build them identically too."
   [img0]
-  (let [;; precomputed once so live slider drags don't recompute: edge-orientation
-        ;; tensor, a light blur (smooth average colour), the wavelet detail map, and
-        ;; the Perlin flow fields. Placement is coarse-to-fine layers (splat-painter.seed),
-        ;; no deforming grid.
-        sfield (structure/analyze img0)
-        ;; EDGE-AWARE light blur: smooth within a shade region, no mixing across
-        ;; boundaries — the box blur fed strokes near edges contaminated colours
-        ;; (pale splotches in dark areas, smudges on smooth skin)
-        light  (structure/bilateral-blur img0 3)
-        ;; the drift/dry-out probes keep a FORGIVING box blur: on the razor-sharp
-        ;; bilateral field any probe wobble across a boundary trips the lift
-        ;; threshold instantly and fragments contour chains into bead dashes
-        drift  (structure/blur-image img0 2)
-        heavy  (structure/blur-image img0 (max 6 (quot (:height img0) 80)))]
-    (assoc img0 :structure sfield
-                :blur   light
-                :blur-drift drift
-                ;; heavy blur = the smooth colour field broad strokes paint with;
-                ;; edge-preserving so silhouettes don't halo
-                :blur-heavy (structure/edge-preserving-blur img0 light heavy)
-                :detail (wavelet/placement-map img0 sfield)
-                :noise-fields (seed/prep-noise sfield))))
+  (fields/prepare img0))
 
 (defn- on-image-loaded [path]
   (try
