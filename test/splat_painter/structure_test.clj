@@ -210,3 +210,67 @@
       (doseq [c (range 9)]
         (is (approx= 1e-9 (double (exp c)) (double (aget out c)))
             (str "px " (quot c 3) " ch " (rem c 3) ": expected " (exp c) " got " (aget out c)))))))
+
+;; --- dominant-blur: the COVERAGE tiers' colour source --------------------------
+;; The coverage tiers paint with strokes far larger than a fine feature, so their
+;; colour must be the DOMINANT tone of a brush-sized window. The edge-preserving
+;; blur they used to sample keeps sub-brush structure by construction: a σ6 stroke
+;; centred on a 5px letter got solid black and painted it over a 12px radius, and
+;; nothing repaints the paper around it — the smudge around text and line art.
+
+(defn- line-and-block
+  "A light field carrying two dark features: a THIN line (3px, far finer than the
+   brush) at column `lc`, and a wide BLOCK (40px, far coarser) at columns bl..bl+39."
+  [H W lc bl]
+  (gradient-img H W (fn [_ y] (if (or (and (>= y lc) (< y (+ lc 3)))
+                                      (and (>= y bl) (< y (+ bl 40))))
+                                0.08 0.92))))
+
+(defn- grey [^doubles f W x y] (aget f (* 3 (+ (* x W) y))))
+
+(deftest dominant-blur-at-p1-is-the-box-blur
+  ;; The identity anchor for the recombination: the hat kernels partition unity, so
+  ;; combining bins by w^1 sums back to the plain window mean. If this drifts, the
+  ;; binning or the normalisation is wrong and every higher p is wrong with it.
+  ;; radius 2 keeps it on the full-resolution path (the downsample kicks in at 3).
+  (let [H 48 W 48
+        img (gradient-img H W (fn [x y] (* 0.9 (/ (double (+ x (* 2 y))) 144.0))))
+        box (s/blur-image img 2)
+        dom (s/dominant-blur img 2 1.0)]
+    (is (every? (fn [i] (approx= 1e-9 (aget ^doubles box i) (aget ^doubles dom i)))
+                (range (* H W 3)))
+        "p=1 must reproduce the box blur exactly")))
+
+(deftest dominant-blur-drops-sub-brush-structure-and-keeps-masses
+  ;; The fix itself. At the brush's own scale a 3px line is a minority of the window
+  ;; and must lose the vote; a 40px block is the majority and must survive. The
+  ;; edge-preserving blur keeps BOTH, which is what made the coverage tier stamp
+  ;; letter-sized features at brush size.
+  (let [H 128 W 128 lc 30 bl 70 rad 12
+        img   (line-and-block H W lc bl)
+        dom   (s/dominant-blur img rad)
+        keep* (s/edge-preserving-blur img (s/bilateral-blur img 3) (s/blur-image img rad))
+        at    (fn [f y] (grey f W 64 y))]
+    (println (format "DOMINANT line %.3f (box %.3f) | mass %.3f | inside-edge %.3f | outside-edge %.3f"
+                     (at dom (inc lc)) (grey (s/blur-image img rad) W 64 (inc lc))
+                     (at dom (+ bl 20)) (at dom (+ bl 6)) (at dom (- bl 6))))
+    ;; guard the fixture: the source really does carry both features
+    (is (approx= 0.02 0.08 (grey (:pixels img) W 64 (inc lc))) "fixture: the thin line is dark")
+    (is (approx= 0.02 0.08 (grey (:pixels img) W 64 (+ bl 20))) "fixture: the block is dark")
+    ;; the thin line drops out — and the edge-preserving field it replaces keeps it
+    ;; 0.88 sits between what the mode gives (0.919, i.e. the paper's own tone) and what a
+    ;; plain window MEAN gives (0.819 — the line merely diluted, which is the halo). A looser
+    ;; bound passes for p=1 and would not test anything.
+    (is (> (at dom (inc lc)) 0.88)
+        (str "a 3px line must lose the vote in a " rad "px window, not just be diluted by it: got "
+             (at dom (inc lc)) " (the window mean is " (grey (s/blur-image img rad) W 64 (inc lc)) ")"))
+    (is (< (at keep* (inc lc)) 0.3)
+        (str "and edge-preserving-blur keeps it, which is the behaviour being replaced: got "
+             (at keep* (inc lc))))
+    ;; the 40px mass survives, and neither side bleeds across its boundary
+    (is (< (at dom (+ bl 20)) 0.3)
+        (str "a 40px mass must survive: got " (at dom (+ bl 20))))
+    (is (< (at dom (+ bl 6)) 0.25)
+        (str "no bleed IN from the light side just inside the mass: got " (at dom (+ bl 6))))
+    (is (> (at dom (- bl 6)) 0.85)
+        (str "no bleed OUT onto the light side just outside it: got " (at dom (- bl 6))))))

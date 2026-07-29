@@ -1,5 +1,6 @@
 (ns splat-painter.seed-test
   (:require [clojure.test :refer [deftest is testing]]
+            [splat-painter.fields :as fields]
             [splat-painter.seed :as seed]
             [splat-painter.wavelet :as wavelet]
             [splat-painter.structure :as structure]
@@ -446,19 +447,10 @@
                     (range H)))})
 
 (defn- attach-precomputed-fields [img0]
-  ;; mirror core/on-image-loaded EXACTLY. splat-field falls back to raw pixels for
-  ;; any missing blur field, which would NOT exercise the real (edge-aware) colour
-  ;; path — so the test must attach the same fields the app does on image load.
-  (let [sfield (structure/analyze img0)
-        light  (structure/bilateral-blur img0 3)
-        drift  (structure/blur-image img0 2)
-        heavy  (structure/blur-image img0 (max 6 (quot (:height img0) 80)))]
-    (assoc img0 :structure sfield
-               :blur light
-               :blur-drift drift
-               :blur-heavy (structure/edge-preserving-blur img0 light heavy)
-               :detail (wavelet/placement-map img0 sfield)
-               :noise-fields (seed/prep-noise sfield))))
+  ;; the same fields the app attaches on image load — splat-field falls back to raw
+  ;; pixels for any missing blur field, which would NOT exercise the real colour path.
+  ;; This used to be a hand-copy of core/prepare-image, kept in sync by a comment.
+  (fields/prepare img0))
 
 (defn- sigma-max [cov]
   ;; stdev along the major axis = sqrt of the LARGER eigenvalue of [[c00 c01][c01 c11]].
