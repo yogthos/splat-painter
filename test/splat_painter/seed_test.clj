@@ -262,11 +262,20 @@
     ;; the strokes traded are the same size class, which is what a slice reallocation
     ;; between two adjacent rungs looks like. A materially different Σdet here would mean
     ;; something other than the reallocation moved and should be investigated.
+    ;; (933.485→933.066) `wsl` in stroke-segments read a `detail?` that was bound
+    ;; inside the tracer loop but referenced in the FINALIZE block, so it resolved
+    ;; to an unbound var — a TRUTHY object — and the cond took the detail branch
+    ;; unconditionally: every non-soft-ramp tier re-loaded colour per segment
+    ;; (wsl=1) instead of carrying one brush-load, the opposite of what the
+    ;; comment above wsl describes. jolt 0.5.11 reports the unresolved symbol
+    ;; instead of late-binding it, which is how this surfaced. Only Σcolour moves,
+    ;; by 0.045%; count, both means and Σdet are unchanged — a colour-sampling
+    ;; change with no geometry change, which is the signature of exactly this fix.
     (is (= 850 (count splats)))
     (is (approx= 0.5  19111.677  sx) "Σ mean-x")
     (is (approx= 0.5  25937.161  sy) "Σ mean-y")
     (is (approx= 1.0  219958.654 sd) "Σ det(cov)")
-    (is (approx= 0.05 933.485    sc) "Σ colour")))
+    (is (approx= 0.05 933.066    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
