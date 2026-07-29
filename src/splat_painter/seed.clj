@@ -852,7 +852,10 @@
      :det-demand det-demand :cand-thin cand-thin
      :mid-demand mid-demand :fine-demand fine-demand :fine-thin fine-thin}))
 
-(declare sample-fields)
+;; forward references: these are defined below but used by the placement pass above.
+;; A cold AOT compile resolves a file top-down, so without the declare `jolt -M:check`
+;; on a clean checkout fails to resolve them (a warm ~/.jolt/aot-cache hides it).
+(declare sample-fields sample-arr)
 
 (defn- edge-snap
   "Move a fine-stroke position onto the local EDGE RIDGE: sample edge strength at
