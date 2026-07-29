@@ -187,13 +187,22 @@
     ;; the side keys on the LINER discipline (sigma-keyed), not the level index;
     ;; the brush-load is a three-tier decision — no boundary, geometric side, then
     ;; the colour test only at a genuine STEP edge (min dp dm < 0.3*dsides).
-    (assert-contains gs-src "if (snapE && liner) {" "impasto side keys on liner, not level")
+    ;; ...and the side is gated on softRamp exactly as seed.clj gates it — the GS used to
+    ;; take a side unconditionally AND apply it before softRamp was even computed, so on
+    ;; every soft silhouette the GPU pushed the stroke 0.55 sigma off the ridge and the CPU
+    ;; reference did not (splat-painter-hr5).
+    (assert-contains gs-src "if (snapE && liner && (band || !softRamp)) {"
+                     "impasto side keys on liner, not level, and is suppressed on a soft ramp")
     (assert-contains gs-src "float h1 = max(1.75, 0.8 * ssz2);" "probe ladder: rung 1 (narrow)")
     (assert-contains gs-src "float h2 = max(3.0, 1.5 * ssz2);" "probe ladder: rung 2 (mid)")
     (assert-contains gs-src "float h3 = max(5.0, 2.5 * ssz2);" "probe ladder: rung 3 (wide, clears a soft ramp)")
     (assert-contains gs-src "float dmax = max(d1, max(d2, d3));" "sharpness probe: all three rungs, take dmax")
     (assert-contains gs-src "float disp = h1;" "disp = h1 (the nearest offset; crisp samples at h1)")
-    (assert-contains gs-src "else if (d1 < 0.75 * dmax)" "sharpness measure: soft ramp when d1 < 0.75*dmax")
+    ;; the classification is hoisted above the side offset (it keys it), so the ladder
+    ;; reads as a predicate there and the brush-load branch consumes it below
+    (assert-contains gs-src "bool softRamp = (dmax >= 0.15) && (d1 < 0.75 * dmax);"
+                     "sharpness measure: soft ramp when d1 < 0.75*dmax, classified before the side offset")
+    (assert-contains gs-src "} else if (softRamp) {" "brush-load reads the hoisted soft-ramp classification")
     (assert-contains gs-src "bax = side * disp * nx0; bay = side * disp * ny0;" "geometric side wins the brush-load")
     (assert-contains gs-src "if (min(dp, dm) < 0.3 * dsides) {" "colour-test brush-load only at a genuine step edge")
     ;; bokeh melt: absolute subjectness drives the broad tier; local-relative sgate

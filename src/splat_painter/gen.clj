@@ -544,13 +544,50 @@ void main(){
   // EDGE-BAND tier (mirror seed/stroke-segments): selong > 0 marks the overlay slot.
   float selong = u_selong[k];
   bool  band   = selong > 0.0;
+  // CRISPNESS LADDER, hoisted ABOVE the side offset because it KEYS it (mirror seed,
+  // where dmax/crisp?/soft-ramp? are computed before `side` for exactly this reason).
+  // It used to run after, so the GS could not gate `side` on softRamp and offset every
+  // liner 0.55 sigma to its side on soft silhouettes while seed.clj left side=0 —
+  // moving positions, and therefore which candidates cleared the placement threshold
+  // (splat-painter-hr5). The probes only need the PRE-snap position, so they can run here.
+  vec2 tc0 = fieldsAt(cpx, cpy);
+  float nx0 = -sin(tc0.x), ny0 = cos(tc0.x);
+  // SHARPNESS, not contrast (mirror seed). Probe ALL THREE rungs of the ridge
+  // (no early-out) and keep the fraction of the total transition completing within
+  // h1: crisp = (d1 >= 0.75*dmax). A hard step / 1px-AA edge reads d1~=d3 (ratio ~1
+  // -> CRISP, two opaque paints meet, impasto kept); a wide ramp reads d1<<d3 (ratio
+  // ~0.35 -> SOFT RAMP, no meeting line -> paint LOCAL colour, damp the body).
+  // Contrast-invariant, so an 8px and a 24px ramp both classify soft — the fixture
+  // stays at the spec's 8px. dmax<0.15 -> a thin LINE feature / flat. cp/cm are taken
+  // at h1 (the nearest offset) for the crisp step-edge test. Unrolled, NOT a
+  // loop+break: Apple GL 4.1 mis-executes the last slot of a uniform-bound loop.
+  float h1 = max(1.75, 0.8 * ssz2);
+  float h2 = max(3.0, 1.5 * ssz2);
+  float h3 = max(5.0, 2.5 * ssz2);
+  vec3 cp1 = sampleRGB(u_blurTex, cpx + nx0*h1, cpy + ny0*h1);   // rung 1
+  vec3 cm1 = sampleRGB(u_blurTex, cpx - nx0*h1, cpy - ny0*h1);
+  float d1 = max(abs(cp1.r - cm1.r), max(abs(cp1.g - cm1.g), abs(cp1.b - cm1.b)));
+  vec3 cp2 = sampleRGB(u_blurTex, cpx + nx0*h2, cpy + ny0*h2);   // rung 2
+  vec3 cm2 = sampleRGB(u_blurTex, cpx - nx0*h2, cpy - ny0*h2);
+  float d2 = max(abs(cp2.r - cm2.r), max(abs(cp2.g - cm2.g), abs(cp2.b - cm2.b)));
+  vec3 cp3 = sampleRGB(u_blurTex, cpx + nx0*h3, cpy + ny0*h3);   // rung 3
+  vec3 cm3 = sampleRGB(u_blurTex, cpx - nx0*h3, cpy - ny0*h3);
+  float d3 = max(abs(cp3.r - cm3.r), max(abs(cp3.g - cm3.g), abs(cp3.b - cm3.b)));
+  float dmax = max(d1, max(d2, d3));
+  float disp = h1;
+  vec3 cp = cp1, cm = cm1;         // nearest-offset colour probes (for crisp)
+  float dsides = dmax;
+  bool softRamp = (dmax >= 0.15) && (d1 < 0.75 * dmax);
+
   // which side of the ridge did this seed come from? (mirror seed/stroke-segments)
   float side = 0.0;
   // IMPASTO side keys on the LINER discipline (sigma-keyed), not the level index:
   // small lvl 2-3 chains snap onto the ridge like lvl>=4 liners and keep their side.
   // A BAND seed that lands exactly on the ridge falls back to its own direction hash,
   // so the two sides get restated in roughly equal numbers with no side detection.
-  if (snapE && liner) {
+  // the BAND tier always takes a side — a soft silhouette is exactly where it exists
+  // to work (mirror seed: `(or band? (not soft-ramp?))`).
+  if (snapE && liner && (band || !softRamp)) {
     vec2 tcs = fieldsAt(x2, y2);
     float nsx = -sin(tcs.x), nsy = cos(tcs.x);
     float dd = (cpx - x2)*nsx + (cpy - y2)*nsy;
@@ -594,39 +631,12 @@ void main(){
   // the brush-load samples ~0.7 sigma on the stroke's OWN colour side — chains
   // parallel to a boundary otherwise alternate sides per seed and tile the
   // contour into colour capsules (the regular wavy scallops).
-  float bax = 0.0, bay = 0.0; bool softRamp = false;
+  float bax = 0.0, bay = 0.0;
   {
-    vec2 tc0 = fieldsAt(cpx, cpy);
-    float nx0 = -sin(tc0.x), ny0 = cos(tc0.x);
-    // SHARPNESS, not contrast (mirror seed). Probe ALL THREE rungs of the ridge
-    // (no early-out) and keep the fraction of the total transition completing within
-    // h1: crisp = (d1 >= 0.75*dmax). A hard step / 1px-AA edge reads d1~=d3 (ratio ~1
-    // -> CRISP, two opaque paints meet, impasto kept); a wide ramp reads d1<<d3 (ratio
-    // ~0.35 -> SOFT RAMP, no meeting line -> paint LOCAL colour, damp the body).
-    // Contrast-invariant, so an 8px and a 24px ramp both classify soft — the fixture
-    // stays at the spec's 8px. dmax<0.15 -> a thin LINE feature / flat. cp/cm are taken
-    // at h1 (the nearest offset) for the crisp step-edge test. Unrolled, NOT a
-    // loop+break: Apple GL 4.1 mis-executes the last slot of a uniform-bound loop.
-    float h1 = max(1.75, 0.8 * ssz2);
-    float h2 = max(3.0, 1.5 * ssz2);
-    float h3 = max(5.0, 2.5 * ssz2);
-    vec3 cp1 = sampleRGB(u_blurTex, cpx + nx0*h1, cpy + ny0*h1);   // rung 1
-    vec3 cm1 = sampleRGB(u_blurTex, cpx - nx0*h1, cpy - ny0*h1);
-    float d1 = max(abs(cp1.r - cm1.r), max(abs(cp1.g - cm1.g), abs(cp1.b - cm1.b)));
-    vec3 cp2 = sampleRGB(u_blurTex, cpx + nx0*h2, cpy + ny0*h2);   // rung 2
-    vec3 cm2 = sampleRGB(u_blurTex, cpx - nx0*h2, cpy - ny0*h2);
-    float d2 = max(abs(cp2.r - cm2.r), max(abs(cp2.g - cm2.g), abs(cp2.b - cm2.b)));
-    vec3 cp3 = sampleRGB(u_blurTex, cpx + nx0*h3, cpy + ny0*h3);   // rung 3
-    vec3 cm3 = sampleRGB(u_blurTex, cpx - nx0*h3, cpy - ny0*h3);
-    float d3 = max(abs(cp3.r - cm3.r), max(abs(cp3.g - cm3.g), abs(cp3.b - cm3.b)));
-    float dmax = max(d1, max(d2, d3));
-    float disp = h1;
-    vec3 cp = cp1, cm = cm1;                 // nearest-offset colour probes (for crisp)
-    float dsides = dmax;
     if (dmax < 0.15) {
       bax = 0.0; bay = 0.0;                  // thin LINE feature / flat: on-ridge colour
-    } else if (d1 < 0.75 * dmax) {
-      bax = 0.0; bay = 0.0; softRamp = true;   // SOFT RAMP: paint LOCAL colour (wsl=1 below), damp body
+    } else if (softRamp) {
+      bax = 0.0; bay = 0.0;                  // SOFT RAMP: paint LOCAL colour (wsl=1 below), damp body
     } else if (side != 0.0) {
       bax = side * disp * nx0; bay = side * disp * ny0;   // geometric side wins
     } else {                                  // colour test only at a genuine STEP edge
