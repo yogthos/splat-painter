@@ -63,10 +63,13 @@
         px (:pixels img0)
         layered-means #'splat-painter.seed/layered-means
         orig @#'splat-painter.seed/stroke-segments
+        chains (atom [])
         segs (with-redefs [splat-painter.seed/stroke-segments
                            (fn [& args]
                              (let [lvl (long (nth args 2))
                                    [rows reason] (apply orig args)]
+                               (when (seq rows)
+                                 (swap! chains conj [lvl (clojure.core/count rows) reason]))
                                [(mapv (fn [r] (conj r lvl)) rows) reason]))]
                (layered-means dmap nf detail size variation curvature stroke 1.0
                               muls count H W px px))
@@ -96,4 +99,17 @@
                                     (* (double dem) (double thin)) em
                                     (/ (* (double dem) (double thin)) (max 1 em))))))]
       (line "mid"  (:mid-demand lp)  mid-pool  mid-em  (:cand-thin lp))
-      (line "fine" (:fine-demand lp) fine-pool fine-em (:fine-thin lp)))))
+      (line "fine" (:fine-demand lp) fine-pool fine-em (:fine-thin lp)))
+    ;; chain-length distribution + why each chain stopped, per level: a tier whose
+    ;; strokes pile up at the segment cap is not being terminated by the image.
+    (println "\nchain length (segments per surviving seed) and stop reason:")
+    (doseq [[lvl cs] (sort-by key (group-by first @chains))]
+      (let [lens (sort (map second cs))
+            n (clojure.core/count lens)
+            pc (fn [q] (nth lens (min (dec n) (long (* q n)))))
+            why (frequencies (map (fn [c] (nth c 2)) cs))]
+        (println (format "  lvl %-2d n %7d  p50 %3d  p90 %3d  max %3d  | %s"
+                         lvl n (pc 0.5) (pc 0.9) (last lens)
+                         (clojure.string/join "  " (map (fn [[k v]] (format "%s %.0f%%" (name (or k :nil))
+                                                                            (* 100.0 (/ (double v) n))))
+                                                        (sort-by (comp - val) why)))))))))

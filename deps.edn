@@ -25,6 +25,7 @@
            :preview {:extra-paths ["test"] :main-opts ["-m" "splat-painter.preview"]}
            :detail {:extra-paths ["test"] :main-opts ["-m" "splat-painter.detail"]}
            :yield {:extra-paths ["test"] :main-opts ["-m" "splat-painter.yield"]}
+           :scan {:extra-paths ["test"] :main-opts ["-m" "splat-painter.scan"]}
            :test  {:extra-paths ["test"] :main-opts ["-m" "splat-painter.test-runner"]}
            ;; print the actual golden-fixture checksums, for re-pinning seed-test
            :pin   {:extra-paths ["test"] :main-opts ["-m" "splat-painter.pin"]}}

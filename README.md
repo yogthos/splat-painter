@@ -89,6 +89,7 @@ jolt -M:preview   # CPU render to PNG (no GL needed)
 jolt -M:prof      # analysis/placement profiling
 jolt -M:detail    # detail-placement ladder, survival and coverage report
 jolt -M:yield     # per-level splats-per-candidate vs what the budget charges for it
+jolt -M:scan      # scanline of the placement signals a stroke's stop rules read
 jolt -M:pin       # print the golden fixture's actual checksums (for re-pinning)
 ```
 
