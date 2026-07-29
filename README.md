@@ -88,6 +88,7 @@ jolt -M:check     # headless: shader GLSL structure, packing, full pipeline
 jolt -M:preview   # CPU render to PNG (no GL needed)
 jolt -M:prof      # analysis/placement profiling
 jolt -M:detail    # detail-placement ladder, survival and coverage report
+jolt -M:yield     # per-level splats-per-candidate vs what the budget charges for it
 jolt -M:pin       # print the golden fixture's actual checksums (for re-pinning)
 ```
 
