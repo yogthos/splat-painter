@@ -282,6 +282,15 @@
       (bilerp1 d W H src-h src-w x y))
     0.0))
 
+(defn sharp-at
+  "Like detail-at but over the :sharp fine-band map (sampled BILINEARLY) — what the
+   finest placement levels threshold against. Falls back to :detail when the map has
+   no :sharp."
+  [dmap x y]
+  (if-let [s (:sharp dmap)]
+    (detail-at (assoc dmap :detail s) x y)
+    (detail-at dmap x y)))
+
 (defn mid-at
   "The mid placement levels' map: the UNION (max) of the :mid band map (Haar bands
    2-3 — face-feature-scale structure) and the :sharp fine-band map, so mid strokes
@@ -292,13 +301,4 @@
   [dmap x y]
   (if-let [m (:mid dmap)]
     (max (detail-at (assoc dmap :detail m) x y) (sharp-at dmap x y))
-    (detail-at dmap x y)))
-
-(defn sharp-at
-  "Like detail-at but over the :sharp fine-band map (sampled BILINEARLY) — what the
-   finest placement levels threshold against. Falls back to :detail when the map has
-   no :sharp."
-  [dmap x y]
-  (if-let [s (:sharp dmap)]
-    (detail-at (assoc dmap :detail s) x y)
     (detail-at dmap x y)))

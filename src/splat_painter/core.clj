@@ -144,6 +144,11 @@
 ;; as you drag; loading an image does the same. on-render rebuilds the field from
 ;; the current atoms. (GTK coalesces queued renders to one per frame-clock tick.)
 ;; test/headless overrides so a fixed count/size can be forced without the sliders
+;; forward references: defined further down, used by the render/callback wiring above.
+;; A cold AOT compile resolves a file top-down, so without these a clean checkout
+;; cannot compile core (a warm ~/.jolt/aot-cache hides it).
+(declare clear-layers! upload-splat-texture! gpu-save-png!)
+
 (defn- cur-count  [] (or (some-> (System/getenv "GA_PAINTER_COUNT")  Double/parseDouble long) @count-atom))
 (defn- cur-size   [] (or (some-> (System/getenv "GA_PAINTER_SIZE")   Double/parseDouble)      @size-atom))
 (defn- cur-detail [] (or (some-> (System/getenv "GA_PAINTER_DETAIL") Double/parseDouble)      @detail-atom))
