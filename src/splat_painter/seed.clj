@@ -1098,13 +1098,16 @@
           [hr hg hb0] (sample-arr blurd-px iw ih
                                   (if band? x (+ cx0 bax))
                                   (if band? y (+ cy0 bay)))]
-      (let [traced (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
+      ;; detail? is a pure function of lvl, and BOTH the tracer loop below and
+      ;; the FINALIZE block after it need it (wsl). It used to be bound inside
+      ;; the loop body only, so the finalize reference resolved to nothing.
+      (let [detail? (>= (long lvl) 2)
+            traced (loop [k 0 px (double x) py (double y) dxp 0.0 dyp 0.0 fade 1.0 acc []]
                      (if (> k kmax)
                        [acc :cap]
                        (let [[th coh] (sample-fields nf px py)
                              dx0 (Math/cos th) dy0 (Math/sin th)
                              ev  (wavelet/edge-at dmap px py)
-                             detail? (>= (long lvl) 2)
                              ;; FEATURE-FOLLOWING TRACER: a stroke ends where the FEATURE
                              ;; ends or turns — the way a person paints (the top of an eye is
                              ;; one line, the bottom another; a finger contour one long wavy
