@@ -221,8 +221,8 @@
 ;; 8.70, nx 13866) stays soft, 6 (sp 6.74, nx 23110) is intermediate, 4 (sp 5.50, nx
 ;; 34664) is where the camera strap, the phone edge and the lips come back. Re-measure
 ;; this if the stop rules change — it is the mean stroke length they produce.
-(def ^:private det-yield 1.8)
-;; ^ the MEAN splats emitted per DETAIL candidate (lvl>=2, non-band), for the budget's
+(def ^:private mid-yield 1.8)
+;; ^ the MEAN splats emitted per MID-tier candidate (2 <= lvl < broad-end), for the budget's
 ;; det-demand term ONLY — expected-segs (4) above still drives seed spacing + the k-of term,
 ;; the way band-trace carries the band's measured length beside band-segs. expected-segs is
 ;; the NOMINAL traced length of a stroke; the tier paints far fewer per candidate, because
@@ -239,6 +239,27 @@
 ;; 512px that lifts budget spend 52%→68% (cand-thin saturates to 1 there, so 1.5/1.8 are
 ;; identical at that size) and fine-detail coverage 79.2%→98.6%. Charging the old
 ;; expected-segs (4) over-stated demand ~2-3x and cand-thin sat near 0.24.
+(def ^:private fine-yield 1.0)
+;; ^ the same term for the FINE tier (lvl >= broad-end), which sits on the min-phys floor and
+;; yields consistently LESS per candidate than the mid rungs above it — it is where survival
+;; is thinnest and chains die shortest. Measured per level by tagging every emitted segment
+;; with the level that made it (`-M:yield`, exact — the old sigma-bucketing could not separate
+;; the finest rung from the band, which lands within 0.1 of it), 1024px, Size 20.48, Detail 1.0:
+;;               DSC_8428  coyote  crow  street  portrait
+;;   fine σ1.40      0.83    0.85  0.53    1.43      1.07   → mean 0.94
+;;   mid  σ2.56      1.05    1.43  0.83    2.20      1.66
+;;   mid  σ5.12      0.67    2.00  0.45    1.68      0.83   → mid mean ~1.28
+;; Budget-invariant (DSC_8428 fine reads 0.83/0.84/0.83 at 72k/200k/550k), and below the mid
+;; tier on every image (~78% of it). Charging both tiers 1.8 therefore thinned the fine tier
+;; to about half the density its own slice had already paid for: fine-thin = fine-slice /
+;; fine-demand, so the over-charge comes straight back out of the pool the tier gets to place.
+;; 1.0 rather than the 0.94 mean, on the same lean-high principle as mid-yield.
+;;
+;; The residual spread (0.53-1.43 across photos, and 0.06 on the low-contrast ladder fixture
+;; vs 11 on the full-contrast dense one) is image texture, and no single constant folds it
+;; out — that is the open-loop limit splat-painter-zig records, and what a measured per-image
+;; calibration would fix. What one constant CAN carry is the systematic tier difference,
+;; which is what this is.
 (def ^:private edge-floor 0.10)    ; ridge-alive stop: the edge is dead below this, the feature has ended
 (def ^:private bend-cos 0.90)      ; bend-break: |dot(field-dir, prev-step)| below this (~26°/step) is a corner
 (def ^:private runaway 0.60)       ; chroma BACKSTOP only: the stroke has wandered into a foreign colour region
@@ -804,10 +825,15 @@
                           ;; candidate pool (lvl-frac under-predicts dithered survival).
                           surv (if detail? 1.0 (surv-frac lvl))
                           ;; COVERAGE survivors x their seg-count; DETAIL full pool x the
-                          ;; MEASURED per-candidate yield (det-yield) — NOT expected-segs,
-                          ;; which sets spacing but over-counts what the tier paints ~2-3x.
-                          segs-per-seed (if detail? (double det-yield)
-                                                 (double (seg-count lvl)))]
+                          ;; MEASURED per-candidate yield — NOT expected-segs, which sets
+                          ;; spacing but over-counts what the tier paints ~2-3x. The two
+                          ;; detail tiers carry their own measured yields: the fine tier
+                          ;; sits on the min-phys floor and paints ~78% of what a mid
+                          ;; candidate does, and one shared constant charged it the mid
+                          ;; rate and thinned its slice away again.
+                          segs-per-seed (cond (and detail? (>= (long lvl) broad-end)) (double fine-yield)
+                                              detail? (double mid-yield)
+                                              :else   (double (seg-count lvl)))]
                       (* (double nx) (double surv) segs-per-seed)))
         cov-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (< (long lvl) 2) (demand lvl ssz) 0.0)) admitted))
         ;; the detail demand splits by tier, and each tier is thinned against its OWN
@@ -860,7 +886,11 @@
         levels (band-prepend levels band)]
     {:nlev (clojure.core/count levels) :warp warp :scale scale :levels levels
      :total (reduce + 0 (map (fn [{:keys [nx ny]}] (* nx ny)) levels))
-     :det-demand det-demand :cand-thin cand-thin}))
+     ;; budget diagnostics: each detail tier's charge and the factor it was thinned by.
+     ;; Both halves are needed to check a charge against what the tier paints — the
+     ;; demands are the UNTHINNED pools' charge, emission comes from the thinned ones.
+     :det-demand det-demand :cand-thin cand-thin
+     :mid-demand mid-demand :fine-demand fine-demand :fine-thin fine-thin}))
 
 (declare sample-fields)
 

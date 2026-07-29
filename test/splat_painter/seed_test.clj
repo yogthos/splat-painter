@@ -1472,6 +1472,50 @@
         (str "detail demand must not under-charge: demand " demand " vs emitted " emitted
              " (x" (/ demand (double emitted)) ")"))))
 
+(deftest fine-tier-is-charged-its-own-lower-yield
+  ;; The FINE tier (lvl >= broad-end) sits on the min-phys floor and paints measurably LESS
+  ;; per candidate than the mid rungs above it — it is where survival is thinnest and chains
+  ;; die shortest. Measured per level by tagging every emitted segment with the level that
+  ;; made it (`jolt -M:yield <image> 1024 '{:count 550000 :size 20.48 :detail 1.0}'`), 1024px:
+  ;;               DSC_8428  coyote  crow  street  portrait
+  ;;   fine σ1.40      0.83    0.85  0.53    1.43      1.07   → mean 0.94
+  ;;   mid  σ2.56      1.05    1.43  0.83    2.20      1.66
+  ;;   mid  σ5.12      0.67    2.00  0.45    1.68      0.83   → mid mean ~1.28
+  ;; Fine runs ~78% of mid on every one. Charging both 1.8 therefore thinned the fine tier to
+  ;; about half the density its own slice had already paid for, because fine-thin =
+  ;; fine-slice/fine-demand: the over-charge comes straight back out of the pool the tier
+  ;; places from. The tier being ADMITTED at all is pinned separately (see
+  ;; fine-tier-is-admitted-and-thinned-not-dropped); this pins what it is charged.
+  ;;
+  ;; What is NOT pinned here is the absolute yield, and deliberately: it is image texture, not
+  ;; a constant. The same -M:yield run reads 0.06 on the low-contrast ladder fixture and 11 on
+  ;; the full-contrast dense one, against 0.53-1.43 on photos, so no synthetic fixture can
+  ;; judge the absolute value and an assertion against one would be pinning noise. A per-image
+  ;; measured calibration is what closes that gap (splat-painter-zig). The systematic part —
+  ;; fine costs less per candidate than mid — is what one constant can carry, so that is what
+  ;; this asserts. Discriminating: put both tiers back on one constant and the ratio is 1.0.
+  (let [H 256 W 256 area (* H W)
+        img (dense-img)
+        dmap (wavelet/placement-map img (structure/analyze img))
+        lp (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.5 [1.0 1.0 1.0 1.0] 4000 H W)
+        ladder (remove :band (:levels lp))
+        ;; the density the level's own spacing asks for, before any thinning — the pool the
+        ;; demand terms are computed over
+        natural (fn [l] (Math/ceil (/ (double area) (* (double (:sp l)) (double (:sp l))))))
+        pool (fn [pred] (reduce + 0.0 (map natural (filter pred ladder))))
+        ;; Detail 1.0 ⇒ 7 requested levels ⇒ broad-end 4
+        mid-pool  (pool (fn [l] (and (>= (long (:lvl l)) 2) (< (long (:lvl l)) 4))))
+        fine-pool (pool (fn [l] (>= (long (:lvl l)) 4)))
+        mid-charge  (/ (double (:mid-demand lp)) mid-pool)
+        fine-charge (/ (double (:fine-demand lp)) fine-pool)]
+    (is (pos? fine-pool) "the fine tier is live on this fixture")
+    (is (pos? mid-pool)  "and so is the mid tier")
+    (is (< fine-charge (* 0.8 mid-charge))
+        (str "the fine tier must be charged its own lower yield: fine " fine-charge
+             " vs mid " mid-charge " (x" (/ fine-charge mid-charge) ")"))
+    ;; the thinning must still fire on this fixture, or the charge above is moot
+    (is (< (double (:fine-thin lp)) 1.0) "the fine tier is thinned against its slice here")))
+
 (deftest detail-budget-spend-not-throttled-by-overcharge
   ;; cand-thin = det-budget/det-demand, so a det-demand inflated ~2-3x over real emission
   ;; cuts the placed detail candidate pool by the same factor and the WHOLE field lands far
