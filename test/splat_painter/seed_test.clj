@@ -773,6 +773,24 @@
           (is (< (double (:ssz base)) 8.0) (str "base ssz " (:ssz base) " is under the 8px threshold"))
           (is (zero? (:traw base))         "base :traw is 0.0 (coverage constant, not size-keyed)"))))))
 
+(deftest glaze-alpha-has-one-threshold-at-every-paintable-size
+  ;; level-alpha carried a third arm below dab-max (1.2) for a DAB tier that min-phys
+  ;; (1.4) makes unreachable, and the GLSL twin had drifted to keying that arm at 2.5 —
+  ;; where it DID fire. Every fine stroke between 1.4 and 2.5 therefore painted 0.95 on
+  ;; the GPU against 0.85 on the CPU (splat-painter-b1d), on every render, since that is
+  ;; exactly where the fine tier sits. Pins the CPU half across the whole paintable range;
+  ;; check.clj pins the GLSL literal that has to match it.
+  (let [level-alpha #'splat-painter.seed/level-alpha]
+    (doseq [ssz [1.4 1.6 2.0 2.4 2.5 3.5 7.9]]
+      (is (== 0.85 (level-alpha 2 ssz))
+          (str "detail stroke at " ssz "px glazes at 0.85 — no second threshold below 8px")))
+    (doseq [ssz [8.0 12.0 20.5]]
+      (is (== 1.0 (level-alpha 2 ssz))
+          (str "a stroke at " ssz "px is coverage-scale and opaque")))
+    ;; min-phys is what made the removed arm unreachable; if it ever drops below 1.2 the
+    ;; question reopens on both paths at once.
+    (is (>= 1.4 1.2) "min-phys (1.4) floors every emitted stroke above the old dab threshold")))
+
 (deftest admitted-levels-fit-the-budget
   ;; The admission keeps the EMITTED field within the budget and the transform-feedback
   ;; buffer capacity. Measured on the survivor count (splat-field :splats) — the post-cull

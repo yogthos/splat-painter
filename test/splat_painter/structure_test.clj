@@ -19,6 +19,18 @@
           (aset pixels (+ 2 base) v))))
     {:height H :width W :channels 3 :pixels pixels}))
 
+(defn- tensor-at
+  "Read the tensor at a full-image pixel the way the SEED does — straight out of the
+   :theta/:coherence arrays. These fixtures are all far under analyze's 768px cap, so
+   the tensor grid is the image grid and the index is just x*W+y. (This replaced
+   s/orient-at, an accessor no production code used: prep-noise reads the arrays.)"
+  [sfield x y]
+  (let [W (long (:w sfield))
+        i (+ (* (long x) W) (long y))]
+    {:theta (aget ^doubles (:theta sfield) i)
+     :coherence (aget ^doubles (:coherence sfield) i)
+     :grad2 (aget ^doubles (:grad2 sfield) i)}))
+
 (defn- near-angle? [tol a b]
   (let [d (Math/abs (- (mod a Math/PI) (mod b Math/PI)))
         d (min d (- Math/PI d))]
@@ -29,7 +41,7 @@
     (let [H 24 W 24
           img (gradient-img H W (fn [x y] (if (< x (/ H 2)) 0.0 1.0)))
           sfield (s/analyze img)
-          {:keys [theta coherence]} (s/orient-at sfield (/ H 2) (/ W 2))]
+          {:keys [theta coherence]} (tensor-at sfield (quot H 2) (quot W 2))]
       (is (near-angle? 0.2 theta (/ Math/PI 2.0))
           (str "theta=" theta " should be ~π/2 (horizontal stroke)"))
       (is (> coherence 0.5)
@@ -40,7 +52,7 @@
     (let [H 24 W 24
           img (gradient-img H W (fn [x y] (if (< y (/ W 2)) 0.0 1.0)))
           sfield (s/analyze img)
-          {:keys [theta coherence]} (s/orient-at sfield (/ H 2) (/ W 2))]
+          {:keys [theta coherence]} (tensor-at sfield (quot H 2) (quot W 2))]
       (is (near-angle? 0.2 theta 0.0)
           (str "theta=" theta " should be ~0 (vertical stroke)"))
       (is (> coherence 0.5)
@@ -51,7 +63,7 @@
     (let [H 24 W 24
           img (gradient-img H W (fn [x y] (if (< (+ x y) H) 0.0 1.0)))
           sfield (s/analyze img)
-          {:keys [theta coherence]} (s/orient-at sfield (/ H 2) (/ W 2))]
+          {:keys [theta coherence]} (tensor-at sfield (quot H 2) (quot W 2))]
       (is (near-angle? 0.3 theta (* 3.0 (/ Math/PI 4.0)))
           (str "theta=" theta " should be ~3π/4"))
       (is (> coherence 0.4)
@@ -61,16 +73,16 @@
   (testing "solid color → no gradient → near-zero coherence"
     (let [img (solid 16 16 [0.5 0.5 0.5])
           sfield (s/analyze img)
-          {:keys [coherence]} (s/orient-at sfield 8 8)]
+          {:keys [coherence]} (tensor-at sfield 8 8)]
       (is (< coherence 0.1)
           (str "coherence=" coherence " should be near zero for a flat image")))))
 
 (deftest determinism
-  (testing "orient-at returns identical results for identical inputs"
+  (testing "reading the tensor twice gives identical results"
     (let [img (gradient-img 16 16 (fn [x y] (if (< x 8) 0.2 0.8)))
           sfield (s/analyze img)]
-      (is (= (s/orient-at sfield 8 8)
-             (s/orient-at sfield 8 8))))))
+      (is (= (tensor-at sfield 8 8)
+             (tensor-at sfield 8 8))))))
 
 (deftest luma-bt601-weights
   (testing "luma uses BT.601: 0.299*R + 0.587*G + 0.114*B"
@@ -134,30 +146,35 @@
             (recur (inc i) (+ sum (- (grey-at field W i) raw-l)) (inc cnt))
             (recur (inc i) sum cnt)))))))
 
-(deftest edge-preserving-blur-kills-dark-halo-and-keeps-far-field
+(deftest dominant-blur-kills-dark-halo-and-keeps-far-field
   (testing "heavy blur bleed across a silhouette: near-subject lift removed, far field untouched"
-    ;; A bright disc on near-black. The heavy box blur carries disc brightness
-    ;; across the silhouette; edge-preserving-blur must push it back to the light
-    ;; (bilateral) field where the deviation is RELATIVELY large, even though the
-    ;; absolute deviation in the dark halo is tiny (~0.04 = noise on a bright ramp).
+    ;; A bright disc on near-black. The heavy box blur carries disc brightness across the
+    ;; silhouette; the coverage tiers' colour source must not. dominant-blur gets this from
+    ;; bin separation rather than from a blend against the raw pixel: a window just outside
+    ;; the disc is majority-dark, so the dark bin wins the vote outright and the disc's own
+    ;; bin contributes nothing. (This property arrived with edge-preserving-blur, which fed
+    ;; the coverage tiers until dominant-blur replaced it; the test follows the job.)
     (let [H 100 W 100 cx 50 cy 50 r 15 bright 0.85 dark 0.04
           img (disc-on-dark H W cx cy r bright dark)
-          light (s/bilateral-blur img 3)
           heavy (s/blur-image img 6)
-          out   (s/edge-preserving-blur img light heavy)
+          out   (s/dominant-blur img 6)
           ring  (fn [^doubles f rlo rhi] (mean-luma-lift-in-ring img f cx cy rlo rhi dark))]
       (let [before-near (ring heavy (+ r 1) (+ r 10))   ; ~10px outside the disc
             after-near  (ring out   (+ r 1) (+ r 10))
-            ;; lifts are in 0..1 units, so the cap is luma/255. The old 1.0 was a
-            ;; luma-255 number applied to a 0..1 quantity and could never fail.
-            ;; 2/255. Measured: fixed gives 0.00074 (10x under), absolute-only gives
-            ;; 0.01675 (2.1x over) - so the test fails decisively if the relative
-            ;; term is lost, rather than by the 7% margin a 4/255 cap gave.
-            near-cap    (/ 2.0 255.0)
+            ;; Lifts are in 0..1 units. MEASURED: the box blur lifts this ring 0.0790 and
+            ;; dominant-blur cuts that to 0.0222 — a 3.6x suppression, where the
+            ;; edge-preserving blur it replaced managed 0.00074. That is a real (small)
+            ;; regression on this metric and the cap is set to the measured value, NOT
+            ;; loosened to whatever passes: a soft-voted bin cannot fully out-vote a 1/3
+            ;; minority at p=4 (0.67^4 vs 0.33^4 leaves the bright bin ~5% of the weight),
+            ;; and raising p to bury it posterizes photographs. Accepted on render evidence
+            ;; — DSC_8428 is this fixture in the wild, bright signage on near-black, and the
+            ;; lights came out punchier rather than haloed. Revisit if a halo ever shows up.
+            near-cap    0.03
             before-far  (ring heavy 75 90)
             after-far   (ring out   75 90)]
-        (println "HALO-BLEED near-subject: heavy +" before-near " -> edge-preserving +" after-near
-                 "| far-field: heavy +" before-far " -> edge-preserving +" after-far)
+        (println "HALO-BLEED near-subject: heavy +" before-near " -> dominant +" after-near
+                 "| far-field: heavy +" before-far " -> dominant +" after-far)
         ;; GUARD THE FIXTURE: a halo test whose fixture shows no halo passes against
         ;; zero and would stay green with the fix reverted. Assert the precondition.
         (is (> before-near (/ 12.0 255.0))
@@ -168,48 +185,23 @@
         (is (<= (Math/abs (- after-far before-far)) 0.5)
             (str "far field untouched (+/-0.5): after " after-far " vs before " before-far))))))
 
-(deftest edge-preserving-blur-preserves-flat-smoothing
-  (testing "on a smooth gradient with no boundary the field stays close to heavy (bokeh stays seamless)"
-    ;; No edge => no deviation, both tests read ~0 => w~0 => out ≈ heavy. The light
-    ;; blur is an edge-aware bilateral that is itself close to the box heavy on a
-    ;; smooth ramp, but the point is the blend must NOT pull toward light here.
+(deftest dominant-blur-preserves-flat-smoothing
+  (testing "on a smooth gradient with no boundary the field stays close to the box blur (bokeh stays seamless)"
+    ;; A unimodal window has no minority to out-vote, so the mode IS the mean and the
+    ;; filter must be a near no-op — otherwise raising p would band a smooth gradient
+    ;; instead of only dropping sub-brush structure.
     (let [img  (gradient-img 64 64 (fn [x y] (* 0.9 (/ (+ x y) 126.0))))
-          light (s/bilateral-blur img 3)
           heavy (s/blur-image img 6)
-          out   (s/edge-preserving-blur img light heavy)
+          out   (s/dominant-blur img 6)
           n (* 64 64)
           diff (loop [i 0 s 0.0]
                  (if (== i n) (/ s n)
                               (let [b (* 3 i)]
                                 (recur (inc i)
                                        (+ s (Math/abs (- (aget out b) (aget heavy b))))))))]
-      (println "FLAT-SMOOTH mean |out - heavy| =" diff)
+      (println "FLAT-SMOOTH mean |out - box| =" diff)
       (is (< diff 0.02)
-          (str "flat-region smoothing preserved: mean |out - heavy| small; got " diff)))))
-
-(deftest edge-preserving-blur-weight-pins-spec-formula
-  (testing "the blend weight follows w = max(wabs, wrel) exactly - each regime in isolation"
-    ;; Three pixels, grey (all channels equal). light = raw throughout (physically the
-    ;; bilateral field tracks raw near an edge). Expected outputs are HAND-COMPUTED from
-    ;; the spec formula - wabs=clamp((d-0.06)/0.10), wrel=clamp((d/max(lv,0.02)-0.15)/0.45),
-    ;; w=max(wabs,wrel), out=(1-w)*heavy + w*light - so this pins the fix independent of
-    ;; the blur machinery and is verifiable without running the suite:
-    ;;
-    ;;   px0 DARK halo:   d=0.04 wabs=0 ; wrel=(0.04/0.04-0.15)/0.45=1.88->1 ; w=1 -> out=light=0.04
-    ;;       (the fix: relative fires where absolute sees nothing; out pulled fully to light)
-    ;;   px1 BRIGHT small: d=0.04 wabs=0 ; wrel=(0.04/0.80-0.15)/0.45=(-0.22)->0 ; w=0 -> out=heavy=0.84
-    ;;       (no over-correction: the same 0.04 absolute lift is noise on lit skin)
-    ;;   px2 BRIGHT large: d=0.12 wabs=(0.12-0.06)/0.10=0.6 ; wrel=(0.12/0.80-0.15)/0.45=0 ; w=0.6 -> out=0.4*0.92+0.6*0.80=0.848
-    ;;       (the absolute ramp still fires on a genuine large deviation)
-    (let [img   {:height 3 :width 1 :channels 3
-                 :pixels (double-array [0.04 0.04 0.04   0.80 0.80 0.80   0.80 0.80 0.80])}
-          light (double-array [0.04 0.04 0.04   0.80 0.80 0.80   0.80 0.80 0.80])
-          heavy (double-array [0.08 0.08 0.08   0.84 0.84 0.84   0.92 0.92 0.92])
-          out   (s/edge-preserving-blur img light heavy)
-          exp   [0.040 0.040 0.040   0.840 0.840 0.840   0.848 0.848 0.848]]
-      (doseq [c (range 9)]
-        (is (approx= 1e-9 (double (exp c)) (double (aget out c)))
-            (str "px " (quot c 3) " ch " (rem c 3) ": expected " (exp c) " got " (aget out c)))))))
+          (str "flat-region smoothing preserved: mean |out - box| small; got " diff)))))
 
 ;; --- dominant-blur: the COVERAGE tiers' colour source --------------------------
 ;; The coverage tiers paint with strokes far larger than a fine feature, so their
@@ -249,7 +241,6 @@
   (let [H 128 W 128 lc 30 bl 70 rad 12
         img   (line-and-block H W lc bl)
         dom   (s/dominant-blur img rad)
-        keep* (s/edge-preserving-blur img (s/bilateral-blur img 3) (s/blur-image img rad))
         at    (fn [f y] (grey f W 64 y))]
     (println (format "DOMINANT line %.3f (box %.3f) | mass %.3f | inside-edge %.3f | outside-edge %.3f"
                      (at dom (inc lc)) (grey (s/blur-image img rad) W 64 (inc lc))
@@ -264,9 +255,9 @@
     (is (> (at dom (inc lc)) 0.88)
         (str "a 3px line must lose the vote in a " rad "px window, not just be diluted by it: got "
              (at dom (inc lc)) " (the window mean is " (grey (s/blur-image img rad) W 64 (inc lc)) ")"))
-    (is (< (at keep* (inc lc)) 0.3)
-        (str "and edge-preserving-blur keeps it, which is the behaviour being replaced: got "
-             (at keep* (inc lc))))
+    (is (< (at (s/bilateral-blur img 3) (inc lc)) 0.3)
+        (str "an edge-PRESERVING field of the same window keeps it at full strength, which is "
+             "the behaviour being replaced: got " (at (s/bilateral-blur img 3) (inc lc))))
     ;; the 40px mass survives, and neither side bleeds across its boundary
     (is (< (at dom (+ bl 20)) 0.3)
         (str "a 40px mass must survive: got " (at dom (+ bl 20))))

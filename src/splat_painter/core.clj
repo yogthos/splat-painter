@@ -22,8 +22,6 @@
             [splat-painter.image     :as image]
             [splat-painter.fields    :as fields]
             [splat-painter.seed      :as seed]
-            [splat-painter.structure :as structure]
-            [splat-painter.wavelet   :as wavelet]
             [splat-painter.png       :as png]
             [jolt.ffi       :as ffi]))
 

@@ -160,41 +160,6 @@
   [arr H W radius]
   (box-blur-2d arr H W radius))
 
-(defn edge-preserving-blur
-  "Blend the HEAVY blur back toward the LIGHT blur where it deviates from the raw
-   pixel. A box blur bleeds colour straight across strong boundaries, so broad
-   strokes near a silhouette paint halo colours (the average of both sides); where
-   heavy strays from the image side it is on, the smooth field must follow the
-   light field. The deviation is tested BOTH absolutely AND relatively, taking the
-   larger weight:
-     wabs = clamp((d − 0.06) / 0.10, 0, 1)            ; large on bright regions
-     wrel = clamp((d / max(lv,0.02) − 0.15) / 0.45, 0, 1)  ; ...and on dark ones
-   The same ~0.04 lift is noise on lit skin but +300% on a near-black background,
-   so the ABSOLUTE ramp alone never fired in dark halos (82.6% sat below its 0.06
-   start) and the subject bled across the silhouette. Flat regions keep the full
-   heavy smoothing: there heavy agrees with raw both ways, so both tests read ~0
-   and the blend is a no-op (heavy≈light there anyway) — bokeh stays seamless."
-  [image ^doubles light ^doubles heavy]
-  (let [n (* (long (:height image)) (long (:width image)))
-        ^doubles raw (:pixels image)
-        out (double-array (* n 3))]
-    (dotimes [i n]
-      (let [b (* 3 i)
-            hr (aget heavy b) hg (aget heavy (inc b)) hb (aget heavy (+ b 2))
-            rr (aget raw b)   rg (aget raw (inc b))   rb (aget raw (+ b 2))
-            d (max (Math/abs (- hr rr))
-                   (Math/abs (- hg rg))
-                   (Math/abs (- hb rb)))
-            wabs (min 1.0 (max 0.0 (/ (- d 0.06) 0.10)))
-            lv (max rr (max rg rb))
-            wrel (min 1.0 (max 0.0 (/ (- (/ d (max lv 0.02)) 0.15) 0.45)))
-            w (max wabs wrel)
-            iw (- 1.0 w)]
-        (aset out b       (+ (* iw hr) (* w (aget light b))))
-        (aset out (+ b 1) (+ (* iw hg) (* w (aget light (inc b)))))
-        (aset out (+ b 2) (+ (* iw hb) (* w (aget light (+ b 2)))))))
-    out))
-
 (defn bilateral-blur
   "EDGE-AWARE smooth colour field: a box window averaged with RANGE weights —
    each neighbour weighted by how close its raw luma is to the centre pixel's,
@@ -448,8 +413,8 @@
   "Full pipeline: (downsample →) gradient-field → structure-tensor (radius 2).
    The tensor is computed at ≤`max-side` (default 384) — a coarse orientation
    field is enough to steer splats and cuts the one-time cost sharply. Returns
-   {:h Ht :w Wt :jxx :jyy :jxy :gmax :src-h H :src-w W}; orient-at maps
-   full-image coords into the tensor grid via :src-h/:src-w."
+   {:h Ht :w Wt :jxx :jyy :jxy :gmax :src-h H :src-w W}; callers index
+   :theta/:coherence directly, mapping via :src-h/:src-w."
   ([image] (analyze image 768))
   ([image max-side]
    (let [H (:height image) W (:width image)
@@ -477,7 +442,7 @@
          ^doubles fjxy (box-blur-2d jxy Ht Wt fr)
          ;; PRECOMPUTE the per-cell eigen fields once (theta/coherence/energy for the
          ;; sharp tensor, theta/strength for the diffused flow) as flat arrays, so
-         ;; orient-at and seed.clj's direct :flow-theta / :flow-str reads are cheap
+         ;; seed.clj's direct :theta / :coherence / :flow-* reads are cheap
          ;; samples in the hot per-splat loop, not per-splat atan2+sqrt.
          theta-a (double-array n) coh-a (double-array n) grad-a (double-array n)
          fth-a (double-array n) fstr-a (double-array n)]
@@ -489,26 +454,3 @@
      (assoc sfield :gmax gmax :src-h H :src-w W
             :theta theta-a :coherence coh-a :grad2 grad-a
             :flow-theta fth-a :flow-str fstr-a))))
-
-(defn- grid-idx [sfield x y]
-  (let [H (:h sfield) W (:w sfield)
-        src-h (long (or (:src-h sfield) H)) src-w (long (or (:src-w sfield) W))
-        xi (clamp (round-int (* (double x) (/ (double H) src-h))) 0 (dec H))
-        yi (clamp (round-int (* (double y) (/ (double W) src-w))) 0 (dec W))]
-    (+ (* xi W) yi)))
-
-;; ---------------------------------------------------------------------------
-;; orient-at
-;; ---------------------------------------------------------------------------
-
-(defn orient-at
-  "Sample the structure tensor at (x,y) — given in full-image (:src-h × :src-w)
-   coords, mapped into the coarse tensor grid — and return
-   {:theta θ :coherence c :grad2 g}.
-   - θ = stroke (minor-eigenvector) angle in radians
-   - c = coherence ∈ [0,1] (how directional the edge is)
-   - g = jxx+jyy at the pixel (gradient energy)"
-  [sfield x y]
-  (let [idx (grid-idx sfield x y)
-        ^doubles theta (:theta sfield) ^doubles coh (:coherence sfield) ^doubles grad (:grad2 sfield)]
-    {:theta (aget theta idx) :coherence (aget coh idx) :grad2 (aget grad idx)}))

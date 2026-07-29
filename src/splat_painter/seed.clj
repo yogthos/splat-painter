@@ -195,18 +195,6 @@
             (* (nth muls 1) (nth muls 2))
             (nth muls 2))))
 
-(def ^:private dab-max
-  "Physical stdev (px) below which a level paints DABS instead of tracing chains.
-   A dab has no path, so it cannot wander or dry out — the only sane mark below the
-   scale at which the orientation field (a ~7px tensor average) carries usable
-   direction. Set to 1.2 so the DETAIL tier TRACES feature-following strokes rather
-   than dabbing: the feature-tracer (below) terminates on geometry, not on the
-   colour-drift guard that used to lift sub-dab-max chains into short dashes. The
-   min-paintable floor (min-phys 2.2) already keeps every emitted stroke above this,
-   so in practice nothing dabs today — the machinery stays for genuinely
-   sub-paintable levels if that floor is ever lowered."
-  1.2)
-
 ;; --- feature-following tracer tunables (mirror the GLSL literals in gen.clj) ---
 ;; Stroke length is guided by the FEATURE, not a count: a trace stops where the ridge
 ;; dies or the tangent bends (a corner). These are the geometric/colour thresholds.
@@ -264,34 +252,20 @@
 (def ^:private bend-cos 0.90)      ; bend-break: |dot(field-dir, prev-step)| below this (~26°/step) is a corner
 (def ^:private runaway 0.60)       ; chroma BACKSTOP only: the stroke has wandered into a foreign colour region
 
-(def ^:private dab-overlap
-  "Dab spacing as a multiple of the stroke stdev. A gaussian reads out to ~2σ, so at
-   2σ spacing about three dabs meet at any point — sparse enough that each mark stands
-   on its own, dense enough to cover. The chain spacing formula (1.25·√segs) collapses
-   to ~1.25σ for a 1-segment mark and packs them ~12 deep, which is mush."
-  2.0)
-
-(defn- dab-level?
-  "Does this level paint dabs rather than tracing chains? Only the DETAIL tiers
-   (lvl>=2) ever dab. Levels 0-1 are the COVERAGE tiers by role, not by size: their
-   job is an unbroken underpainting, and dab spacing (2σ) would thin level 1's grid
-   ~3x and open gaps in it."
-  [lvl ssz]
-  (and (>= (long lvl) 2) (< (double ssz) dab-max)))
-
 (defn- level-alpha
   "Paint translucency by PHYSICAL stroke size — progressive refinement: broad layers
    are opaque coverage, mid layers glaze so detail builds on the underpainting rather
-   than scratching over it. DABS are near-opaque on purpose: at 1-2px they are placed
-   sparsely (see dab-overlap) so each mark must STAND ON ITS OWN. Glaze alpha there
-   just averages neighbours into mush — the exact failure that made fine detail soft."
+   than scratching over it.
+
+   There used to be a third, near-opaque arm below dab-max (1.2) for the DAB tier.
+   min-phys floors every emitted stroke at 1.4, so it was unreachable by construction
+   — and the GLSL twin had drifted to keying it at 2.5, which DID reach: every fine
+   stroke between 1.4 and 2.5 painted at 0.95 on the GPU against 0.85 on the CPU
+   (splat-painter-b1d). Two arms, one threshold, both paths agreeing."
   [lvl ssz]
   (if (<= (long lvl) 1)
     1.0                          ; coverage tiers always fully opaque, by role
-    (let [v (double ssz)]
-      (cond (>= v 8.0) 1.0
-            (>= v dab-max) 0.85
-            :else 0.95))))
+    (if (>= (double ssz) 8.0) 1.0 0.85)))
 
 (defn- level-map-kind
   "Which placement map a level reads, matched to the scale it paints — keyed on
@@ -682,20 +656,6 @@
         ;; identical segs/stepf/ovl/sp from the same ssz. ldisc? is the PHYSICAL liner
         ;; predicate (liner-scale?): chain length keys on stdev, not the level index.
         phys-spec (fn [lvl ssz]
-                    (if (dab-level? lvl ssz)
-                      ;; DAB TIER. Below dab-max the orientation field has no
-                      ;; information at the stroke's own scale, so a traced chain
-                      ;; wanders (waviness) and its colour-drift guard lifts it after
-                      ;; 2-4 segments (short disjointed dashes). A single oriented dab
-                      ;; has no path: it cannot wander and cannot dry out.
-                      ;; Spacing is dab-overlap·σ, NOT the chain form. The chain
-                      ;; spacing carries a √segs factor that, applied to a 1-segment
-                      ;; mark, packs dabs ~1σ apart — ~12 gaussians overlapping every
-                      ;; point, which averages them into mush (measured: that is why
-                      ;; the first dab experiment went soft). At 2σ spacing roughly
-                      ;; three dabs meet at a point, so each mark still reads as its
-                      ;; own stroke while coverage stays continuous.
-                      {:segs 1 :stepf 0.0 :sp (* dab-overlap ssz)}
                       (let [ldisc? (liner-scale? lvl ssz)
                           detail? (>= (long lvl) 2)
                           ;; FEATURE TRACER (supersedes Round 5a): detail tiers run to
@@ -718,7 +678,7 @@
                           sp (if (<= (long lvl) 1)
                                (* ovl (scale-of lvl) bmin (lsize lvl))
                                (* ovl ssz))]
-                        {:segs segs :stepf stepf :sp sp})))
+                        {:segs segs :stepf stepf :sp sp}))
         ;; ADMISSION coarse→fine: keep a level only if it is meaningfully finer than the
         ;; previous (keep-ratio) AND the budget affords its clamped survivor demand. The
         ;; physical ssz is clamped to step-ratio×prev so the ladder is strictly monotone,
@@ -1310,190 +1270,188 @@
                           ;; hash here lays the points on Marsaglia lines), in-bounds
                           cx (* (double H) (poshash i lvl 29))
                           cy (* (double W) (poshash i lvl 31))]
-                      (if false
-                        (recur (inc j) acc)
-                        (let [;; wavelet subjectness (LOCAL-relative): gates mid/fine
-                              ;; placement — splat size follows the wavelet's local
-                              ;; detail density, so dark low-contrast texture still
-                              ;; receives strokes.
-                              sgate (subject-at dmap cx cy rr)
-                              ;; ABSOLUTE subjectness: drives the bokeh-adaptive broad
-                              ;; tier. The local-relative gate saturates to 1 on smooth
-                              ;; bokeh (its normalization amplifies sensor noise), which
-                              ;; made Broad growth/thinning/melt inert exactly where
-                              ;; they exist to act.
-                              sabs  (wavelet/subject-abs-at dmap cx cy)
-                              ;; the Broad growth is gated by the whole GROWN FOOTPRINT,
-                              ;; not just the centre: a daub centred 25px out in the bokeh
-                              ;; reads flat there, grows ×2.5, and its body reaches back
-                              ;; across the silhouette — a wash veil over the subject's rim
-                              ;; that gets worse the higher Broad goes. The subject map is
-                              ;; wide (box-blurred), so 8 sparse taps at the grown radius
-                              ;; can't miss a nearby subject the way thin edge-band taps do.
-                              sfoot (if (and (<= (long lvl) 1) (> bmul 1.0))
-                                      (let [m0 (+ 1.0 (* (- bmul 1.0) (- 1.0 sabs)))
-                                            d  (* 1.2 ssz m0)
-                                            dd (* 0.7071 d)
-                                            sa (fn [x y] (wavelet/subject-abs-at dmap x y))]
-                                        (max sabs
-                                             (sa (+ cx d) cy) (sa (- cx d) cy)
-                                             (sa cx (+ cy d)) (sa cx (- cy d))
-                                             (sa (+ cx dd) (+ cy dd)) (sa (- cx dd) (- cy dd))
-                                             (sa (+ cx dd) (- cy dd)) (sa (- cx dd) (+ cy dd))))
-                                      sabs)
-                              mloc  (+ 1.0 (* (- bmul 1.0) (- 1.0 sfoot)))
-                              ;; broad tier: flat regions thin candidates by (bmin/m)² as
-                              ;; the kept seeds grow ×m — few LARGE daubs = smooth bokeh;
-                              ;; at full subjectness m=1 and the Broad dial has no effect.
-                              thin? (and (<= (long lvl) 1)
-                                         (let [pr (/ bmin mloc)]
-                                           (>= (hash01 (+ (* i 61) lvl) j 43) (* pr pr))))
-                              ;; mid/fine strokes belong where the wavelets see detail:
-                              ;; their map value is gated by subjectness so flat bokeh
-                              ;; keeps only the big smooth daubs. The ABSOLUTE gate
-                              ;; rides the Broad slider: past 1.0 it thins mid/fine
-                              ;; marks out of truly flat regions (isolated dark flecks
-                              ;; on a melted wash), leaving them at Broad ≤ 1 where
-                              ;; visible strokes are the wanted effect.
-                              ;; SQUARED: the linear form bottomed out around 0.55 — never
-                              ;; enough to actually stop accents whose locally-normalized
-                              ;; maps light up on bokeh noise. Squaring lets the gate reach
-                              ;; blocking strength as Broad rises while staying exactly 1 at
-                              ;; Broad ≤ 1. It also gates LEVEL 1 now: the level-1 chains
-                              ;; were the fibrous filament texture covering empty regions.
-                              bgate (let [g (- 1.0 (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
-                                                      (- 1.0 (min 1.0 (/ sabs 0.35)))))]
-                                      (* g g))
-                              gain  (cond (>= (long lvl) 2) (* (+ 0.25 (* 0.75 sgate)) bgate)
-                                          (== (long lvl) 1) bgate
-                                          :else 1.0)
-                              ;; each level reads the map matched to ITS scale: the finest
-                              ;; levels use the sharp fine-band map so they land on (and
-                              ;; preserve) small structure the smoothed aggregate blurs away.
-                              ;; The cutoff is DITHERED ±25% per seed — a hard threshold on
-                              ;; a map oscillating around it dashes contours into beads.
-                              dv (map-at dmap map-kind cx cy)
-                              thd (* th (+ 0.75 (* 0.5 (hash01 (+ (* i 43) lvl) j 19))))
-                              ;; SUBDIVISION (broad/mid tiers only): skip if the next-finer
-                              ;; level (previous entry — levels are finest-first) claims
-                              ;; this cell, dithered like the threshold so the handoff
-                              ;; interleaves. From level 3 up there is NO claim — the fine
-                              ;; glazes overlap the mid strokes and mix instead of
-                              ;; replacing them.
-                              claimed? (and (pos? (long lvl)) (<= (long lvl) 2) (pos? (long idx))
-                                            (let [fl (nth levels (dec (long idx)))]
-                                              ;; the EDGE-BAND tier is NOT a rung of the
-                                              ;; ladder — it overlays it — so it never
-                                              ;; claims a cell away from the level below.
-                                              (and (not (:band fl))
-                                                   ;; the finer level is always ≥2, so its
-                                                   ;; claim carries the same subject gate
-                                                   (let [fdv (* (map-at dmap (:map-kind fl) cx cy)
-                                                                (+ 0.25 (* 0.75 sgate)) bgate)]
-                                                     (>= fdv (* (:th fl)
-                                                                (+ 0.75 (* 0.5 (hash01 (+ (* i 47) lvl) j 23)))))))))]
-                          (if (or thin?
-                                  (and (pos? (long lvl)) (or claimed? (< (* dv gain) thd))))
-                            (recur (inc j) acc)      ; thinned bokeh / not detailed enough
-                            (let [;; bokeh-adaptive broad size: kept flat-region daubs grow ×m
-                              ssz (if (<= (long lvl) 1) (* ssz mloc) ssz)
-                              ;; hashed positions need no jitter — they ARE the noise
-                              x  cx y cy
-                              D  (deff dv)
-                              ;; flat-region warp breaks any residual level lattice;
-                              ;; detail strokes (D≈1) stay put → faithful edges. The liner
-                              ;; tier gets NO warp at all — fine seeds must land exactly on
-                              ;; the detail they trace (see bend-frac). Swirl picks the
-                              ;; displacement's spatial coherence (warp-noise): Perlin at 1,
-                              ;; the seed's own hash at 0 — same amplitude either way.
-                              aw (if (liner-scale? lvl ssz) 0.0 (* warp (- 1.0 D) ssz))
-                              x2 (if (< aw 0.2) x
-                                   (+ x (* aw (warp-noise swirl i lvl 61
-                                                          (* 0.06 x) (* 0.06 y)))))
-                              y2 (if (< aw 0.2) y
-                                   (+ y (* aw (warp-noise swirl i lvl 67
-                                                          (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))
-                              sn0 (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
-                              ;; MELT: how much a flat-region broad stroke should sink into
-                              ;; the wash. Grows only past Broad 1.0 (below that, strokes
-                              ;; are the wanted effect) and only where FOOTPRINT subjectness
-                              ;; is low: strokes touching a subject keep their identity.
-                              melt (if (<= (long lvl) 1)
-                                     (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
-                                        (- 1.0 sfoot))
-                                     0.0)
-                              ;; size jitter applies at SEED level to the whole chain —
-                              ;; segment size AND step together — so chains stay
-                              ;; self-overlapping at any Variation (per-segment size
-                              ;; jitter with a fixed step beaded strokes into dotted
-                              ;; pearls). Broad levels keep 40% (base coverage), muted
-                              ;; further by melt — a wash has no per-stroke identity.
-                              ;; the shrink side is CLAMPED at 0.75: strokes jittered far
-                              ;; below their level's size land at the bottom of the
-                              ;; hardness ramp and render as isolated hard pearls along
-                              ;; edges — variety comes from growing, not vanishing.
-                              szf (max 0.75 (+ 1.0 (* variation sn0
-                                                      (if (<= (long lvl) 1) (* 0.4 (- 1.0 melt)) 1.0))))
-                              ;; near a strong edge the mid fill levels don't paint (their
-                              ;; boundary-band chains ribbon mixed colour along silhouettes
-                              ;; as a ghost veil) and base daubs SHRINK so their soft tails
-                              ;; can't reach across the silhouette. Sensed over the stroke's
-                              ;; FOOTPRINT (taps at 0.75·size), not just its centre.
-                              Ev (if (<= (long lvl) 3)
-                                   (edge-near dmap cx cy (* 0.75 ssz))
-                                   (wavelet/edge-at dmap cx cy))
-                              ;; the chain's FINAL stdev: seed jitter × the σ-aware
-                              ;; near-edge shrink (small strokes keep the gentle old
-                              ;; coefficients — base coverage still reaches the boundary —
-                              ;; but past ~8px a daub centred on a thin bright feature
-                              ;; shrinks toward the feature scale instead of ghosting
-                              ;; its colour across the silhouette, capped 0.7).
-                              cssz (* ssz szf (- 1.0 (* (min 0.7
-                                                             (* (cond (zero? (long lvl)) 0.25
-                                                                      (<= (long lvl) 3) 0.45
-                                                                      :else 0.1)
-                                                                (max 1.0 (/ (* ssz szf) 8.0))))
-                                                        Ev)))
-                              ;; tone jitter follows the PHYSICAL stroke scale, not the
-                              ;; level index: broad fills keep 25% (melt-muted), and any
-                              ;; small mark keeps 15% regardless of which level painted it
-                              ;; — which level is "fine" depends on the sliders, and full
-                              ;; jitter on small strokes beads contours into speckle.
-                              tn (* (let [l (long lvl)]
-                                      (cond (<= l 1) (* 0.25 (- 1.0 melt))
-                                            (>= l 4) 0.15
-                                            :else (+ 0.15 (* 0.85 (min 1.0 (max 0.0 (/ (- cssz 2.5) 2.5)))))))
-                                    (- (hash01 (+ (* i 37) lvl) j 13) 0.5))
-                              ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
-                              ;; keep centres in-bounds so no budget is wasted off-screen
-                              ;; (edges stay covered by the splats' tails).
-                              emitted (if (and (or (== (long lvl) 1) (== (long lvl) 2))
-                                               (> Ev 0.45)
-                                               ;; dithered — a few mid strokes still fill
-                                               ;; the edge band so fine contour strokes sit
-                                               ;; IN paint, but level 1's chains are OPAQUE
-                                               ;; heavy-blur ribbons, so they suppress at
-                                               ;; 90% vs level 2's 75%. Level 3 stays: it
-                                               ;; carries text/eye-scale features; near
-                                               ;; edges it shrinks hard (below) instead.
-                                               (< (hash01 (+ (* i 53) lvl) j 37)
-                                                  (if (== (long lvl) 1) 0.9 0.75)))
-                                        []
-                                        (let [[rows reason] (stroke-segments nf dmap lvl
-                                                         (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
-                                                         cssz
-                                                         D 0.0 tn ds curvature stroke hd wd
-                                                         segs stepf bendf
-                                                         (if (<= (long lvl) 1) 1.0 0.0)
-                                                           ;; fine colour rawness follows the LOCAL FINE-DETAIL
-                                                           ;; DENSITY (:sharp) — in a crowded region a single
-                                                           ;; raw sample is unreliable, so trust the region more
-                                                           (density-scaled-traw lvl traw (wavelet/sharp-at dmap cx cy))
-                                                         sgate blur-px iw ih th melt
-                                                         map-kind gain blurd-px (hash01 (+ (* i 67) lvl) j 53)
-                                                         (double sideo) (double selong))]
-                                          (stub-glaze lvl reason rows)))]
-                          (recur (inc j) (reduce conj! acc emitted)))))))))))))
+                    (let [;; wavelet subjectness (LOCAL-relative): gates mid/fine
+                            ;; placement — splat size follows the wavelet's local
+                            ;; detail density, so dark low-contrast texture still
+                            ;; receives strokes.
+                            sgate (subject-at dmap cx cy rr)
+                            ;; ABSOLUTE subjectness: drives the bokeh-adaptive broad
+                            ;; tier. The local-relative gate saturates to 1 on smooth
+                            ;; bokeh (its normalization amplifies sensor noise), which
+                            ;; made Broad growth/thinning/melt inert exactly where
+                            ;; they exist to act.
+                            sabs  (wavelet/subject-abs-at dmap cx cy)
+                            ;; the Broad growth is gated by the whole GROWN FOOTPRINT,
+                            ;; not just the centre: a daub centred 25px out in the bokeh
+                            ;; reads flat there, grows ×2.5, and its body reaches back
+                            ;; across the silhouette — a wash veil over the subject's rim
+                            ;; that gets worse the higher Broad goes. The subject map is
+                            ;; wide (box-blurred), so 8 sparse taps at the grown radius
+                            ;; can't miss a nearby subject the way thin edge-band taps do.
+                            sfoot (if (and (<= (long lvl) 1) (> bmul 1.0))
+                                    (let [m0 (+ 1.0 (* (- bmul 1.0) (- 1.0 sabs)))
+                                          d  (* 1.2 ssz m0)
+                                          dd (* 0.7071 d)
+                                          sa (fn [x y] (wavelet/subject-abs-at dmap x y))]
+                                      (max sabs
+                                           (sa (+ cx d) cy) (sa (- cx d) cy)
+                                           (sa cx (+ cy d)) (sa cx (- cy d))
+                                           (sa (+ cx dd) (+ cy dd)) (sa (- cx dd) (- cy dd))
+                                           (sa (+ cx dd) (- cy dd)) (sa (- cx dd) (+ cy dd))))
+                                    sabs)
+                            mloc  (+ 1.0 (* (- bmul 1.0) (- 1.0 sfoot)))
+                            ;; broad tier: flat regions thin candidates by (bmin/m)² as
+                            ;; the kept seeds grow ×m — few LARGE daubs = smooth bokeh;
+                            ;; at full subjectness m=1 and the Broad dial has no effect.
+                            thin? (and (<= (long lvl) 1)
+                                       (let [pr (/ bmin mloc)]
+                                         (>= (hash01 (+ (* i 61) lvl) j 43) (* pr pr))))
+                            ;; mid/fine strokes belong where the wavelets see detail:
+                            ;; their map value is gated by subjectness so flat bokeh
+                            ;; keeps only the big smooth daubs. The ABSOLUTE gate
+                            ;; rides the Broad slider: past 1.0 it thins mid/fine
+                            ;; marks out of truly flat regions (isolated dark flecks
+                            ;; on a melted wash), leaving them at Broad ≤ 1 where
+                            ;; visible strokes are the wanted effect.
+                            ;; SQUARED: the linear form bottomed out around 0.55 — never
+                            ;; enough to actually stop accents whose locally-normalized
+                            ;; maps light up on bokeh noise. Squaring lets the gate reach
+                            ;; blocking strength as Broad rises while staying exactly 1 at
+                            ;; Broad ≤ 1. It also gates LEVEL 1 now: the level-1 chains
+                            ;; were the fibrous filament texture covering empty regions.
+                            bgate (let [g (- 1.0 (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
+                                                    (- 1.0 (min 1.0 (/ sabs 0.35)))))]
+                                    (* g g))
+                            gain  (cond (>= (long lvl) 2) (* (+ 0.25 (* 0.75 sgate)) bgate)
+                                        (== (long lvl) 1) bgate
+                                        :else 1.0)
+                            ;; each level reads the map matched to ITS scale: the finest
+                            ;; levels use the sharp fine-band map so they land on (and
+                            ;; preserve) small structure the smoothed aggregate blurs away.
+                            ;; The cutoff is DITHERED ±25% per seed — a hard threshold on
+                            ;; a map oscillating around it dashes contours into beads.
+                            dv (map-at dmap map-kind cx cy)
+                            thd (* th (+ 0.75 (* 0.5 (hash01 (+ (* i 43) lvl) j 19))))
+                            ;; SUBDIVISION (broad/mid tiers only): skip if the next-finer
+                            ;; level (previous entry — levels are finest-first) claims
+                            ;; this cell, dithered like the threshold so the handoff
+                            ;; interleaves. From level 3 up there is NO claim — the fine
+                            ;; glazes overlap the mid strokes and mix instead of
+                            ;; replacing them.
+                            claimed? (and (pos? (long lvl)) (<= (long lvl) 2) (pos? (long idx))
+                                          (let [fl (nth levels (dec (long idx)))]
+                                            ;; the EDGE-BAND tier is NOT a rung of the
+                                            ;; ladder — it overlays it — so it never
+                                            ;; claims a cell away from the level below.
+                                            (and (not (:band fl))
+                                                 ;; the finer level is always ≥2, so its
+                                                 ;; claim carries the same subject gate
+                                                 (let [fdv (* (map-at dmap (:map-kind fl) cx cy)
+                                                              (+ 0.25 (* 0.75 sgate)) bgate)]
+                                                   (>= fdv (* (:th fl)
+                                                              (+ 0.75 (* 0.5 (hash01 (+ (* i 47) lvl) j 23)))))))))]
+                        (if (or thin?
+                                (and (pos? (long lvl)) (or claimed? (< (* dv gain) thd))))
+                          (recur (inc j) acc)      ; thinned bokeh / not detailed enough
+                          (let [;; bokeh-adaptive broad size: kept flat-region daubs grow ×m
+                            ssz (if (<= (long lvl) 1) (* ssz mloc) ssz)
+                            ;; hashed positions need no jitter — they ARE the noise
+                            x  cx y cy
+                            D  (deff dv)
+                            ;; flat-region warp breaks any residual level lattice;
+                            ;; detail strokes (D≈1) stay put → faithful edges. The liner
+                            ;; tier gets NO warp at all — fine seeds must land exactly on
+                            ;; the detail they trace (see bend-frac). Swirl picks the
+                            ;; displacement's spatial coherence (warp-noise): Perlin at 1,
+                            ;; the seed's own hash at 0 — same amplitude either way.
+                            aw (if (liner-scale? lvl ssz) 0.0 (* warp (- 1.0 D) ssz))
+                            x2 (if (< aw 0.2) x
+                                 (+ x (* aw (warp-noise swirl i lvl 61
+                                                        (* 0.06 x) (* 0.06 y)))))
+                            y2 (if (< aw 0.2) y
+                                 (+ y (* aw (warp-noise swirl i lvl 67
+                                                        (+ 41.3 (* 0.06 x)) (+ 17.9 (* 0.06 y))))))
+                            sn0 (- (hash01 (+ (* i 31) lvl) j 11) 0.5)
+                            ;; MELT: how much a flat-region broad stroke should sink into
+                            ;; the wash. Grows only past Broad 1.0 (below that, strokes
+                            ;; are the wanted effect) and only where FOOTPRINT subjectness
+                            ;; is low: strokes touching a subject keep their identity.
+                            melt (if (<= (long lvl) 1)
+                                   (* (min 1.0 (max 0.0 (/ (- bmul 1.0) 1.5)))
+                                      (- 1.0 sfoot))
+                                   0.0)
+                            ;; size jitter applies at SEED level to the whole chain —
+                            ;; segment size AND step together — so chains stay
+                            ;; self-overlapping at any Variation (per-segment size
+                            ;; jitter with a fixed step beaded strokes into dotted
+                            ;; pearls). Broad levels keep 40% (base coverage), muted
+                            ;; further by melt — a wash has no per-stroke identity.
+                            ;; the shrink side is CLAMPED at 0.75: strokes jittered far
+                            ;; below their level's size land at the bottom of the
+                            ;; hardness ramp and render as isolated hard pearls along
+                            ;; edges — variety comes from growing, not vanishing.
+                            szf (max 0.75 (+ 1.0 (* variation sn0
+                                                    (if (<= (long lvl) 1) (* 0.4 (- 1.0 melt)) 1.0))))
+                            ;; near a strong edge the mid fill levels don't paint (their
+                            ;; boundary-band chains ribbon mixed colour along silhouettes
+                            ;; as a ghost veil) and base daubs SHRINK so their soft tails
+                            ;; can't reach across the silhouette. Sensed over the stroke's
+                            ;; FOOTPRINT (taps at 0.75·size), not just its centre.
+                            Ev (if (<= (long lvl) 3)
+                                 (edge-near dmap cx cy (* 0.75 ssz))
+                                 (wavelet/edge-at dmap cx cy))
+                            ;; the chain's FINAL stdev: seed jitter × the σ-aware
+                            ;; near-edge shrink (small strokes keep the gentle old
+                            ;; coefficients — base coverage still reaches the boundary —
+                            ;; but past ~8px a daub centred on a thin bright feature
+                            ;; shrinks toward the feature scale instead of ghosting
+                            ;; its colour across the silhouette, capped 0.7).
+                            cssz (* ssz szf (- 1.0 (* (min 0.7
+                                                           (* (cond (zero? (long lvl)) 0.25
+                                                                    (<= (long lvl) 3) 0.45
+                                                                    :else 0.1)
+                                                              (max 1.0 (/ (* ssz szf) 8.0))))
+                                                      Ev)))
+                            ;; tone jitter follows the PHYSICAL stroke scale, not the
+                            ;; level index: broad fills keep 25% (melt-muted), and any
+                            ;; small mark keeps 15% regardless of which level painted it
+                            ;; — which level is "fine" depends on the sliders, and full
+                            ;; jitter on small strokes beads contours into speckle.
+                            tn (* (let [l (long lvl)]
+                                    (cond (<= l 1) (* 0.25 (- 1.0 melt))
+                                          (>= l 4) 0.15
+                                          :else (+ 0.15 (* 0.85 (min 1.0 (max 0.0 (/ (- cssz 2.5) 2.5)))))))
+                                  (- (hash01 (+ (* i 37) lvl) j 13) 0.5))
+                            ds (if (< (hash01 (+ (* i 41) lvl) j 17) 0.5) 1.0 -1.0)
+                            ;; keep centres in-bounds so no budget is wasted off-screen
+                            ;; (edges stay covered by the splats' tails).
+                            emitted (if (and (or (== (long lvl) 1) (== (long lvl) 2))
+                                             (> Ev 0.45)
+                                             ;; dithered — a few mid strokes still fill
+                                             ;; the edge band so fine contour strokes sit
+                                             ;; IN paint, but level 1's chains are OPAQUE
+                                             ;; heavy-blur ribbons, so they suppress at
+                                             ;; 90% vs level 2's 75%. Level 3 stays: it
+                                             ;; carries text/eye-scale features; near
+                                             ;; edges it shrinks hard (below) instead.
+                                             (< (hash01 (+ (* i 53) lvl) j 37)
+                                                (if (== (long lvl) 1) 0.9 0.75)))
+                                      []
+                                      (let [[rows reason] (stroke-segments nf dmap lvl
+                                                       (max 0.0 (min hd x2)) (max 0.0 (min wd y2))
+                                                       cssz
+                                                       D 0.0 tn ds curvature stroke hd wd
+                                                       segs stepf bendf
+                                                       (if (<= (long lvl) 1) 1.0 0.0)
+                                                         ;; fine colour rawness follows the LOCAL FINE-DETAIL
+                                                         ;; DENSITY (:sharp) — in a crowded region a single
+                                                         ;; raw sample is unreliable, so trust the region more
+                                                         (density-scaled-traw lvl traw (wavelet/sharp-at dmap cx cy))
+                                                       sgate blur-px iw ih th melt
+                                                       map-kind gain blurd-px (hash01 (+ (* i 67) lvl) j 53)
+                                                       (double sideo) (double selong))]
+                                        (stub-glaze lvl reason rows)))]
+                        (recur (inc j) (reduce conj! acc emitted))))))))))))
         (transient [])
         (map-indexed vector levels)))))
 

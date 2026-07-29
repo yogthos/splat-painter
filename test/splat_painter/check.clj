@@ -159,7 +159,7 @@
     ;; the brush-stroke trace (mirror of seed/stroke-segments)
     (assert-contains gs-src "layout(points, max_vertices = 32) out;" "gen GS emits stroke chains (32 liner segments)")
     (assert-contains gs-src "float sz = ssz2 * (1.0 - 0.45 * tt * sqrt(tt)) * hw;" "both-ends stroke width taper (seed-jittered size)")
-    (assert-contains gs-src "float lal = (band || lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;" "per-physical-size glaze alpha; band tier opaque by role")
+    (assert-contains gs-src "float lal = (band || lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : 0.85;" "per-physical-size glaze alpha; band tier opaque by role")
     (assert-contains gs-src "float soff = band ? u_sideo[k] * (0.6 + 2.55 * bph * bph) : u_sideo[k];" "band push distribution crowds the near zone (squared jitter)")
     (assert-contains gs-src "float traw = (lvl <= 1) ? 0.0 : (ssz2 < 1.5) ? 0.85 : (ssz2 < 3.5) ? 0.7 : (ssz2 < 8.0) ? 0.45 : 0.0;" "per-physical-size raw floor")
     (assert-contains gs-src "if (lvl >= 2) traw *= 1.0 - 0.7 * sharpAt(cx, cy);" "density-scaled traw: trust region colour where fine detail crowds")
