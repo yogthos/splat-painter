@@ -574,13 +574,15 @@ void main(){
   // accumulated underpainting) instead of overwriting it; the overlapping fine
   // tier glazes lightest so stacked strokes MIX (mirror seed/level-alpha)
   // paint translucency by PHYSICAL size (mirror seed/level-alpha): broad = opaque
-  // coverage, mid = glaze, DABS near-opaque because they are placed sparsely and each
-  // must stand on its own — glaze alpha there just averages neighbours into mush.
+  // coverage, mid = glaze.
   // coverage tiers (lvl<=1) are fully opaque by role — size-keying at small Size
   // gave the base 0.85 alpha and let the black background through around silhouettes.
   // the BAND tier is opaque by ROLE, like the coverage tiers (mirror seed): it exists to
   // COVER the outward bleed, and a glaze there averages the bleed back in.
-  float lal = (band || lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : (ssz2 >= 2.5) ? 0.85 : 0.95;
+  // The 0.95 arm below 2.5 is GONE: it mirrored a CPU dab tier keyed at 1.2, which
+  // min-phys (1.4) makes unreachable, so the 2.5 written here was the only side that
+  // fired — every fine stroke from 1.4 to 2.5 painted 0.95 on GPU vs 0.85 on CPU.
+  float lal = (band || lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : 0.85;
   float fade = 1.0;
   // NO tensor-coherence gate on chain length (mirror seed/stroke-segments). Tried and
   // removed: coherence does not discriminate a line from a smooth gradient, because a
