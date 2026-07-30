@@ -86,6 +86,93 @@
                       d    (max-diff got want)]
                   (is (< d float-tol) (str "radius " r " max diff " d)))))))))))
 
+;; --- Di Zenzo tensor ---------------------------------------------------------
+
+(defn- rel-max-diff
+  "max |a-b| / (|want| + eps). The tensor's magnitudes span orders of magnitude
+   across an image — a flat patch is ~1e-6 where an edge is ~10 — so an absolute
+   bound would either pass everything or fail the edges on pure rounding."
+  [^doubles got ^doubles want eps]
+  (let [n (min (alength got) (alength want))]
+    (loop [i 0 mx 0.0]
+      (if (>= i n) mx
+          (recur (inc i)
+                 (max mx (/ (Math/abs (- (aget got i) (aget want i)))
+                            (+ (Math/abs (aget want i)) (double eps)))))))))
+
+(defn- angle-max-diff
+  "Largest orientation difference, mod π, over texels where `weight` clears
+   `thresh`. Theta is an axis, not a vector — θ and θ+π are the same stroke
+   direction — and where the tensor is ~0 the angle is atan2(0,0), i.e. noise
+   amplified by float32 rounding. Comparing it there would measure nothing."
+  [^doubles got ^doubles want ^doubles weight thresh]
+  (let [n (min (alength got) (alength want))
+        pi Math/PI]
+    (loop [i 0 mx 0.0 cnt 0]
+      (if (>= i n) [mx cnt]
+          (if (< (aget weight i) (double thresh))
+            (recur (inc i) mx cnt)
+            (let [d (Math/abs (- (aget got i) (aget want i)))
+                  d (- d (* pi (Math/floor (/ d pi))))    ; into [0, π)
+                  d (min d (- pi d))]                     ; and fold the wrap
+              (recur (inc i) (max mx d) (inc cnt))))))))
+
+(defn- run-analyze [im max-side]
+  (let [H (long (:height im)) W (long (:width im))
+        ctx   (gf/make-ctx)
+        progs (gf/build-programs)]
+    (when progs
+      (let [src (gf/upload-rgb! im)
+            r   (gf/analyze! ctx progs src H W max-side)
+            {:keys [h w]} r]
+        {:ctx ctx :h h :w w
+         :theta     (gf/read-channel ctx (:eigen r) w h 0)
+         :coherence (gf/read-channel ctx (:eigen r) w h 1)
+         :grad2     (gf/read-channel ctx (:eigen r) w h 2)
+         :flow-theta (gf/read-channel ctx (:flow r) w h 0)
+         :flow-str   (gf/read-channel ctx (:flow r) w h 1)}))))
+
+(defn- check-analyze [max-side]
+  (let [im   (img)
+        want (structure/analyze im max-side)
+        got  (run-analyze im max-side)]
+    (is (some? got) "field shaders compile")
+    (when got
+      (is (= [(:h want) (:w want)] [(:h got) (:w got)])
+          "GPU and CPU agree on the reduced tensor grid")
+      (testing "tensor energy (a+b), the magnitude everything else is scaled by"
+        (let [d (rel-max-diff (:grad2 got) (:grad2 want) 1e-4)]
+          (is (< d 1e-3) (str "grad2 relative diff " d))))
+      (testing "coherence"
+        (let [d (max-diff (:coherence got) (:coherence want))]
+          (is (< d 1e-3) (str "coherence max diff " d))))
+      (testing "orientation, where there is enough energy to have one"
+        ;; gmax-relative gate: only texels carrying real edge structure.
+        (let [gmax (areduce ^doubles (:grad2 want) i m 0.0
+                            (max m (aget ^doubles (:grad2 want) i)))
+              [d cnt] (angle-max-diff (:theta got) (:theta want)
+                                      (:grad2 want) (* 1e-3 gmax))]
+          (is (pos? cnt) "some texels clear the energy gate")
+          (is (< d 1e-3) (str "theta max angular diff " d " over " cnt " texels"))))
+      (testing "diffused flow tensor (the edges-seed-the-flow field)"
+        (let [[d cnt] (angle-max-diff (:flow-theta got) (:flow-theta want)
+                                      (:flow-str want) 0.05)]
+          (is (pos? cnt) "some texels clear the flow-strength gate")
+          (is (< d 1e-2) (str "flow-theta max angular diff " d " over " cnt " texels")))
+        (let [d (max-diff (:flow-str got) (:flow-str want))]
+          (is (< d 1e-3) (str "flow-str max diff " d)))))))
+
+(deftest tensor-matches-the-cpu-at-full-res
+  (testing "gamma, Sobel, radius-2 smoothing and the eigen decomposition"
+    ;; 768 is analyze's default cap and the fixture is 64, so nothing downscales:
+    ;; this isolates the maths from the resampling.
+    (with-gl #(check-analyze 768))))
+
+(deftest tensor-matches-the-cpu-when-downscaled
+  (testing "the nearest-neighbour reduction analyze does above max-side"
+    ;; 40 gives a 1.6 ratio — not a power of two, so a sloppy resample shows up.
+    (with-gl #(check-analyze 40))))
+
 (deftest box-blur-replicates-edges
   (testing "corner pixels use the clamped window, not a zero-padded one"
     ;; The CPU clamps its sliding window at the border; a shader that samples

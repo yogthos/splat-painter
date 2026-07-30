@@ -122,12 +122,6 @@ void main(){
   frag = sum / (2.0 * u_radius + 1.0);
 }")
 
-(defn build-programs
-  "Compile the field-construction programs. Needs a current GL context."
-  []
-  (when-let [box (gl/make-program vs-src box-fs)]
-    {:box {:program box}}))
-
 (defn box-blur!
   "Separable box blur of `src` (w×h RGBA32F) with `radius`, into `dst`. `tmp` is a
    scratch target of the same size. Returns `dst`."
@@ -139,6 +133,130 @@ void main(){
              [["u_src" tmp]]
              [["u_dim" :2f w h] ["u_step" :2f 0 1] ["u_radius" :1f radius]])
   dst)
+
+;; --- Di Zenzo colour structure tensor ----------------------------------------
+;; structure/analyze in three passes: nearest downscale, gamma + per-channel
+;; Sobel into tensor products, then the eigen decomposition. The radius-2 smooth
+;; between products and eigen is the box blur above — and because that shader
+;; works on vec4, ONE pass smooths jxx/jyy/jxy together where the CPU makes three
+;; separate box-blur-2d calls.
+;;
+;; Orientation convention follows structure.clj, where x is the ROW and y the
+;; COLUMN: gx is the derivative down rows, gy across columns. Textures are
+;; uploaded row-major, so texel.x is the column and texel.y the row — hence the
+;; Sobel below differences texel.y for gx.
+
+(def ^:private down-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_src_dim;
+uniform vec2 u_dst_dim;
+void main(){
+  ivec2 d = ivec2(floor(v_uv * u_dst_dim));
+  // structure/downsample is nearest-neighbour at floor(i * src/dst). Integer
+  // arithmetic here rather than a float ratio: it is exact, so a destination row
+  // can never land one off from a rounding wobble in the divide.
+  ivec2 s = (d * ivec2(u_src_dim)) / ivec2(u_dst_dim);
+  frag = texelFetch(u_src, min(s, ivec2(u_src_dim) - ivec2(1)), 0);
+}")
+
+(def ^:private sobel-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_dim;
+vec3 tap(ivec2 p){
+  ivec2 q = clamp(p, ivec2(0), ivec2(u_dim) - ivec2(1));
+  // gamma 1/2.2 per channel, so an edge in shadow counts like one in light
+  return pow(texelFetch(u_src, q, 0).rgb, vec3(0.4545));
+}
+void main(){
+  ivec2 c = ivec2(floor(v_uv * u_dim));
+  vec3 L00 = tap(c + ivec2(-1,-1)), L01 = tap(c + ivec2(0,-1)), L02 = tap(c + ivec2(1,-1));
+  vec3 L10 = tap(c + ivec2(-1, 0)),                             L12 = tap(c + ivec2(1, 0));
+  vec3 L20 = tap(c + ivec2(-1, 1)), L21 = tap(c + ivec2(0, 1)), L22 = tap(c + ivec2(1, 1));
+  vec3 gx = (L20 + 2.0*L21 + L22) - (L00 + 2.0*L01 + L02);
+  vec3 gy = (-L00 + L02) + (-2.0*L10 + 2.0*L12) + (-L20 + L22);
+  // Di Zenzo: sum the per-channel outer products, so a chroma edge with no luma
+  // step still registers.
+  frag = vec4(dot(gx,gx), dot(gy,gy), dot(gx,gy), 1.0);
+}")
+
+(def ^:private eigen-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_dim;
+void main(){
+  vec4 t = texelFetch(u_src, ivec2(floor(v_uv * u_dim)), 0);
+  float a = t.r, b = t.g, f = t.b;
+  // minor-eigenvector angle: the direction the edge RUNS, not its normal
+  float theta = 0.5 * atan(2.0*f, a - b) + 1.5707963267948966;
+  float d = sqrt(((a-b)*0.5)*((a-b)*0.5) + f*f);
+  float coh = clamp(2.0*d / (a + b + 1e-9), 0.0, 1.0);
+  frag = vec4(theta, coh, a + b, 1.0);
+}")
+
+(defn build-programs
+  "Compile the field-construction programs. Needs a current GL context. Returns
+   nil if any shader fails, so a caller can report rather than draw garbage."
+  []
+  (let [ps {:box   (gl/make-program vs-src box-fs)
+            :down  (gl/make-program vs-src down-fs)
+            :sobel (gl/make-program vs-src sobel-fs)
+            :eigen (gl/make-program vs-src eigen-fs)}]
+    (when (every? some? (vals ps))
+      (into {} (map (fn [[k v]] [k {:program v}])) ps))))
+
+(defn tensor-dims
+  "The reduced tensor resolution structure/analyze would use for an H×W image —
+   computed here so both paths downscale to exactly the same grid."
+  [H W max-side]
+  (let [scale (min 1.0 (/ (double max-side) (double (max (long H) (long W)))))]
+    (if (>= scale 1.0)
+      [(long H) (long W)]
+      [(max 1 (long (Math/round (* (double H) scale))))
+       (max 1 (long (Math/round (* (double W) scale))))])))
+
+(defn analyze!
+  "GPU twin of structure/analyze. `src` is the full-res RGBA32F image texture.
+   Returns {:h Ht :w Wt :eigen tex :flow tex :tensor tex}, where :eigen and :flow
+   hold (theta, coherence, grad2) and (flow-theta, flow-str, _) per texel.
+
+   Allocates its own targets; the caller owns them for the life of the image."
+  [ctx progs src H W max-side]
+  (let [[Ht Wt] (tensor-dims H W max-side)
+        full?   (and (= Ht (long H)) (= Wt (long W)))
+        raw     (new-target Wt Ht)
+        tmp     (new-target Wt Ht)
+        tensor  (new-target Wt Ht)
+        flow    (new-target Wt Ht)
+        eigen-t (new-target Wt Ht)
+        eigen-f (new-target Wt Ht)
+        ;; the flow radius scales with the tensor grid, not the source image —
+        ;; same expression as analyze, so the diffusion covers the same fraction
+        fr      (max 3 (min 16 (quot (min Ht Wt) 3)))
+        dims    [["u_dim" :2f Wt Ht]]]
+    ;; At or below max-side, analyze skips the downscale — so sample the source
+    ;; directly rather than paying an identity copy through a scratch target.
+    (let [small (if full?
+                  src
+                  (let [t (new-target Wt Ht)]
+                    (run-pass! ctx (:down progs) t Wt Ht
+                               [["u_src" src]]
+                               [["u_src_dim" :2f W H] ["u_dst_dim" :2f Wt Ht]])
+                    t))]
+      (run-pass! ctx (:sobel progs) raw Wt Ht [["u_src" small]] dims))
+    ;; one vec4 blur where the CPU runs three: jxx, jyy and jxy ride the channels
+    (box-blur! ctx progs raw tensor tmp Wt Ht 2)
+    (box-blur! ctx progs tensor flow tmp Wt Ht fr)
+    (run-pass! ctx (:eigen progs) eigen-t Wt Ht [["u_src" tensor]] dims)
+    (run-pass! ctx (:eigen progs) eigen-f Wt Ht [["u_src" flow]] dims)
+    {:h Ht :w Wt :eigen eigen-t :flow eigen-f :tensor tensor}))
 
 ;; --- source upload / readback (dev verification) -----------------------------
 
