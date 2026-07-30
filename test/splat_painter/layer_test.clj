@@ -127,8 +127,11 @@
 
 (deftest loading-an-image-drops-the-previous-stack
   (testing "on-image-loaded clears a pre-existing committed layer stack (regression)"
-    ;; prepare-image runs for real on the 512x512 fixture (~2s): structure tensor,
-    ;; bilateral + box blurs, the wavelet map, the noise fields. Do not stub it.
+    ;; on-image-loaded only stashes the raw image now — field construction is
+    ;; deferred to the first render, which is the only place a GL context exists.
+    ;; ensure-fields! is what actually runs prepare-image, for real on the 512x512
+    ;; fixture (~2s): structure tensor, bilateral + box blurs, the wavelet map,
+    ;; the noise fields. Do not stub it.
     (let [prev-snap   (core/snapshot-settings)
           prev-layers @core/layers-atom
           prev-active @core/active-layer-atom
@@ -141,6 +144,9 @@
       (#'splat-painter.core/on-image-loaded "test/splat_painter/fixtures/eye.jpeg")
       (is (empty? @core/layers-atom))
       (is (zero? @core/active-layer-atom))
+      (is (nil? @core/image-atom) "fields are not built at load time any more")
+      (is (some? (#'splat-painter.core/ensure-fields!))
+          "the first render builds them")
       (is (some? @core/image-atom))
       (core/restore-settings! prev-snap)
       (reset! core/layers-atom prev-layers)
