@@ -24,18 +24,26 @@
    assoc'd map; pure, so the app, the tests and the diagnostics all build the
    same painting."
   [img0]
-  (let [sfield (structure/analyze img0)
-        ;; EDGE-AWARE light blur: smooth within a shade region, no mixing across
+  ;; The six builders below are the whole cost of loading an image. Only :detail and
+  ;; :noise-fields need the tensor, so the three colour fields start immediately and
+  ;; the rest follow analyze — wall time is the longest chain, not the sum. Each
+  ;; builder writes its own arrays and reads only img0/sfield, so this is scheduling
+  ;; alone: fields-test pins that every field comes out identical.
+  (let [;; EDGE-AWARE light blur: smooth within a shade region, no mixing across
         ;; boundaries — the box blur fed strokes near edges contaminated colours
         ;; (pale splotches in dark areas, smudges on smooth skin)
-        light  (structure/bilateral-blur img0 3)
+        light  (future (structure/bilateral-blur img0 3))
         ;; the drift/dry-out probes keep a FORGIVING box blur: on the razor-sharp
         ;; bilateral field any probe wobble across a boundary trips the lift
         ;; threshold instantly and fragments contour chains into bead dashes
-        drift  (structure/blur-image img0 2)]
+        drift  (future (structure/blur-image img0 2))
+        heavy  (future (structure/dominant-blur img0 (heavy-radius img0)))
+        sfield (structure/analyze img0)
+        detail (future (wavelet/placement-map img0 sfield))
+        noise  (future (seed/prep-noise sfield))]
     (assoc img0 :structure sfield
-                :blur   light
-                :blur-drift drift
+                :blur   @light
+                :blur-drift @drift
                 ;; the smooth colour field the COVERAGE tiers paint with, at their own
                 ;; scale: the DOMINANT tone of a brush-sized window, so structure finer
                 ;; than the brush drops out of it instead of being stamped by it. The
@@ -43,6 +51,6 @@
                 ;; construction, so a σ6 base stroke centred on a 5px letter painted
                 ;; solid black over a 12px radius and nothing repainted the paper
                 ;; around it — letters fattened, counters filled, gaps closed.
-                :blur-heavy (structure/dominant-blur img0 (heavy-radius img0))
-                :detail (wavelet/placement-map img0 sfield)
-                :noise-fields (seed/prep-noise sfield))))
+                :blur-heavy @heavy
+                :detail @detail
+                :noise-fields @noise)))

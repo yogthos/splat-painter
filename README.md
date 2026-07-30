@@ -26,7 +26,8 @@ Each row below shows the source image, then the splat-painted result.
 
 ## How it paints
 
-Analysis is done once per image load on the CPU, and this step takes a minute:
+Analysis is done once per image load on the CPU — a few seconds on a 1MP photo
+(`splat-painter.fields/prepare`, whose builders run across threads):
 
 - **colour structure tensor** (Di Zenzo — per-channel Sobel, gamma-corrected) gives
   per-pixel edge orientation, coherence, and strength; chroma edges count like luma edges
