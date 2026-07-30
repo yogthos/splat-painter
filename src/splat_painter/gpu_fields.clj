@@ -967,28 +967,14 @@ void main(){
 
 (defn dominant-blur!
   "GPU twin of structure/dominant-blur: the DOMINANT tone in a brush-sized window.
-   Like the CPU it runs on a nearest-downsampled copy when the radius allows and
-   bilinearly expands the result — the output is a window statistic, so nothing
-   near pixel frequency is lost, and full-res binning is ~16x the work."
+   Full resolution, mirroring structure/dominant-blur. The reduced-res path it
+   used to take was the larger half of the silhouette halo: a downsampled cell
+   straddling a boundary holds both populations, so its mode is a mixture, and
+   the bilinear expansion smeared that several px out. Measured at a fixed 13px
+   window, outward bleed Σ went 28.55 (third-res) → 25.18 (half) → 23.58 (full)."
   ([ctx progs src dst w h radius] (dominant-blur! ctx progs src dst w h radius 4.0))
   ([ctx progs src dst w h radius p]
-   (let [step (max 1 (quot (long radius) 3))]
-     (if (<= step 1)
-       (binned! ctx progs src dst w h radius (:domacc progs) [["u_p" :1f p]] false)
-       (let [sw (max 1 (quot (long w) step))
-             sh (max 1 (quot (long h) step))
-             small (new-target sw sh)
-             dom   (new-target sw sh)]
-         (run-pass! ctx (:down progs) small sw sh
-                    [["u_src" src]]
-                    [["u_src_dim" :2f w h] ["u_dst_dim" :2f sw sh]])
-         (binned! ctx progs small dom sw sh (quot (long radius) step)
-                  (:domacc progs) [["u_p" :1f p]] false)
-         (run-pass! ctx (:upsamp progs) dst w h
-                    [["u_src" dom]]
-                    [["u_src_dim" :2f sw sh] ["u_dst_dim" :2f w h]])
-         (free-textures! [small dom])
-         dst)))))
+   (binned! ctx progs src dst w h radius (:domacc progs) [["u_p" :1f p]] false)))
 
 (defn noise-fields!
   "GPU twin of seed/prep-noise: the baked orientation field at tensor resolution,
