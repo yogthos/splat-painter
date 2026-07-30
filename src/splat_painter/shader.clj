@@ -22,6 +22,42 @@
   behind GA_PAINTER_LOOP_RENDER — it hangs the GPU watchdog at high splat counts."
   (:require [glimmer-gl.gl :as gl]))
 
+
+(def perlin-glsl
+  "Ken Perlin's improved noise against a 512x1 permutation texture (u_permTex),
+   mirroring splat-painter.noise. Shared verbatim by the generation geometry
+   shader and the GPU field passes: the noise has to agree between the two, and
+   the surest way is one copy of the source rather than two that look alike."
+  "// --- helpers (mirror splat-painter.noise / seed) ---------------------------
+int perm(int i){ return int(texelFetch(u_permTex, ivec2(i, 0), 0).r + 0.5); }
+float fade(float t){ return t*t*t*(t*(t*6.0-15.0)+10.0); }
+float lerpf(float t, float a, float b){ return a + t*(b-a); }
+float grad(int h, float x, float y, float z){
+  int hh = h & 15;
+  float u = hh < 8 ? x : y;
+  float v = hh < 4 ? y : (hh == 12 || hh == 14 ? x : z);
+  return ((hh & 1) == 0 ? u : -u) + ((hh & 2) == 0 ? v : -v);
+}
+float noise3(float x, float y, float z){
+  float fx = floor(x), fy = floor(y), fz = floor(z);
+  int X = int(fx) & 255, Y = int(fy) & 255, Z = int(fz) & 255;
+  float xf = x - fx, yf = y - fy, zf = z - fz;
+  float u = fade(xf), v = fade(yf), w = fade(zf);
+  int A  = perm(X) + Y,   AA = perm(A) + Z,     AB = perm(A + 1) + Z;
+  int B  = perm(X+1) + Y, BA = perm(B) + Z,     BB = perm(B + 1) + Z;
+  float n = lerpf(w,
+    lerpf(v, lerpf(u, grad(perm(AA),   xf,       yf,       zf),
+                      grad(perm(BA),   xf - 1.0, yf,       zf)),
+             lerpf(u, grad(perm(AB),   xf,       yf - 1.0, zf),
+                      grad(perm(BB),   xf - 1.0, yf - 1.0, zf))),
+    lerpf(v, lerpf(u, grad(perm(AA+1), xf,       yf,       zf - 1.0),
+                      grad(perm(BA+1), xf - 1.0, yf,       zf - 1.0)),
+             lerpf(u, grad(perm(AB+1), xf,       yf - 1.0, zf - 1.0),
+                      grad(perm(BB+1), xf - 1.0, yf - 1.0, zf - 1.0))));
+  return (1.0 + n) / 2.0;
+}
+float noise2(float x, float y){ return noise3(x, y, 0.0); }")
+
 (def max-splats "shader splat ceiling + transform-feedback buffer capacity" 786432)
 
 (def ^:private vs-src

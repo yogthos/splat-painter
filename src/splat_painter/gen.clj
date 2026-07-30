@@ -24,6 +24,7 @@
    Reduced-res maps (detail/noise) carry their src dims so the shader maps a full-image
    (x,y) into them exactly like the CPU (round(x·dim/src))."
   (:require [glimmer-gl.gl :as gl]
+            [splat-painter.shader :as shader]
             [splat-painter.seed :as seed]
             [splat-painter.noise :as noise]
             [jolt.ffi :as ffi]))
@@ -41,6 +42,7 @@ flat out int v_id;
 void main(){ v_id = gl_VertexID; }")
 
 (def ^:private gs-src
+  (str
   "#version 330 core
 layout(points) in;
 layout(points, max_vertices = 32) out;
@@ -111,35 +113,9 @@ uniform sampler2D u_blurHTex; // W×H HEAVY blur (base + broadest level: colour 
 uniform sampler2D u_rawTex;   // W×H
 uniform sampler2D u_permTex;  // 512×1
 
-// --- helpers (mirror splat-painter.noise / seed) ---------------------------
-int perm(int i){ return int(texelFetch(u_permTex, ivec2(i, 0), 0).r + 0.5); }
-float fade(float t){ return t*t*t*(t*(t*6.0-15.0)+10.0); }
-float lerpf(float t, float a, float b){ return a + t*(b-a); }
-float grad(int h, float x, float y, float z){
-  int hh = h & 15;
-  float u = hh < 8 ? x : y;
-  float v = hh < 4 ? y : (hh == 12 || hh == 14 ? x : z);
-  return ((hh & 1) == 0 ? u : -u) + ((hh & 2) == 0 ? v : -v);
-}
-float noise3(float x, float y, float z){
-  float fx = floor(x), fy = floor(y), fz = floor(z);
-  int X = int(fx) & 255, Y = int(fy) & 255, Z = int(fz) & 255;
-  float xf = x - fx, yf = y - fy, zf = z - fz;
-  float u = fade(xf), v = fade(yf), w = fade(zf);
-  int A  = perm(X) + Y,   AA = perm(A) + Z,     AB = perm(A + 1) + Z;
-  int B  = perm(X+1) + Y, BA = perm(B) + Z,     BB = perm(B + 1) + Z;
-  float n = lerpf(w,
-    lerpf(v, lerpf(u, grad(perm(AA),   xf,       yf,       zf),
-                      grad(perm(BA),   xf - 1.0, yf,       zf)),
-             lerpf(u, grad(perm(AB),   xf,       yf - 1.0, zf),
-                      grad(perm(BB),   xf - 1.0, yf - 1.0, zf))),
-    lerpf(v, lerpf(u, grad(perm(AA+1), xf,       yf,       zf - 1.0),
-                      grad(perm(BA+1), xf - 1.0, yf,       zf - 1.0)),
-             lerpf(u, grad(perm(AB+1), xf,       yf - 1.0, zf - 1.0),
-                      grad(perm(BB+1), xf - 1.0, yf - 1.0, zf - 1.0))));
-  return (1.0 + n) / 2.0;
-}
-float noise2(float x, float y){ return noise3(x, y, 0.0); }
+"
+  shader/perlin-glsl
+  "
 
 // Wang avalanche hash (mirror of seed/wang32): position generation needs real bit
 // mixing — a linear mix lays the candidate points on Marsaglia lines.
@@ -775,7 +751,7 @@ void main(){
     }
     if (phase == 0) finalLen = emitted;
   }
-}")
+}"))
 
 (def ^:private gen-uniform-names
   ["u_nlev" "u_warp" "u_H" "u_W" "u_stroke" "u_variation" "u_contrast" "u_detail" "u_curv" "u_broad"
