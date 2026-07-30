@@ -16,7 +16,8 @@
             [glimmer-gl.offscreen :as off]
             [splat-painter.gpu-fields :as gf]
             [splat-painter.image :as image]
-            [splat-painter.structure :as structure]))
+            [splat-painter.structure :as structure]
+            [splat-painter.wavelet :as wavelet]))
 
 (def ^:private fixture "test/splat_painter/fixtures/eye.jpeg")
 
@@ -77,9 +78,11 @@
                   dst (gf/new-scratch W H)
                   tmp (gf/new-scratch W H)
                   red (chan-of im 0)]
-              ;; 2 is the tensor radius, 3 the light blur, 8 the flow/heavy end —
-              ;; the three the real pipeline actually asks for.
-              (doseq [r [2 3 8]]
+              ;; 2 is the tensor radius, 3 the light blur, 8 the flow/heavy end.
+              ;; 70 is past the old fixed +/-64 loop cap and wider than the image,
+              ;; so it also pins that a huge radius clamps instead of truncating —
+              ;; the placement map blurs at min(sh,sw)/8, ~96 at full size.
+              (doseq [r [2 3 8 70]]
                 (gf/box-blur! ctx progs src dst tmp W H r)
                 (let [got  (gf/read-channel ctx dst W H 0)
                       want (structure/box-blur red H W r)
@@ -172,6 +175,75 @@
   (testing "the nearest-neighbour reduction analyze does above max-side"
     ;; 40 gives a 1.6 ratio — not a power of two, so a sloppy resample shows up.
     (with-gl #(check-analyze 40))))
+
+;; --- reductions --------------------------------------------------------------
+
+(deftest stats-reduce-matches-a-plain-loop
+  (testing "the log-step max/sum fold placement-map's normalization rides on"
+    ;; Worth its own test: every fused band divides by a dmax and a mean from
+    ;; this, so a wrong fold would skew all three maps by one scale factor and
+    ;; still look plausible. Odd dimensions are the interesting case — the ragged
+    ;; edge must be skipped, not clamped, or texels get double-counted into sum.
+    (with-gl
+      (fn []
+        (let [im    (img)
+              H     (long (:height im)) W (long (:width im))
+              ctx   (gf/make-ctx)
+              progs (gf/build-programs)]
+          (when progs
+            (let [src  (gf/upload-rgb! im)
+                  red  (chan-of im 0)
+                  [st sc] (gf/stats! ctx progs src W H 0)
+                  got  (gf/read-channel ctx st 1 1 0)
+                  got2 (gf/read-channel ctx st 1 1 1)
+                  want-max (areduce ^doubles red i m 0.0 (max m (aget ^doubles red i)))
+                  want-sum (areduce ^doubles red i s 0.0 (+ s (aget ^doubles red i)))]
+              (is (< (Math/abs (- (aget ^doubles got 0) want-max)) 1e-5)
+                  (str "max " (aget ^doubles got 0) " vs " want-max))
+              ;; relative: a 4096-texel sum is ~1e3, so absolute 1e-5 would be
+              ;; stricter than float32 can carry
+              (is (< (/ (Math/abs (- (aget ^doubles got2 0) want-sum)) want-sum) 1e-5)
+                  (str "sum " (aget ^doubles got2 0) " vs " want-sum))
+              (is (seq sc) "the fold actually took intermediate steps"))))))))
+
+;; --- Haar placement map ------------------------------------------------------
+
+(defn- run-placement [im max-side]
+  (let [H (long (:height im)) W (long (:width im))
+        ctx   (gf/make-ctx)
+        progs (gf/build-programs)]
+    (when progs
+      (let [src (gf/upload-rgb! im)
+            t   (gf/analyze! ctx progs src H W max-side)
+            p   (gf/placement-map! ctx progs src (:eigen t) H W (:h t) (:w t) max-side 4)
+            {:keys [h w]} p]
+        (into {:h h :w w}
+              (map (fn [k] [k (gf/read-channel ctx (get p k) w h 0)]))
+              [:detail :sharp :mid :edge :subject])))))
+
+(defn- check-placement [max-side]
+  (let [im   (img)
+        sf   (structure/analyze im max-side)
+        want (wavelet/placement-map im sf max-side 4)
+        got  (run-placement im max-side)]
+    (is (some? got) "field shaders compile")
+    (when got
+      (is (= [(:h want) (:w want)] [(:h got) (:w got)]) "same placement grid")
+      ;; These maps are clamped into [0,1] and drive thresholds, so an absolute
+      ;; bound is the meaningful one — unlike the tensor, nothing here spans
+      ;; orders of magnitude.
+      (doseq [k [:detail :sharp :mid :edge :subject]]
+        (testing (name k)
+          (let [d (max-diff (get got k) (get want k))]
+            (is (< d 2e-3) (str (name k) " max diff " d))))))))
+
+(deftest placement-map-matches-the-cpu-at-full-res
+  (testing "luma+gamma, the Haar ladder, band snapshots, fusion and the dilation"
+    (with-gl #(check-placement 768))))
+
+(deftest placement-map-matches-the-cpu-when-downscaled
+  (testing "the same with the nearest reduction in play"
+    (with-gl #(check-placement 40))))
 
 (deftest box-blur-replicates-edges
   (testing "corner pixels use the clamped window, not a zero-padded one"

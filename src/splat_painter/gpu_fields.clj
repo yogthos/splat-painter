@@ -114,8 +114,11 @@ void main(){
   int r = int(u_radius);
   ivec2 st = ivec2(u_step);
   vec4 sum = vec4(0.0);
-  for (int d = -64; d <= 64; d++) {
-    if (d < -r || d > r) continue;
+  // Dynamic bound, not a constant one with `continue`: the placement map blurs at
+  // radius min(sh,sw)/8, which is ~96 at 768 — a fixed +/-64 cap would silently
+  // truncate the window, and a cap wide enough for it would burn 1000+ iterations
+  // per pixel on the radius-2 tensor blur.
+  for (int d = -r; d <= r; ++d) {
     ivec2 p = clamp(c + st * d, ivec2(0), ivec2(dim) - ivec2(1));
     sum += texelFetch(u_src, p, 0);
   }
@@ -201,17 +204,6 @@ void main(){
   frag = vec4(theta, coh, a + b, 1.0);
 }")
 
-(defn build-programs
-  "Compile the field-construction programs. Needs a current GL context. Returns
-   nil if any shader fails, so a caller can report rather than draw garbage."
-  []
-  (let [ps {:box   (gl/make-program vs-src box-fs)
-            :down  (gl/make-program vs-src down-fs)
-            :sobel (gl/make-program vs-src sobel-fs)
-            :eigen (gl/make-program vs-src eigen-fs)}]
-    (when (every? some? (vals ps))
-      (into {} (map (fn [[k v]] [k {:program v}])) ps))))
-
 (defn tensor-dims
   "The reduced tensor resolution structure/analyze would use for an H×W image —
    computed here so both paths downscale to exactly the same grid."
@@ -257,6 +249,407 @@ void main(){
     (run-pass! ctx (:eigen progs) eigen-t Wt Ht [["u_src" tensor]] dims)
     (run-pass! ctx (:eigen progs) eigen-f Wt Ht [["u_src" flow]] dims)
     {:h Ht :w Wt :eigen eigen-t :flow eigen-f :tensor tensor}))
+
+;; --- whole-grid reductions ---------------------------------------------------
+;; placement-map needs six scalars over the whole grid (gmax, and a dmax + mean
+;; per fused band). A fragment shader can only gather locally, so these come from
+;; a log-step halving: seed each texel to (v, v), then repeatedly fold 2x2 blocks
+;; taking max of maxes and sum of sums until one texel is left.
+;;
+;; That 1x1 target is then SAMPLED by the shaders that need it. Reading it back to
+;; feed in as a uniform would cost a pipeline stall per statistic, which is the
+;; whole thing this design exists to avoid. Tree summation is also more accurate
+;; in float32 than the CPU's sequential loop is in float64 at this size.
+
+(def ^:private redseed-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_dim;
+uniform float u_channel;
+void main(){
+  vec4 t = texelFetch(u_src, ivec2(floor(v_uv * u_dim)), 0);
+  int c = int(u_channel);
+  float v = c == 0 ? t.r : (c == 1 ? t.g : (c == 2 ? t.b : t.a));
+  frag = vec4(v, v, 0.0, 1.0);
+}")
+
+(def ^:private reduce-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_src_dim;
+uniform vec2 u_dst_dim;
+void main(){
+  ivec2 d = ivec2(floor(v_uv * u_dst_dim));
+  ivec2 s = d * 2;
+  ivec2 lim = ivec2(u_src_dim);
+  // Odd dimensions leave a ragged edge; the identity for max is the first tap and
+  // for sum is 0, so out-of-range taps are skipped rather than clamped — clamping
+  // would double-count a texel into the sum.
+  vec4 acc = texelFetch(u_src, min(s, lim - ivec2(1)), 0);
+  float mx = acc.r, sm = acc.g;
+  if (s.x + 1 < lim.x) { vec4 t = texelFetch(u_src, ivec2(s.x+1, s.y), 0); mx = max(mx, t.r); sm += t.g; }
+  if (s.y + 1 < lim.y) { vec4 t = texelFetch(u_src, ivec2(s.x, s.y+1), 0); mx = max(mx, t.r); sm += t.g; }
+  if (s.x + 1 < lim.x && s.y + 1 < lim.y) { vec4 t = texelFetch(u_src, ivec2(s.x+1, s.y+1), 0); mx = max(mx, t.r); sm += t.g; }
+  frag = vec4(mx, sm, 0.0, 1.0);
+}")
+
+(defn- free-textures! [ts]
+  (doseq [t ts] (gl/delete-one gl/gl-delete-textures t)))
+
+(defn stats!
+  "Reduce channel `c` of a w×h texture to a 1×1 RGBA32F holding (max, sum).
+   Returns [tex scratch] — `tex` is the 1×1 result, `scratch` the intermediates
+   the caller must free."
+  [ctx progs src w h c]
+  (let [seed (new-target w h)]
+    (run-pass! ctx (:redseed progs) seed w h
+               [["u_src" src]] [["u_dim" :2f w h] ["u_channel" :1f c]])
+    (loop [cur seed cw (long w) ch (long h) scratch []]
+      (if (and (= cw 1) (= ch 1))
+        [cur scratch]
+        (let [nw (max 1 (quot (+ cw 1) 2))
+              nh (max 1 (quot (+ ch 1) 2))
+              dst (new-target nw nh)]
+          (run-pass! ctx (:reduce progs) dst nw nh
+                     [["u_src" cur]]
+                     [["u_src_dim" :2f cw ch] ["u_dst_dim" :2f nw nh]])
+          (recur dst nw nh (conj scratch cur)))))))
+
+;; --- Haar placement map ------------------------------------------------------
+;; wavelet/placement-map as passes. The CPU SCATTERS: each half-cell at level L
+;; adds its detail energy to every pixel of its 2^L block. A fragment shader can
+;; only gather, so this inverts it — output pixel (gr,gc) at level L reads the one
+;; half-cell that covers it, at (gr >> L, gc >> L). Same sum, opposite direction.
+;;
+;; The LL pyramid the levels walk down is just the 2x2 means the CPU already
+;; writes into `ll`, so it is built once and each level's energy pass reads the
+;; rung above it.
+
+(def ^:private luma-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_src_dim;
+uniform vec2 u_dst_dim;
+void main(){
+  ivec2 d = ivec2(floor(v_uv * u_dst_dim));
+  ivec2 s = min((d * ivec2(u_src_dim)) / ivec2(u_dst_dim), ivec2(u_src_dim) - ivec2(1));
+  vec3 c = texelFetch(u_src, s, 0).rgb;
+  // BT.601 luma, then gamma 1/2.2 — placement-map gamma-corrects AFTER the
+  // luma reduction, not per channel before it like gradient-field does.
+  float l = 0.299*c.r + 0.587*c.g + 0.114*c.b;
+  frag = vec4(pow(l, 0.4545), 0.0, 0.0, 1.0);
+}")
+
+(def ^:private ll-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_src_dim;
+uniform vec2 u_dst_dim;
+void main(){
+  ivec2 d = ivec2(floor(v_uv * u_dst_dim));
+  ivec2 s = d * 2;
+  float a = texelFetch(u_src, s, 0).r;
+  float b = texelFetch(u_src, ivec2(s.x+1, s.y), 0).r;
+  float dd = texelFetch(u_src, ivec2(s.x, s.y+1), 0).r;
+  float e = texelFetch(u_src, ivec2(s.x+1, s.y+1), 0).r;
+  frag = vec4(0.25*(a+b+dd+e), 0.0, 0.0, 1.0);
+}")
+
+(def ^:private haar-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_acc;    // energy accumulated by the coarser levels so far
+uniform sampler2D u_ll;     // the rung above this level
+uniform vec2 u_dim;         // placement-map grid (sw, sh)
+uniform vec2 u_ll_dim;      // dims of u_ll
+uniform vec2 u_cell_dim;    // dims of the half-cell grid = floor(u_ll_dim / 2)
+uniform float u_block;      // 2^level
+void main(){
+  ivec2 g = ivec2(floor(v_uv * u_dim));
+  float acc = texelFetch(u_acc, g, 0).r;
+  int block = int(u_block);
+  ivec2 rc = g / block;
+  // Cells past the half-grid never got scattered into on the CPU (its inner loop
+  // only walks r < hc2), so they contribute nothing here either.
+  if (rc.x < int(u_cell_dim.x) && rc.y < int(u_cell_dim.y)) {
+    ivec2 s = rc * 2;
+    float a = texelFetch(u_ll, s, 0).r;
+    float b = texelFetch(u_ll, ivec2(s.x+1, s.y), 0).r;
+    float d = texelFetch(u_ll, ivec2(s.x, s.y+1), 0).r;
+    float e = texelFetch(u_ll, ivec2(s.x+1, s.y+1), 0).r;
+    // 2x2 Haar: vertical, horizontal and diagonal detail. LL is handled by ll-fs.
+    float lh = (a + b) - (d + e);
+    float hl = (a + d) - (b + e);
+    float hh = (a + e) - (b + d);
+    acc += abs(lh) + abs(hl) + abs(hh);
+  }
+  frag = vec4(acc, 0.0, 0.0, 1.0);
+}")
+
+(def ^:private sub-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_a;
+uniform sampler2D u_b;
+uniform vec2 u_dim;
+void main(){
+  ivec2 p = ivec2(floor(v_uv * u_dim));
+  frag = vec4(texelFetch(u_a, p, 0).r - texelFetch(u_b, p, 0).r, 0.0, 0.0, 1.0);
+}")
+
+(def ^:private edge-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_eigen;   // (theta, coherence, grad2) on the tensor grid
+uniform sampler2D u_stats;   // 1x1 (max, sum) of grad2 -> gmax
+uniform vec2 u_dim;          // placement grid (sw, sh)
+uniform vec2 u_sf_dim;       // tensor grid (sf_w, sf_h)
+uniform vec2 u_src_dim;      // source image (W, H)
+void main(){
+  ivec2 g = ivec2(floor(v_uv * u_dim));
+  // Two-step exactly as the CPU does it (placement cell -> source px -> tensor
+  // cell) rather than the algebraically equal single ratio, so the rounding
+  // lands the same way. floor(x+0.5), not round(): GLSL leaves round()'s
+  // behaviour at .5 up to the implementation, Math/round does not.
+  float x = float(g.y) * (u_src_dim.y / u_dim.y);
+  float y = float(g.x) * (u_src_dim.x / u_dim.x);
+  float sfi = floor(x * (u_sf_dim.y / u_src_dim.y) + 0.5);
+  float sfj = floor(y * (u_sf_dim.x / u_src_dim.x) + 0.5);
+  ivec2 sp = ivec2(clamp(sfj, 0.0, u_sf_dim.x - 1.0), clamp(sfi, 0.0, u_sf_dim.y - 1.0));
+  float gmax = max(texelFetch(u_stats, ivec2(0), 0).r, 1e-12);
+  frag = vec4(sqrt(max(0.0, texelFetch(u_eigen, sp, 0).b) / gmax), 0.0, 0.0, 1.0);
+}")
+
+(def ^:private efuse-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_e;
+uniform sampler2D u_me;      // wide blur of E
+uniform sampler2D u_stats;   // 1x1 (max, sum) of E
+uniform vec2 u_dim;
+uniform float u_n;
+void main(){
+  ivec2 p = ivec2(floor(v_uv * u_dim));
+  float e = texelFetch(u_e, p, 0).r;
+  float me = texelFetch(u_me, p, 0).r;
+  float meanE = texelFetch(u_stats, ivec2(0), 0).g / u_n;
+  // local prominence: an eyelid crease is faint beside a hard background edge,
+  // and it is the local ratio that says it matters
+  float ln = min(1.0, (0.85 * e) / (2.0 * me + 0.30 * meanE + 1e-12));
+  frag = vec4(max(e, ln), 0.0, 0.0, 1.0);
+}")
+
+(def ^:private fuse-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_a;       // the band, blurred
+uniform sampler2D u_ma;      // wide blur of u_a
+uniform sampler2D u_stats;   // 1x1 (max, sum) of u_a
+uniform sampler2D u_efuse;
+uniform vec2 u_dim;
+uniform float u_n;
+uniform float u_esq;
+void main(){
+  ivec2 p = ivec2(floor(v_uv * u_dim));
+  float a = texelFetch(u_a, p, 0).r;
+  vec2 st = texelFetch(u_stats, ivec2(0), 0).rg;
+  float dmax = st.r, meanA = st.g / u_n;
+  float g = dmax > 0.0 ? a / dmax : 0.0;                       // global floor
+  float l = min(1.0, a / (2.0 * texelFetch(u_ma, p, 0).r + 0.30 * meanA + 1e-12));
+  float E0 = texelFetch(u_efuse, p, 0).r;
+  // E carries the tensor blur's width, so fusing it raw seeds a band of echo
+  // strokes parallel to each edge; squaring concentrates it onto the core.
+  float E = u_esq > 0.5 ? E0 * E0 : E0;
+  frag = vec4(min(1.0, max(max(g, l), 0.85 * E)), 0.0, 0.0, 1.0);
+}")
+
+(def ^:private subjraw-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_fine;
+uniform sampler2D u_e;
+uniform vec2 u_dim;
+void main(){
+  ivec2 p = ivec2(floor(v_uv * u_dim));
+  // ABSOLUTE, globally-scaled: the fused maps normalize locally, which lights
+  // smooth bokeh up to full 'detail'. Bokeh has to score ~0 here.
+  frag = vec4(min(1.0, max(texelFetch(u_fine, p, 0).r / 0.35,
+                           texelFetch(u_e, p, 0).r / 0.30)), 0.0, 0.0, 1.0);
+}")
+
+(def ^:private dilate-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_dim;
+uniform vec2 u_step;
+uniform float u_radius;
+void main(){
+  ivec2 c = ivec2(floor(v_uv * u_dim));
+  int r = int(u_radius);
+  ivec2 st = ivec2(u_step);
+  float m = 0.0;
+  for (int d = -r; d <= r; ++d) {
+    ivec2 p = clamp(c + st * d, ivec2(0), ivec2(u_dim) - ivec2(1));
+    m = max(m, texelFetch(u_src, p, 0).r);
+  }
+  frag = vec4(m, 0.0, 0.0, 1.0);
+}")
+
+(defn build-programs
+  "Compile the field-construction programs. Needs a current GL context. Returns
+   nil if any shader fails, so a caller can report rather than draw garbage."
+  []
+  (let [ps {:box     (gl/make-program vs-src box-fs)
+            :down    (gl/make-program vs-src down-fs)
+            :sobel   (gl/make-program vs-src sobel-fs)
+            :eigen   (gl/make-program vs-src eigen-fs)
+            :redseed (gl/make-program vs-src redseed-fs)
+            :reduce  (gl/make-program vs-src reduce-fs)
+            :luma    (gl/make-program vs-src luma-fs)
+            :ll      (gl/make-program vs-src ll-fs)
+            :haar    (gl/make-program vs-src haar-fs)
+            :sub     (gl/make-program vs-src sub-fs)
+            :edge    (gl/make-program vs-src edge-fs)
+            :efuse   (gl/make-program vs-src efuse-fs)
+            :fuse    (gl/make-program vs-src fuse-fs)
+            :subjraw (gl/make-program vs-src subjraw-fs)
+            :dilate  (gl/make-program vs-src dilate-fs)}]
+    (when (every? some? (vals ps))
+      (into {} (map (fn [[k v]] [k {:program v}])) ps))))
+
+(defn- clear-target!
+  "Zero a target — the Haar accumulator starts empty and each level adds to it."
+  [ctx tex w h]
+  (let [{:keys [fbo prev]} ctx]
+    (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER fbo)
+    (gl/gl-framebuffer-texture-2d gl/GL-FRAMEBUFFER gl/GL-COLOR-ATTACHMENT0
+                                  gl/GL-TEXTURE-2D tex 0)
+    (gl/gl-viewport 0 0 (int w) (int h))
+    (gl/gl-clear-color 0.0 0.0 0.0 0.0)
+    (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
+    (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev)
+    tex))
+
+(defn placement-map!
+  "GPU twin of wavelet/placement-map. `src` is the full-res RGBA32F image and
+   `eigen` the tensor grid's (theta, coherence, grad2) from `analyze!`.
+
+   Returns {:h :w :detail :sharp :mid :edge :subject}, each a w×h RGBA32F texture
+   carrying its value in R. Frees every intermediate before returning; the caller
+   owns the five outputs."
+  ([ctx progs src eigen H W sf-h sf-w] (placement-map! ctx progs src eigen H W sf-h sf-w 768 4))
+  ([ctx progs src eigen H W sf-h sf-w max-side levels]
+   (let [[sh sw] (tensor-dims H W max-side)
+         n       (* (long sh) (long sw))
+         scratch (atom [])
+         tmp!    (fn [] (let [t (new-target sw sh)] (swap! scratch conj t) t))
+         dims    [["u_dim" :2f sw sh]]
+         tmpbuf  (tmp!)                       ; shared blur scratch
+         blur!   (fn [in out r] (box-blur! ctx progs in out tmpbuf sw sh r) out)
+         stat!   (fn [tex w h c]
+                   (let [[t sc] (stats! ctx progs tex w h c)]
+                     (swap! scratch into sc) (swap! scratch conj t) t))
+         ;; gamma-corrected luma at placement resolution
+         lum     (tmp!)
+         _       (run-pass! ctx (:luma progs) lum sw sh
+                            [["u_src" src]]
+                            [["u_src_dim" :2f W H] ["u_dst_dim" :2f sw sh]])
+         ;; Walk the LL pyramid, accumulating each level's detail energy. Keeping
+         ;; every rung's accumulator is what gives the band snapshots for free:
+         ;; the CPU aclones `acc` at levels 1-3 for exactly this.
+         accs    (loop [lev 1, cur lum, ch (long sh), cw (long sw)
+                        acc (clear-target! ctx (tmp!) sw sh), out [] ]
+                   (if (and (<= lev (long levels)) (>= ch 2) (>= cw 2))
+                     (let [hc2 (quot ch 2) wc2 (quot cw 2)
+                           ll  (let [t (new-target wc2 hc2)] (swap! scratch conj t) t)
+                           nxt (tmp!)]
+                       (run-pass! ctx (:ll progs) ll wc2 hc2
+                                  [["u_src" cur]]
+                                  [["u_src_dim" :2f cw ch] ["u_dst_dim" :2f wc2 hc2]])
+                       (run-pass! ctx (:haar progs) nxt sw sh
+                                  [["u_acc" acc] ["u_ll" cur]]
+                                  [["u_dim" :2f sw sh] ["u_ll_dim" :2f cw ch]
+                                   ["u_cell_dim" :2f wc2 hc2]
+                                   ["u_block" :1f (bit-shift-left 1 lev)]])
+                       (recur (inc lev) ll hc2 wc2 nxt (conj out nxt)))
+                     (if (seq out) out [acc])))
+         final   (peek accs)
+         at      (fn [i] (if (> (count accs) i) (nth accs i) final))
+         acc1    (at 0)  ; finest band alone
+         accfine (at 1)  ; bands 1-2 — text/eye scale
+         acc3    (at 2)
+         accmid  (let [t (tmp!)]
+                   (run-pass! ctx (:sub progs) t sw sh
+                              [["u_a" acc3] ["u_b" acc1]] dims)
+                   t)
+         ;; E: tensor edge strength, globally scaled by gmax and resampled onto
+         ;; the placement grid. gmax is the reduction that ema asked for — it
+         ;; stays a texture, so nothing stalls on a readback.
+         gstat   (stat! eigen sf-w sf-h 2)
+         E       (tmp!)
+         _       (run-pass! ctx (:edge progs) E sw sh
+                            [["u_eigen" eigen] ["u_stats" gstat]]
+                            [["u_dim" :2f sw sh] ["u_sf_dim" :2f sf-w sf-h]
+                             ["u_src_dim" :2f W H]])
+         wide-r  (max 2 (quot (min (long sh) (long sw)) 8))
+         mE      (blur! E (tmp!) wide-r)
+         eStat   (stat! E sw sh 0)
+         efuse   (tmp!)
+         _       (run-pass! ctx (:efuse progs) efuse sw sh
+                            [["u_e" E] ["u_me" mE] ["u_stats" eStat]]
+                            [["u_dim" :2f sw sh] ["u_n" :1f n]])
+         fuse!   (fn [raw blur-r smooth-r e-sq?]
+                   (let [a  (blur! raw (tmp!) blur-r)
+                         st (stat! a sw sh 0)
+                         ma (blur! a (tmp!) wide-r)
+                         P  (tmp!)]
+                     (run-pass! ctx (:fuse progs) P sw sh
+                                [["u_a" a] ["u_ma" ma] ["u_stats" st] ["u_efuse" efuse]]
+                                [["u_dim" :2f sw sh] ["u_n" :1f n]
+                                 ["u_esq" :1f (if e-sq? 1.0 0.0)]])
+                     (blur! P (new-target sw sh) smooth-r)))
+         mn      (min (long sh) (long sw))
+         ;; aggregate: smoothed hard, so stroke density changes gradually
+         detail  (fuse! final (max 1 (quot mn 40)) (max 1 (quot mn 50)) false)
+         ;; sharp: fine bands, almost no smoothing — text-scale structure survives
+         sharp   (fuse! accfine 1 1 true)
+         mid     (fuse! accmid (max 1 (quot mn 60)) 1 true)
+         ;; subject: absolute structure, then DILATED — smooth skin between the
+         ;; eyes has as little raw fine energy as bokeh, and without the dilation
+         ;; the whole face reads as background.
+         sraw    (tmp!)
+         _       (run-pass! ctx (:subjraw progs) sraw sw sh
+                            [["u_fine" accfine] ["u_e" E]] dims)
+         sb      (blur! sraw (tmp!) (max 2 (quot mn 24)))
+         dr      (max 4 (quot mn 12))
+         dx      (tmp!)
+         dy      (tmp!)
+         _       (run-pass! ctx (:dilate progs) dx sw sh [["u_src" sb]]
+                            [["u_dim" :2f sw sh] ["u_step" :2f 1 0] ["u_radius" :1f dr]])
+         _       (run-pass! ctx (:dilate progs) dy sw sh [["u_src" dx]]
+                            [["u_dim" :2f sw sh] ["u_step" :2f 0 1] ["u_radius" :1f dr]])
+         subject (blur! dy (new-target sw sh) (max 2 (quot mn 30)))]
+     ;; `edge` is an output, so hand back a copy that outlives the scratch sweep
+     (let [edge-out (blur! E (new-target sw sh) 0)]
+       (free-textures! @scratch)
+       {:h sh :w sw :detail detail :sharp sharp :mid mid
+        :edge edge-out :subject subject}))))
 
 ;; --- source upload / readback (dev verification) -----------------------------
 
