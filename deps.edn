@@ -1,8 +1,8 @@
 {:paths ["src"]
 
  :deps {jolt-lang/glimmer-gl {:git/url "https://github.com/jolt-lang/glimmer-gl.git"
-                              :git/tag "v0.0.4"
-                              :git/sha "c035eef4b04c91d531710857ab1d9a290cde1663"}
+                              :git/tag "v0.0.5"
+                              :git/sha "05a27d378a542cc0f32ff2b2682e0e47ffb83599"}
         jolt-lang/glimmer    {:git/url "https://github.com/jolt-lang/glimmer.git"
                               :git/tag "v0.0.5"
                               :git/sha "b34652052e25dc816bd5e10ad2fc6a9cf3e2e8cf"}}
