@@ -124,7 +124,7 @@
   ;; comes from the segment chain, not the ellipse); s0=5 (snoise 0);
   ;; t=0.15+0.85·0.5=0.575 (blur-leaning); contrast 1, tone 1 (tnoise 0).
   (let [{:keys [mean cov color]}
-        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0 1.0 0.0)
+        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0 1.0 0.0 0.0)
         [c00 c01 _ c11] cov
         [cr cg cb] color]
     (is (= [10.0 20.0] mean))
@@ -140,7 +140,7 @@
   ;; coherence-derived se would be √1.6 ≈ 1.265 — so this discriminates: at selong 2.6
   ;; the across-axis is 25/6.76 = 3.70, less than a quarter of the 15.625 above.
   (let [{:keys [cov]}
-        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0 1.0 2.6)
+        (seed/splat-record 10.0 20.0 5.0 0.5 0.0 0.5 0.0 0.0 [0.4 0.4 0.4] [0.8 0.2 0.1] 2.5 0.5 1.0 0.0 1.0 2.6 0.0)
         [c00 _ _ c11] cov]
     (is (approx= 1e-6 169.0 c00))     ; sx² = 25·2.6²
     (is (approx= 1e-6 (/ 25.0 6.76) c11))
@@ -1488,7 +1488,10 @@
                                [(mapv (fn [r] (conj r lvl)) rows) reason]))]
               (layered-means dmap nf 0.6 6.0 0.5 0.5 2.5 1.0 [1.0 1.0 1.0 1.0] cnt H W px px))
         emitted (count (filter (fn [s] (and (zero? (double (nth s 14)))
-                                            (>= (long (nth s 15)) 2))) segs))
+                                            ;; lvl is conj'd onto the record, so its index
+                                            ;; tracks the record's width (16 since the
+                                            ;; ridge-crop flag landed)
+                                            (>= (long (nth s 16)) 2))) segs))
         lp (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 1.0 1.0 1.0] cnt H W)
         demand (double (:det-demand lp))]
     (is (pos? emitted) "the detail tier is live on this fixture")
