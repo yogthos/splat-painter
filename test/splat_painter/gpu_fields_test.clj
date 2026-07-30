@@ -17,6 +17,7 @@
             [splat-painter.gpu-fields :as gf]
             [splat-painter.image :as image]
             [splat-painter.structure :as structure]
+            [splat-painter.fields :as fields]
             [splat-painter.seed :as seed]
             [splat-painter.gen :as gen]
             [splat-painter.wavelet :as wavelet]
@@ -386,6 +387,19 @@
                   (is (= [0 0 640 480] vp)
                       (str "viewport left at " vp " instead of the caller's"))))
               (gf/free-ctx! ctx))))))))
+
+(deftest heavy-radius-mirrors-the-cpu
+  (testing "the coverage colour window is the same on both paths"
+    ;; gpu-fields duplicates fields/heavy-radius rather than requiring it, to keep
+    ;; this namespace off the CPU analysis stack. Nothing enforced that they agree,
+    ;; and they silently diverging is not hypothetical: editing fields/heavy-radius
+    ;; to chase a halo produced a byte-identical render, because the shipping path
+    ;; reads the copy. It is also the window that sets how far coverage strokes
+    ;; pull subject colour into the background, so a mismatch moves the artifact.
+    ;; No GL needed — pure arithmetic.
+    (doseq [h [64 512 683 1024 2048 100 6]]
+      (is (= (fields/heavy-radius {:height h}) (gf/heavy-radius h))
+          (str "height " h)))))
 
 (deftest box-blur-replicates-edges
   (testing "corner pixels use the clamped window, not a zero-padded one"
