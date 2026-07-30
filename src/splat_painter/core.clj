@@ -67,6 +67,8 @@
 ;; goldens pin it, GA_PAINTER_GPU_VERIFY compares the two fields numerically, and
 ;; `jolt -M:preview` renders one to PNG with no GL context at all.
 (defonce image-atom (atom nil))   ; {:height :width :channels :pixels} or nil
+;; a raw image waiting for its fields — see ensure-fields!
+(defonce ^:private pending-image-atom (atom nil))
 (defonce gl-state   (atom {}))    ; per-GLArea GL handles, keyed by area pointer
 (defonce saved?-atom (atom false)) ; one-shot headless save via GA_PAINTER_SAVE_PNG
 (defonce viewport   (atom [800 600]))
@@ -192,11 +194,28 @@
   [img0]
   (fields/prepare img0))
 
+(defn- ensure-fields!
+  "Build the deferred image's fields, if one is waiting. Returns the prepared
+   image (or nil).
+
+   Field construction is deferred because -main loads the first image BEFORE
+   ui/run, so there is no GL context at that point — and the fields are moving
+   onto the GPU, which needs one. Every other prepare-image caller (add-layer!,
+   the passes driver) already runs on the GUI thread with a context current; this
+   only covers the startup path. Call it from on-render, where that is true."
+  []
+  (when-let [raw @pending-image-atom]
+    (reset! pending-image-atom nil)
+    (reset! image-atom (prepare-image raw)))
+  @image-atom)
+
 (defn- on-image-loaded [path]
   (try
-    (let [img (prepare-image (image/load-image path 1024))]
+    (let [img (image/load-image path 1024)]
       (clear-layers!)               ; new file: drop the previous image's committed layers + free their textures
-      (reset! image-atom img)
+      ;; hand the RAW image to the render thread; the fields are built there
+      (reset! image-atom nil)
+      (reset! pending-image-atom img)
       (reset! image-path-atom path)
       ;; Size is the base (flat-region) stroke stdev; detail shrinks it locally. Seed
       ;; it relative to the image so default strokes are visible brush marks.
@@ -826,8 +845,10 @@
     (require 'splat-painter.tf-smoke)
     ((resolve 'splat-painter.tf-smoke/run!)))
   (when-let [_st (get @gl-state area)]
+    ;; a context is current here, which is why the fields are built from this
+    ;; point and not at load time
     (let [[w h] @viewport
-          img   @image-atom]
+          img   (ensure-fields!)]
       (if-not img
         (do (gl/gl-clear-color 0.05 0.06 0.09 1.0) (gl/gl-clear gl/GL-COLOR-BUFFER-BIT))
         (gpu-draw! area w h (:width img) (:height img)))
