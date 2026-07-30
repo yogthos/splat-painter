@@ -22,7 +22,6 @@
             [splat-painter.image     :as image]
             [splat-painter.fields    :as fields]
             [splat-painter.seed      :as seed]
-            [splat-painter.png       :as png]
             [jolt.ffi       :as ffi]))
 
 ;; --- reactive controls (the panel re-renders on change) ----------------------
@@ -63,11 +62,10 @@
 ;; --- non-reactive image / GL state -------------------------------------------
 ;; Need a sized internal-format for macOS core-profile FBO completeness.
 (def ^:private GL-RGBA8 0x8058)
-;; GPU generation: build the whole splat field on the GPU via transform feedback
-;; (splat-painter.gen) instead of CPU seed/splat-field — ~50× faster, output verified
-;; identical to the CPU golden. Default ON; set GA_PAINTER_CPU_GEN to fall back to the
-;; CPU path (still the tested reference).
-(def ^:private gpu-gen? (not (System/getenv "GA_PAINTER_CPU_GEN")))
+;; The splat field is built on the GPU via transform feedback (splat-painter.gen) —
+;; ~50× faster than CPU seed/splat-field, which stays the tested reference: the
+;; goldens pin it, GA_PAINTER_GPU_VERIFY compares the two fields numerically, and
+;; `jolt -M:preview` renders one to PNG with no GL context at all.
 (defonce image-atom (atom nil))   ; {:height :width :channels :pixels} or nil
 (defonce gl-state   (atom {}))    ; per-GLArea GL handles, keyed by area pointer
 (defonce saved?-atom (atom false)) ; one-shot headless save via GA_PAINTER_SAVE_PNG
@@ -147,7 +145,7 @@
 ;; forward references: defined further down, used by the render/callback wiring above.
 ;; A cold AOT compile resolves a file top-down, so without these a clean checkout
 ;; cannot compile core (a warm ~/.jolt/aot-cache hides it).
-(declare clear-layers! upload-splat-texture! gpu-save-png!)
+(declare clear-layers! gpu-save-png!)
 
 (defn- cur-count  [] (or (some-> (System/getenv "GA_PAINTER_COUNT")  Double/parseDouble long) @count-atom))
 (defn- cur-size   [] (or (some-> (System/getenv "GA_PAINTER_SIZE")   Double/parseDouble)      @size-atom))
@@ -262,67 +260,6 @@
     (swap! gl-state update area assoc :export-fbo fbo :export-tex ctex)
     [fbo ctex]))
 
-(defn- save-png! [path]
-  (when-let [area @area-atom]
-    (glx/make-current area)
-    (if-let [st (get @gl-state area)]
-      (let [fld (field-for-current-controls)]
-        (if-not fld
-          (reset! status-atom "no image to save")
-          (let [iw (int (:width fld)) ih (int (:height fld))
-                splats (:splats fld)
-                n (count splats)
-                {:keys [locs tex]} st
-                bg (:background fld)
-                ;; GTK4 GLArea renders into its own framebuffer, not 0.
-                ;; Save the current binding and restore it after.
-                prev-fbo (let [p (ffi/alloc (ffi/sizeof :int))]
-                           (gl/gl-get-integerv gl/GL-FRAMEBUFFER-BINDING p)
-                           (let [v (ffi/read p :int 0)] (ffi/free p) v))]
-            (ensure-export-targets! area iw ih)
-            (when (not= (gl/gl-check-framebuffer-status gl/GL-FRAMEBUFFER)
-                        gl/GL-FRAMEBUFFER-COMPLETE)
-              (reset! status-atom "save failed: framebuffer incomplete"))
-            ;; render offscreen at native image resolution
-            (gl/gl-viewport 0 0 iw ih)
-            (upload-splat-texture! tex splats)
-            (gl/gl-use-program (get-in st [:prog :program]))
-            (gl/gl-active-texture gl/GL-TEXTURE0)
-            (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
-            (gl/gl-uniform-1i (:u_splats locs) 0)
-            (gl/gl-uniform-1i (:u_count locs) (int n))
-            ;; u_viewport = u_image => scale=1, no letterbox; whole framebuffer = image
-            (gl/gl-uniform-2f (:u_viewport locs) (double iw) (double ih))
-            (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
-            (gl/gl-uniform-3f (:u_bg locs) (double (nth bg 0)) (double (nth bg 1)) (double (nth bg 2)))
-            (gl/gl-uniform-1f (:u_opacity locs) (double (or (:opacity fld) 1.0)))
-            (gl/gl-uniform-1f (:u_hard_sharp locs)
-                          ;; short-stroke regimes render fine marks as SOFT dabs — hard
-                          ;; plateau-edged dots don't merge and bead contours into pearls
-                          (+ 1.0 (* (- (double (cur-hardness)) 1.0)
-                                    (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
-            (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)   ; large strokes = round gaussian (fixed)
-            (gl/gl-uniform-1f (:u_sig_min locs) (double (or (:sig-min fld) 1.0)))
-            (gl/gl-uniform-1f (:u_sig_max locs) (double (or (:sig-max fld) 1.0)))
-            (gl/gl-clear-color 0.0 0.0 0.0 1.0)
-            (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
-            (gl/gl-bind-vertex-array (:vao st))
-            (gl/gl-draw-arrays gl/GL-TRIANGLE-STRIP 0 4)
-            ;; readback: RGBA 4-byte aligned, no PACK_ALIGNMENT issue
-            (let [buf (ffi/alloc (* iw ih 4))]
-              (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
-              (try
-                (png/save-rgba-bottom-up! buf iw ih path)
-                (reset! status-atom (format "saved %s  (%d×%d)" path iw ih))
-                (catch Throwable e
-                  (reset! status-atom (str "save failed: " (ex-message e))))
-                (finally (ffi/free buf))))
-            ;; restore GTK's framebuffer + window viewport, repaint
-            (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
-            (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))
-            (request-render!))))
-      (reset! status-atom "GL not ready"))))
-
 (defn- handle-save-result [dialog res]
   (let [errslot (ffi/alloc (ffi/sizeof :pointer))
         _       (ffi/write errslot :pointer 0 ffi/null)  ; GError out-param must start NULL (ffi/alloc doesn't zero)
@@ -340,9 +277,9 @@
             (g-error-free ep))))
       (let [path (g-file-get-path gfile)]
         (g-object-unref gfile)
-        (if (and gpu-gen? @area-atom)
-          (do (glx/make-current @area-atom) (gpu-save-png! @area-atom path))
-          (save-png! path))))
+        (when @area-atom
+          (glx/make-current @area-atom)
+          (gpu-save-png! @area-atom path))))
     (ffi/free errslot)
     (g-object-unref dialog)))
 
@@ -356,9 +293,7 @@
     (not (schemas-available?))
     (let [path (str (or @image-path-atom "splat-painter") "-splats.png")]
       (glx/make-current @area-atom)
-      (if gpu-gen?
-        (gpu-save-png! @area-atom path)
-        (save-png! path)))
+      (gpu-save-png! @area-atom path))
 
     :else
     (let [root   (glx/gtk-widget-get-root @area-atom)
@@ -373,25 +308,6 @@
 
 ;; --- GL plumbing -------------------------------------------------------------
 (def ^:private quad-verts [-1.0 -1.0   1.0 -1.0   -1.0 1.0   1.0 1.0])
-
-(defn- upload-splat-texture! [tex splats]
-  ;; TILED layout so N can exceed GL_MAX_TEXTURE_SIZE: (2*TILE_W) x ceil(N/TILE_W), splats
-  ;; laid out row-major (TILE_W per row). pad the buffer to a full rectangle of texels.
-  (let [n      (count splats)
-        tw     shader/tile-w
-        rows   (max 1 (long (Math/ceil (/ (double n) (double tw)))))
-        floats (shader/pack-splats splats)          ; n*12 floats, splat-major
-        need   (* rows tw 12)
-        padded (if (< (count floats) need)
-                 (into floats (repeat (- need (count floats)) 0.0))
-                 floats)
-        ptr    (gl/write-floats padded)]
-    (gl/gl-active-texture gl/GL-TEXTURE0)
-    (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
-    (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 gl/GL-RGBA32F (* 3 tw) rows 0
-                        gl/GL-RGBA gl/GL-FLOAT ptr)
-    (ffi/free ptr)
-    n))
 
 ;; --- GPU generation path (transform feedback) --------------------------------
 (defn- read-fbo-binding []
@@ -427,6 +343,20 @@
           (gl-delete-textures (count ids) p)
           (ffi/free p))))))
 
+(defn- quad-vao!
+  "Fullscreen-quad VAO/VBO bound to `pos` (vs-src's a_pos)."
+  [pos]
+  (let [vao  (gl/gen-one gl/gl-gen-vertex-arrays)
+        vbo  (gl/gen-one gl/gl-gen-buffers)
+        qptr (gl/write-floats quad-verts)]
+    (gl/gl-bind-buffer gl/GL-ARRAY-BUFFER vbo)
+    (gl/gl-buffer-data gl/GL-ARRAY-BUFFER (* 8 (ffi/sizeof :float)) qptr gl/GL-STATIC-DRAW)
+    (ffi/free qptr)
+    (gl/gl-bind-vertex-array vao)
+    (gl/gl-enable-vertex-attrib-array pos)
+    (gl/gl-vertex-attrib-pointer pos 2 gl/GL-FLOAT gl/GL-FALSE (* 2 (ffi/sizeof :float)) 0)
+    vao))
+
 (defn- ensure-gpu!
   "Lazily build the GPU-generation objects (gen program, buffer-render program, perm
    texture, transform-feedback buffer + query + VAO, texture-buffer view) and (re)upload
@@ -436,19 +366,23 @@
         gpu (:gpu st)
         gpu (if (:gen gpu)
               gpu
-              (let [tf-buf (gl/gen-one gl/gl-gen-buffers)]
+              (let [tf-buf (gl/gen-one gl/gl-gen-buffers)
+                    render (shader/build-program-buf)]
                 (gl/gl-bind-buffer gl/GL-TRANSFORM-FEEDBACK-BUFFER tf-buf)
                 (gl/gl-buffer-data gl/GL-TRANSFORM-FEEDBACK-BUFFER
                                    (* shader/max-splats 12 (ffi/sizeof :float)) ffi/null gl/GL-DYNAMIC-COPY)
                 {:gen     (gen/build-gen-program)
-                 :render  (shader/build-program-buf)
+                 :render  render
                  :quad    (shader/build-program-quad)
                  :blit    (shader/build-program-blit)
                  :perm    (gen/upload-perm!)
                  :tf-buf  tf-buf
                  :query   (gl/gen-one gl/gl-gen-queries)
                  :gen-vao (gl/gen-one gl/gl-gen-vertex-arrays)
-                 :buf-tex (gl/gen-one gl/gl-gen-textures)}))
+                 :buf-tex (gl/gen-one gl/gl-gen-textures)
+                 ;; fullscreen-quad VAO — only the GA_PAINTER_LOOP_RENDER variant
+                 ;; draws attributes; the quad renderer is gl_VertexID-only (gen-vao).
+                 :quad-vao (quad-vao! (:a_pos (:locs render)))}))
         img @image-atom
         gpu (if (identical? img (:fields-img gpu))
               gpu
@@ -504,7 +438,7 @@
                      (no splats) — select-layer! rebuilds the live pass's source image
                      from this below-composite."
   [area vw vh iw ih & [opts]]
-  (let [{:keys [gen render quad blit fields tf-buf query gen-vao buf-tex]} (ensure-gpu! area)
+  (let [{:keys [gen render quad blit fields tf-buf query gen-vao buf-tex quad-vao]} (ensure-gpu! area)
         {:keys [solo blits-below] :or {solo false blits-below false}} opts
         {:keys [count total sig-min sig-max]}
         (if blits-below
@@ -545,7 +479,7 @@
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
-        (gl/gl-bind-vertex-array (:vao (get @gl-state area)))
+        (gl/gl-bind-vertex-array quad-vao)
         (gl/gl-draw-arrays gl/GL-TRIANGLE-STRIP 0 4))
       (let [locs    (:locs quad)
             scale   (min (/ (double vw) iw) (/ (double vh) ih))
@@ -872,48 +806,25 @@
     (do (clear-layers!)
         (when @image-path-atom (on-image-loaded @image-path-atom)))))
 
-;; Build the per-GLArea GL objects once on realize. Kept shallow (one let) so the
-;; closer count is obvious.
-(defn- realize-gl! [area prog]
-  (let [locs (:locs prog)
-        vao  (gl/gen-one gl/gl-gen-vertex-arrays)
-        vbo  (gl/gen-one gl/gl-gen-buffers)
-        tex  (gl/gen-one gl/gl-gen-textures)
-        qptr (gl/write-floats quad-verts)]
-    (gl/gl-bind-buffer gl/GL-ARRAY-BUFFER vbo)
-    (gl/gl-buffer-data gl/GL-ARRAY-BUFFER (* 8 (ffi/sizeof :float)) qptr gl/GL-STATIC-DRAW)
-    (ffi/free qptr)
-    (gl/gl-bind-vertex-array vao)
-    (let [pos (:a_pos locs)]
-      (gl/gl-enable-vertex-attrib-array pos)
-      (gl/gl-vertex-attrib-pointer pos 2 gl/GL-FLOAT gl/GL-FALSE (* 2 (ffi/sizeof :float)) 0))
-    (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
-    (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MIN-FILTER gl/GL-NEAREST)
-    (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MAG-FILTER gl/GL-NEAREST)
-    (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-S gl/GL-CLAMP-TO-EDGE)
-    (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-T gl/GL-CLAMP-TO-EDGE)
-    ;; back the texture with 1 texel so the sampler isn't 'unloadable' before the
-    ;; first image loads (silences a macOS GL warning on the initial frame)
-    (let [zptr (gl/write-floats [0.0 0.0 0.0 0.0])]
-      (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 gl/GL-RGBA32F 1 1 0 gl/GL-RGBA gl/GL-FLOAT zptr)
-      (ffi/free zptr))
-    (swap! gl-state assoc area {:prog prog :locs locs :vao vao :vbo vbo :tex tex})
-    (println "splat-painter: GL ready — program" (:program prog))))
-
 (defn on-realize [area]
   (reset! area-atom area)
   (glx/make-current area)
   (when-let [err (glx/gl-area-error-message area)]
     (println "GLArea context error:" err))
-  (if-let [prog (shader/build-program)]
-    (realize-gl! area prog)
-    (println "splat-painter: failed to build GL program (see info log above)")))
+  ;; every GL object is built lazily by ensure-gpu! on the first draw; this just
+  ;; registers the area so the render/save paths know the context exists.
+  (swap! gl-state assoc area {})
+  (println "splat-painter: GL ready"))
 
 (defn on-resize [_area w h]
   (reset! viewport [w h])
   (gl/gl-viewport 0 0 w h))
 
-(defn- on-render-gpu [area]
+(defn on-render [area]
+  (when (and (System/getenv "GA_PAINTER_TF_SMOKE") (not @saved?-atom))
+    (reset! saved?-atom true)
+    (require 'splat-painter.tf-smoke)
+    ((resolve 'splat-painter.tf-smoke/run!)))
   (when-let [_st (get @gl-state area)]
     (let [[w h] @viewport
           img   @image-atom]
@@ -930,49 +841,6 @@
           (let [passes (or (some-> (System/getenv "GA_PAINTER_PASSES") Integer/parseInt) 1)]
             (dotimes [_ (dec passes)] (add-layer!)))
           (gpu-save-png! area p))))))
-
-(defn on-render [area]
-  (when (and (System/getenv "GA_PAINTER_TF_SMOKE") (not @saved?-atom))
-    (reset! saved?-atom true)
-    (require 'splat-painter.tf-smoke)
-    ((resolve 'splat-painter.tf-smoke/run!)))
-  (if gpu-gen?
-    (on-render-gpu area)
-  (when-let [st (get @gl-state area)]
-    (let [{:keys [locs tex]} st
-          [w h]   @viewport
-          fld     (field-for-current-controls)
-          splats  (:splats fld)
-          n (do (when splats (upload-splat-texture! tex splats)) (or (count splats) 0))]
-      (gl/gl-clear-color 0.05 0.06 0.09 1.0)
-      (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
-      (gl/gl-use-program (get-in st [:prog :program]))
-      (gl/gl-active-texture gl/GL-TEXTURE0)
-      (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
-      (let [iw (if fld (:width fld) w)
-            ih (if fld (:height fld) h)
-            bg (if fld (:background fld) [0.0 0.0 0.0])]
-        (gl/gl-uniform-1i (:u_splats locs) 0)
-        (gl/gl-uniform-1i (:u_count locs) (int n))
-        (gl/gl-uniform-2f (:u_viewport locs) (double w) (double h))
-        (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
-        (gl/gl-uniform-3f (:u_bg locs) (double (nth bg 0)) (double (nth bg 1)) (double (nth bg 2)))
-        (gl/gl-uniform-1f (:u_opacity locs) (double (or (:opacity fld) 1.0)))
-        (gl/gl-uniform-1f (:u_hard_sharp locs)
-                          ;; short-stroke regimes render fine marks as SOFT dabs — hard
-                          ;; plateau-edged dots don't merge and bead contours into pearls
-                          (+ 1.0 (* (- (double (cur-hardness)) 1.0)
-                                    (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
-        (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)   ; large strokes = round gaussian (fixed)
-        (gl/gl-uniform-1f (:u_sig_min locs) (double (or (:sig-min fld) 1.0)))
-        (gl/gl-uniform-1f (:u_sig_max locs) (double (or (:sig-max fld) 1.0))))
-      (gl/gl-bind-vertex-array (:vao st))
-      (gl/gl-draw-arrays gl/GL-TRIANGLE-STRIP 0 4)
-      ;; headless save hook: set GA_PAINTER_SAVE_PNG=/path/to/out.png to export
-      (when-let [p (System/getenv "GA_PAINTER_SAVE_PNG")]
-        (when (and (not @saved?-atom) fld)
-          (reset! saved?-atom true)
-          (save-png! p)))))))
 
 ;; --- reactive control panel --------------------------------------------------
 ;; Layout rule that keeps the sidebar narrow: NO widget inside the sidebar ever

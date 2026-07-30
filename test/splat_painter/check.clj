@@ -37,37 +37,30 @@
     (tree-seq #(and (vector? %) (seq %)) children root)))
 
 (defn -main [& _]
-  (let [{:keys [vs-src fs-src]} (shader/sources)]
-    (println "shader: vs" (count vs-src) "chars, fs" (count fs-src) "chars")
-    (assert-contains fs-src "uniform sampler2D u_splats;"    "u_splats")
-    (assert-contains fs-src "uniform int  u_count;"          "u_count")
-    (assert-contains fs-src "uniform vec2 u_viewport;"       "u_viewport")
-    (assert-contains fs-src "uniform vec2 u_image;"          "u_image")
-    (assert-contains fs-src "uniform vec3 u_bg;"             "u_bg")
-    (assert-contains fs-src "texelFetch(u_splats, ivec2(3 * col,     row), 0);" "texelFetch texel0")
-    (assert-contains fs-src "texelFetch(u_splats, ivec2(3 * col + 1, row), 0);" "texelFetch texel1")
-    (assert-contains fs-src "texelFetch(u_splats, ivec2(3 * col + 2, row), 0);" "texelFetch texel2 (alpha)")
-    (assert-contains fs-src "float det = max(c00 * c11 - c01 * c01, 1e-8);" "det floor")
-    (assert-contains fs-src "float p00 = c11 / det, p11 = c00 / det, cross = -2.0 * c01 / det;"
-                    "precision (2x2 inverse)")
-    (assert-contains fs-src "uniform float u_opacity;"          "u_opacity")
-    (assert-contains fs-src "uniform float u_hard_sharp;"       "u_hard_sharp")
-    (assert-contains fs-src "uniform float u_hard_soft;"        "u_hard_soft")
-    (assert-contains fs-src "float hardness = mix(u_hard_sharp, u_hard_soft, ts);" "size-scaled hardness")
-    (assert-contains fs-src "float a = t2.x * u_opacity * exp(-pow(pdf, hardness));" "per-splat alpha × opacity × size-hardness")
-    (assert-contains fs-src "acc += wa * t1.yzw;"             "over-composite color accumulation")
-    (assert-contains fs-src "T *= (1.0 - a);"                 "transmittance update")
-    (assert-contains fs-src "frag = vec4(acc + T * u_bg, 1.0);" "background weighted by T")
-    (assert-contains vs-src "void main()"                    "vertex main"))
-
-  ;; the samplerBuffer render variant (consumes the transform-feedback stream directly)
-  (let [{:keys [fs-src-buf]} (shader/sources)]
-    (println "render (texture-buffer variant):")
+  ;; the samplerBuffer LOOP variant (GA_PAINTER_LOOP_RENDER): consumes the
+  ;; transform-feedback stream directly, and carries the reference over-compositing
+  ;; math the quad renderer reproduces per splat.
+  (let [{:keys [vs-src fs-src-buf]} (shader/sources)]
+    (println "shader: vs" (count vs-src) "chars, fs" (count fs-src-buf) "chars")
     (assert-contains fs-src-buf "uniform samplerBuffer u_splats;" "samplerBuffer u_splats")
+    (assert-contains fs-src-buf "uniform int  u_count;"          "u_count")
+    (assert-contains fs-src-buf "uniform vec2 u_viewport;"       "u_viewport")
+    (assert-contains fs-src-buf "uniform vec2 u_image;"          "u_image")
+    (assert-contains fs-src-buf "uniform vec3 u_bg;"             "u_bg")
     (assert-contains fs-src-buf "texelFetch(u_splats, 3 * i);"     "flat texelFetch texel0")
     (assert-contains fs-src-buf "texelFetch(u_splats, 3 * i + 1);" "flat texelFetch texel1")
     (assert-contains fs-src-buf "texelFetch(u_splats, 3 * i + 2);" "flat texelFetch texel2 (alpha)")
-    (assert-contains fs-src-buf "float hardness = mix(u_hard_sharp, u_hard_soft, ts);" "size-scaled hardness"))
+    (assert-contains fs-src-buf "float det = max(c00 * c11 - c01 * c01, 1e-8);" "det floor")
+    (assert-contains fs-src-buf "float p00 = c11 / det, p11 = c00 / det, cross = -2.0 * c01 / det;"
+                    "precision (2x2 inverse)")
+    (assert-contains fs-src-buf "uniform float u_opacity;"          "u_opacity")
+    (assert-contains fs-src-buf "uniform float u_hard_sharp;"       "u_hard_sharp")
+    (assert-contains fs-src-buf "uniform float u_hard_soft;"        "u_hard_soft")
+    (assert-contains fs-src-buf "float hardness = mix(u_hard_sharp, u_hard_soft, ts);" "size-scaled hardness")
+    (assert-contains fs-src-buf "acc += wa * t1.yzw;"             "over-composite color accumulation")
+    (assert-contains fs-src-buf "T *= (1.0 - a);"                 "transmittance update")
+    (assert-contains fs-src-buf "frag = vec4(acc + T * u_bg, 1.0);" "background weighted by T")
+    (assert-contains vs-src "void main()"                    "vertex main"))
 
   ;; the per-splat quad renderer (no pixels×splats loop — the 48k-hang fix)
   (let [{:keys [vs-src-quad fs-src-quad]} (shader/sources)]
