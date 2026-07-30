@@ -36,7 +36,15 @@
 
 (deftest dominant-blur-is-stable
   (testing "the coverage tiers' colour source"
-    (is (approx= 1e-6 14044.626831098392 (ck (structure/dominant-blur (img) 6))))))
+    ;; (14044.627→13928.521) dominant-blur now runs at FULL resolution. It used to
+    ;; compute on a nearest-downsampled copy and expand bilinearly, which was the
+    ;; larger half of the silhouette halo: a reduced-res cell straddling a boundary
+    ;; holds both populations, so its mode is a mixture, and the expansion smeared
+    ;; that several px out. Holding the window fixed and varying only the working
+    ;; resolution, outward bleed Σ on img/portrait.jpg went 28.55 (third) → 25.18
+    ;; (half) → 23.58 (full). Costs 0.48s→1.56s on a 1024px frame, which no longer
+    ;; governs — the app builds fields on the GPU and this is the reference path.
+    (is (approx= 1e-6 13928.521062225938 (ck (structure/dominant-blur (img) 6))))))
 
 (deftest structure-tensor-is-stable
   (testing "orientation / coherence / flow"
