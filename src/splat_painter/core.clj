@@ -69,6 +69,7 @@
 (defonce image-atom (atom nil))   ; {:height :width :channels :pixels} or nil
 (defonce gl-state   (atom {}))    ; per-GLArea GL handles, keyed by area pointer
 (defonce saved?-atom (atom false)) ; one-shot headless save via GA_PAINTER_SAVE_PNG
+(defonce ^:private field-smoke?-atom (atom false)) ; one-shot GA_PAINTER_FIELD_SMOKE
 (defonce viewport   (atom [800 600]))
 (defonce area-atom  (atom nil))   ; the GLArea widget, for queue-render / dialog parent
 (defonce image-path-atom (atom nil)) ; source path of the loaded image (dialog-free save)
@@ -825,6 +826,11 @@
     (reset! saved?-atom true)
     (require 'splat-painter.tf-smoke)
     ((resolve 'splat-painter.tf-smoke/run!)))
+  ;; GPU field passes vs their CPU twins — needs a live context, hence here.
+  (when (and (System/getenv "GA_PAINTER_FIELD_SMOKE") (not @field-smoke?-atom) @image-atom)
+    (reset! field-smoke?-atom true)
+    (require 'splat-painter.field-smoke)
+    ((resolve 'splat-painter.field-smoke/run!) @image-atom))
   (when-let [_st (get @gl-state area)]
     (let [[w h] @viewport
           img   @image-atom]
