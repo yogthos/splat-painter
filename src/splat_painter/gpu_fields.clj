@@ -511,6 +511,118 @@ void main(){
   frag = vec4(m, 0.0, 0.0, 1.0);
 }")
 
+;; --- binned colour fields (bilateral + dominant) -----------------------------
+;; structure/bilateral-blur and dominant-blur-full share one algorithm: K=9 luma
+;; bins, each pixel given a hat weight around its bin centre, the weighted colour
+;; AND the weight box-blurred over the window, then the bins recombined. They
+;; differ only in the recombination — bilateral weights a bin by the centre
+;; pixel's own hat value, dominant by the blurred weight raised to p, which turns
+;; `average tone` into `modal tone`.
+;;
+;; The CPU carries wk/wr/wg/wb as four arrays and blurs each separately. Here they
+;; are the four channels of one vec4, so a single box blur does all four — and the
+;; accumulator packs (rgb, weight) the same way.
+
+(def ^:private binw-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_dim;
+uniform float u_lk;      // this bin's luma centre
+uniform float u_dl;      // bin spacing; the hat reaches exactly one bin either way
+void main(){
+  vec3 c = texelFetch(u_src, ivec2(floor(v_uv * u_dim)), 0).rgb;
+  float L = 0.299*c.r + 0.587*c.g + 0.114*c.b;   // raw luma, no gamma here
+  float w = max(0.0, 1.0 - abs(L - u_lk) / u_dl);
+  frag = vec4(w * c, w);
+}")
+
+(def ^:private bilacc-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_acc;
+uniform sampler2D u_bin;   // box-blurred (w*rgb, w) for this bin
+uniform sampler2D u_src;
+uniform vec2 u_dim;
+uniform float u_lk;
+uniform float u_dl;
+void main(){
+  ivec2 p = ivec2(floor(v_uv * u_dim));
+  vec4 acc = texelFetch(u_acc, p, 0);
+  vec3 c = texelFetch(u_src, p, 0).rgb;
+  float L = 0.299*c.r + 0.587*c.g + 0.114*c.b;
+  float h = max(0.0, 1.0 - abs(L - u_lk) / u_dl);
+  if (h > 0.0) {
+    vec4 b = texelFetch(u_bin, p, 0);
+    // bin colour is b.rgb/b.a; this pixel's share of it is h
+    acc.rgb += (h / max(b.a, 1e-12)) * b.rgb;
+    acc.a += h;
+  }
+  frag = acc;
+}")
+
+(def ^:private domacc-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_acc;
+uniform sampler2D u_bin;
+uniform vec2 u_dim;
+uniform float u_p;
+void main(){
+  ivec2 q = ivec2(floor(v_uv * u_dim));
+  vec4 acc = texelFetch(u_acc, q, 0);
+  vec4 b = texelFetch(u_bin, q, 0);
+  if (b.a > 1e-12) {
+    // vote is w^p for colour b.rgb/w, so accumulate w^(p-1)*b.rgb and never
+    // divide twice
+    float wp = pow(b.a, u_p);
+    acc.rgb += (wp / b.a) * b.rgb;
+    acc.a += wp;
+  }
+  frag = acc;
+}")
+
+(def ^:private binfin-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_acc;
+uniform vec2 u_dim;
+uniform float u_unity;   // 1.0 = hat kernels partition unity, only divide if off
+void main(){
+  vec4 a = texelFetch(u_acc, ivec2(floor(v_uv * u_dim)), 0);
+  if (u_unity > 0.5 && abs(a.a - 1.0) <= 1e-9) { frag = vec4(a.rgb, 1.0); return; }
+  frag = vec4(a.rgb / max(a.a, 1e-12), 1.0);
+}")
+
+(def ^:private upsample-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_src_dim;
+uniform vec2 u_dst_dim;
+void main(){
+  ivec2 d = ivec2(floor(v_uv * u_dst_dim));
+  // matches upsample-rgb: (n-1)/(N-1) spacing, clamped at the last sample
+  vec2 r = (max(vec2(2.0), u_src_dim) - 1.0) / max(vec2(1.0), u_dst_dim - 1.0);
+  vec2 f = min(u_src_dim - 1.0, vec2(d) * r);
+  vec2 i0 = floor(f);
+  vec2 t = f - i0;
+  ivec2 a = ivec2(i0);
+  ivec2 b = min(a + ivec2(1), ivec2(u_src_dim) - ivec2(1));
+  vec3 c00 = texelFetch(u_src, ivec2(a.x, a.y), 0).rgb;
+  vec3 c01 = texelFetch(u_src, ivec2(b.x, a.y), 0).rgb;
+  vec3 c10 = texelFetch(u_src, ivec2(a.x, b.y), 0).rgb;
+  vec3 c11 = texelFetch(u_src, ivec2(b.x, b.y), 0).rgb;
+  vec3 top = mix(c00, c01, t.x);
+  vec3 bot = mix(c10, c11, t.x);
+  frag = vec4(mix(top, bot, t.y), 1.0);
+}")
+
 (defn build-programs
   "Compile the field-construction programs. Needs a current GL context. Returns
    nil if any shader fails, so a caller can report rather than draw garbage."
@@ -529,7 +641,12 @@ void main(){
             :efuse   (gl/make-program vs-src efuse-fs)
             :fuse    (gl/make-program vs-src fuse-fs)
             :subjraw (gl/make-program vs-src subjraw-fs)
-            :dilate  (gl/make-program vs-src dilate-fs)}]
+            :dilate  (gl/make-program vs-src dilate-fs)
+            :binw    (gl/make-program vs-src binw-fs)
+            :bilacc  (gl/make-program vs-src bilacc-fs)
+            :domacc  (gl/make-program vs-src domacc-fs)
+            :binfin  (gl/make-program vs-src binfin-fs)
+            :upsamp  (gl/make-program vs-src upsample-fs)}]
     (when (every? some? (vals ps))
       (into {} (map (fn [[k v]] [k {:program v}])) ps))))
 
@@ -650,6 +767,67 @@ void main(){
        (free-textures! @scratch)
        {:h sh :w sw :detail detail :sharp sharp :mid mid
         :edge edge-out :subject subject}))))
+
+(def ^:private bins 9)
+
+(defn- binned!
+  "Shared body of bilateral-blur and dominant-blur-full: walk the K luma bins,
+   box-blurring each bin's (w*rgb, w) and folding it in with `acc-prog`.
+   Writes into `dst`. `extra` are uniforms the accumulator needs beyond the bin."
+  [ctx progs src dst w h radius acc-prog extra unity?]
+  (let [scratch (atom [])
+        tmp!    (fn [] (let [t (new-target w h)] (swap! scratch conj t) t))
+        dl      (/ 1.0 (double (dec bins)))
+        binbuf  (tmp!) blurred (tmp!) blurtmp (tmp!)]
+    (loop [k 0, acc (clear-target! ctx (tmp!) w h)]
+      (if (= k bins)
+        (run-pass! ctx (:binfin progs) dst w h
+                   [["u_acc" acc]]
+                   [["u_dim" :2f w h] ["u_unity" :1f (if unity? 1.0 0.0)]])
+        (let [lk  (* (double k) dl)
+              nxt (tmp!)]
+          (run-pass! ctx (:binw progs) binbuf w h
+                     [["u_src" src]]
+                     [["u_dim" :2f w h] ["u_lk" :1f lk] ["u_dl" :1f dl]])
+          (box-blur! ctx progs binbuf blurred blurtmp w h radius)
+          (run-pass! ctx acc-prog nxt w h
+                     (into [["u_acc" acc] ["u_bin" blurred]]
+                           (when (= acc-prog (:bilacc progs)) [["u_src" src]]))
+                     (into [["u_dim" :2f w h] ["u_lk" :1f lk] ["u_dl" :1f dl]] extra))
+          (recur (inc k) nxt))))
+    (free-textures! @scratch)
+    dst))
+
+(defn bilateral-blur!
+  "GPU twin of structure/bilateral-blur — the edge-aware colour field strokes load
+   from. Writes an RGB result into `dst`."
+  [ctx progs src dst w h radius]
+  (binned! ctx progs src dst w h radius (:bilacc progs) [] true))
+
+(defn dominant-blur!
+  "GPU twin of structure/dominant-blur: the DOMINANT tone in a brush-sized window.
+   Like the CPU it runs on a nearest-downsampled copy when the radius allows and
+   bilinearly expands the result — the output is a window statistic, so nothing
+   near pixel frequency is lost, and full-res binning is ~16x the work."
+  ([ctx progs src dst w h radius] (dominant-blur! ctx progs src dst w h radius 4.0))
+  ([ctx progs src dst w h radius p]
+   (let [step (max 1 (quot (long radius) 3))]
+     (if (<= step 1)
+       (binned! ctx progs src dst w h radius (:domacc progs) [["u_p" :1f p]] false)
+       (let [sw (max 1 (quot (long w) step))
+             sh (max 1 (quot (long h) step))
+             small (new-target sw sh)
+             dom   (new-target sw sh)]
+         (run-pass! ctx (:down progs) small sw sh
+                    [["u_src" src]]
+                    [["u_src_dim" :2f w h] ["u_dst_dim" :2f sw sh]])
+         (binned! ctx progs small dom sw sh (quot (long radius) step)
+                  (:domacc progs) [["u_p" :1f p]] false)
+         (run-pass! ctx (:upsamp progs) dst w h
+                    [["u_src" dom]]
+                    [["u_src_dim" :2f sw sh] ["u_dst_dim" :2f w h]])
+         (free-textures! [small dom])
+         dst)))))
 
 ;; --- source upload / readback (dev verification) -----------------------------
 
