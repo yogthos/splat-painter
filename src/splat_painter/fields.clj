@@ -38,10 +38,16 @@
         ;; threshold instantly and fragments contour chains into bead dashes
         drift  (future (structure/blur-image img0 2))
         heavy  (future (structure/dominant-blur img0 (heavy-radius img0)))
+        ;; PIXEL-SCALE edge strength. The placement maps below are all built at
+        ;; <=768 with blurs on top of the tensor's own, so none of them can say
+        ;; whether a 4px feature is still there — a stroke asking "has my ridge
+        ;; ended?" always heard yes. This is the signal that answers it.
+        efull  (future (structure/full-edge img0))
         sfield (structure/analyze img0)
         detail (future (wavelet/placement-map img0 sfield))
         noise  (future (seed/prep-noise sfield))]
     (assoc img0 :structure sfield
+                :edge-full @efull
                 :blur   @light
                 :blur-drift @drift
                 ;; the smooth colour field the COVERAGE tiers paint with, at their own
