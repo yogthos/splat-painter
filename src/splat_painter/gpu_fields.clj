@@ -20,6 +20,7 @@
    Every pass is a fullscreen triangle over an attributeless VAO (gl_VertexID →
    clip space), rendering into an RGBA32F colour attachment."
   (:require [glimmer-gl.gl :as gl]
+            [splat-painter.shader :as shader]
             [jolt.ffi :as ffi]))
 
 ;; --- pass plumbing -----------------------------------------------------------
@@ -197,8 +198,14 @@ uniform vec2 u_dim;
 void main(){
   vec4 t = texelFetch(u_src, ivec2(floor(v_uv * u_dim)), 0);
   float a = t.r, b = t.g, f = t.b;
-  // minor-eigenvector angle: the direction the edge RUNS, not its normal
-  float theta = 0.5 * atan(2.0*f, a - b) + 1.5707963267948966;
+  // minor-eigenvector angle: the direction the edge RUNS, not its normal.
+  // In a perfectly uniform region every Sobel tap is exactly 0, so both
+  // arguments are 0 — GLSL leaves atan(0,0) undefined and this driver returns
+  // NaN where Math/atan2 gives 0. Any solid-colour area (a blown background, a
+  // letterbox bar) hits it, and one NaN theta poisons a splat's covariance.
+  float num = 2.0*f, den = a - b;
+  float phi = (num == 0.0 && den == 0.0) ? 0.0 : atan(num, den);
+  float theta = 0.5 * phi + 1.5707963267948966;
   float d = sqrt(((a-b)*0.5)*((a-b)*0.5) + f*f);
   float coh = clamp(2.0*d / (a + b + 1e-9), 0.0, 1.0);
   frag = vec4(theta, coh, a + b, 1.0);
@@ -623,6 +630,82 @@ void main(){
   frag = vec4(mix(top, bot, t.y), 1.0);
 }")
 
+;; --- baked orientation field (seed/prep-noise) -------------------------------
+;; Both ends of the Swirl dial, at tensor resolution: .rg carry cos2θ/sin2θ and
+;; .b the coherence, which is exactly the layout gen/upload-fields! hands the
+;; geometry shader — so these two passes ARE the noise textures, not a step
+;; toward them.
+;;
+;; Double-angle components rather than the angle itself because orientation is
+;; undirected (0 ≡ π); the GS's bilinear fetch has to interpolate something that
+;; wraps correctly, and an angle grid stair-steps into a visible zipper.
+
+(def ^:private noise-fs
+  (str
+   "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_eigen;    // (theta, coherence, grad2) sharp tensor
+uniform sampler2D u_flow;     // (flow-theta, flow-str, _) diffused tensor
+uniform sampler2D u_permTex;  // 512x1 Perlin permutation
+uniform vec2 u_dim;           // tensor grid (w, h)
+uniform vec2 u_src;           // source image (W, H)
+uniform float u_swirl0;       // 1.0 = bake the Swirl 0 end instead
+"
+   shader/perlin-glsl
+   "
+// undirected blend: mix in the double-angle plane so 0 and pi are the same axis
+float blendAngle(float t1, float t2, float w){
+  float bx = (1.0 - w) * cos(2.0*t1) + w * cos(2.0*t2);
+  float by = (1.0 - w) * sin(2.0*t1) + w * sin(2.0*t2);
+  // two exactly-opposite axes at w=0.5 cancel; atan(0,0) is NaN here, 0 on the CPU
+  return (bx == 0.0 && by == 0.0) ? 0.0 : 0.5 * atan(by, bx);
+}
+void main(){
+  ivec2 g = ivec2(floor(v_uv * u_dim));
+  vec4 e = texelFetch(u_eigen, g, 0);
+  vec4 f = texelFetch(u_flow, g, 0);
+  float sTheta = e.r, coherence = e.g;
+  float fTheta = f.r, fStr = f.g;
+  float theta;
+  if (u_swirl0 > 0.5) {
+    // Swirl 0: flat regions take the diffused tensor's own direction -- the
+    // nearby edges voted inward -- with no image-independent field at all.
+    theta = blendAngle(fTheta, sTheta, coherence);
+  } else {
+    // seed/prep-noise indexes x by ROW and y by COLUMN, so g.y is x here
+    float x = float(g.y) * (u_src.y / u_dim.y);
+    float y = float(g.x) * (u_src.x / u_dim.x);
+    float fs = 0.004;
+    float fvx = noise2(x * fs, y * fs) - 0.5;
+    float fvy = noise2(x * fs + 137.0, y * fs + 91.0) - 0.5;
+    // At an integer lattice point improved Perlin is exactly 0.5, so both
+    // components are exactly 0 -- which happens at texel (0,0). GLSL leaves
+    // atan(0,0) undefined and this driver returns NaN, where Math/atan2 gives 0;
+    // one NaN texel would then bleed through the GS's bilinear fetch.
+    float ang = (fvx == 0.0 && fvy == 0.0) ? 0.0 : atan(fvy, fvx);
+    float flowBase = blendAngle(ang, fTheta, min(1.0, 2.5 * fStr));
+    theta = blendAngle(flowBase, sTheta, coherence);
+  }
+  frag = vec4(cos(2.0*theta), sin(2.0*theta), coherence, 0.0);
+}"))
+
+(def ^:private pack-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_detail;
+uniform sampler2D u_sharp;
+uniform sampler2D u_edge;
+uniform sampler2D u_mid;
+uniform vec2 u_dim;
+void main(){
+  ivec2 p = ivec2(floor(v_uv * u_dim));
+  // the layout gen's shader expects: aggregate, sharp fine-band, raw edge, mid band
+  frag = vec4(texelFetch(u_detail, p, 0).r, texelFetch(u_sharp, p, 0).r,
+              texelFetch(u_edge, p, 0).r,   texelFetch(u_mid, p, 0).r);
+}")
+
 (defn build-programs
   "Compile the field-construction programs. Needs a current GL context. Returns
    nil if any shader fails, so a caller can report rather than draw garbage."
@@ -646,7 +729,9 @@ void main(){
             :bilacc  (gl/make-program vs-src bilacc-fs)
             :domacc  (gl/make-program vs-src domacc-fs)
             :binfin  (gl/make-program vs-src binfin-fs)
-            :upsamp  (gl/make-program vs-src upsample-fs)}]
+            :upsamp  (gl/make-program vs-src upsample-fs)
+            :noise   (gl/make-program vs-src noise-fs)
+            :pack    (gl/make-program vs-src pack-fs)}]
     (when (every? some? (vals ps))
       (into {} (map (fn [[k v]] [k {:program v}])) ps))))
 
@@ -829,6 +914,20 @@ void main(){
          (free-textures! [small dom])
          dst)))))
 
+(defn noise-fields!
+  "GPU twin of seed/prep-noise: the baked orientation field at tensor resolution,
+   both ends of the Swirl dial. `perm` is gen/upload-perm!'s 512x1 texture.
+   Returns [swirl1 swirl0] — the two textures gen's u_noiseTex / u_noiseSTex want."
+  [ctx progs eigen flow perm w h W H]
+  (let [mk (fn [swirl0?]
+             (let [t (new-target w h)]
+               (run-pass! ctx (:noise progs) t w h
+                          [["u_eigen" eigen] ["u_flow" flow] ["u_permTex" perm]]
+                          [["u_dim" :2f w h] ["u_src" :2f W H]
+                           ["u_swirl0" :1f (if swirl0? 1.0 0.0)]])
+               t))]
+    [(mk false) (mk true)]))
+
 ;; --- source upload / readback (dev verification) -----------------------------
 
 (defn upload-rgb!
@@ -851,6 +950,27 @@ void main(){
       (ffi/free ptr)
       t)))
 
+(defn read-rgba
+  "Read all four channels of a w×h RGBA32F texture in ONE glReadPixels, as
+   [r g b a] ^doubles. Four read-channel calls would pull the same pixels four
+   times over the FFI, which at ~8.6M floats/s is the expensive part."
+  [ctx tex w h]
+  (let [{:keys [fbo prev]} ctx
+        n   (* (long w) (long h))
+        ptr (ffi/alloc (* n 4 (ffi/sizeof :float)))
+        out (mapv (fn [_] (double-array n)) (range 4))]
+    (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER fbo)
+    (gl/gl-framebuffer-texture-2d gl/GL-FRAMEBUFFER gl/GL-COLOR-ATTACHMENT0
+                                  gl/GL-TEXTURE-2D tex 0)
+    (gl/gl-read-pixels 0 0 (int w) (int h) gl/GL-RGBA gl/GL-FLOAT ptr)
+    (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev)
+    (dotimes [i n]
+      (let [o (* i 16)]
+        (dotimes [c 4]
+          (aset ^doubles (nth out c) i (double (ffi/read ptr :float (+ o (* c 4))))))))
+    (ffi/free ptr)
+    out))
+
 (defn read-channel
   "Read channel `c` (0..3) of a w×h RGBA32F texture into a fresh ^doubles of w*h.
    DEV ONLY — ~8.6M floats/s, so this is for verification, never the render path."
@@ -870,3 +990,54 @@ void main(){
     out))
 
 (defn new-scratch [w h] (new-target w h))
+
+;; --- the whole chain ---------------------------------------------------------
+
+(defn heavy-radius
+  "Window for the coverage tiers' colour source. Mirrors fields/heavy-radius —
+   duplicated rather than required to keep this namespace off the CPU field
+   builders, which pull in the whole analysis stack."
+  [H] (max 6 (quot (long H) 80)))
+
+(defn build-fields!
+  "Every per-image field, built by passes and left in VRAM. Returns the same map
+   gen/upload-fields! does, so generate! cannot tell the difference.
+
+   The CPU twin is fields/prepare + gen/upload-fields!, which stays the reference
+   the goldens pin and GA_PAINTER_GPU_VERIFY compares against.
+
+   TWO readbacks survive, both once per image load: seed/layer-params reduces the
+   placement maps to size the splat budget and re-runs on every slider drag, so
+   those arrays have to live on the CPU. Everything else stays on the card."
+  [ctx progs img perm]
+  (let [H (long (:height img)) W (long (:width img))
+        src    (upload-rgb! img)
+        tensor (analyze! ctx progs src H W 768)
+        Ht (:h tensor) Wt (:w tensor)
+        pm     (placement-map! ctx progs src (:eigen tensor) H W Ht Wt 768 4)
+        Hd (:h pm) Wd (:w pm)
+        packed (new-target Wd Hd)
+        _      (run-pass! ctx (:pack progs) packed Wd Hd
+                          [["u_detail" (:detail pm)] ["u_sharp" (:sharp pm)]
+                           ["u_edge" (:edge pm)] ["u_mid" (:mid pm)]]
+                          [["u_dim" :2f Wd Hd]])
+        [noise noise0] (noise-fields! ctx progs (:eigen tensor) (:flow tensor)
+                                      perm Wt Ht W H)
+        blur   (bilateral-blur! ctx progs src (new-target W H) W H 3)
+        drift  (box-blur! ctx progs src (new-target W H) (new-scratch W H) W H 2)
+        heavy  (dominant-blur! ctx progs src (new-target W H) W H (heavy-radius H))
+        ;; the budget reduction's inputs — the only thing that comes back
+        [dd ds de dm] (read-rgba ctx packed Wd Hd)
+        [su _ _ _]    (read-rgba ctx (:subject pm) Wd Hd)]
+    ;; NOT (:subject pm) — it is returned as :subject and outlives this call
+    (free-textures! [(:eigen tensor) (:flow tensor) (:tensor tensor)
+                     (:detail pm) (:sharp pm) (:mid pm) (:edge pm)])
+    {:detail packed :subject (:subject pm) :noise noise :noise-swirl0 noise0
+     :blur blur :blur-drift drift :blur-heavy heavy :raw src :perm perm
+     ;; placement-map is pre-normalized, so dmax is 1.0 by construction
+     :dmap {:h Hd :w Wd :detail dd :sharp ds :edge de :mid dm :subject su
+            :dmax 1.0 :src-h H :src-w W}
+     :dmax 1.0
+     :detail-dim [(double Hd) (double Wd)] :detail-src [(double H) (double W)]
+     :noise-dim  [(double Ht) (double Wt)] :noise-src  [(double H) (double W)]
+     :H H :W W}))

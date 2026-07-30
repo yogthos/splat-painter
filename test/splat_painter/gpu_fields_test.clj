@@ -17,6 +17,8 @@
             [splat-painter.gpu-fields :as gf]
             [splat-painter.image :as image]
             [splat-painter.structure :as structure]
+            [splat-painter.seed :as seed]
+            [splat-painter.gen :as gen]
             [splat-painter.wavelet :as wavelet]))
 
 (def ^:private fixture "test/splat_painter/fixtures/eye.jpeg")
@@ -288,6 +290,77 @@
                     ;; p=4 means pow() on a blurred weight, so the float32 gap is
                     ;; wider here than for the linear fields
                     (is (< d 1e-3) (str "dominant r=" r " max diff " d))))))))))))
+
+(deftest noise-fields-match-the-cpu
+  (testing "the baked orientation field, both ends of the Swirl dial"
+    (with-gl
+      (fn []
+        (let [im (img) H (long (:height im)) W (long (:width im))
+              ctx (gf/make-ctx) progs (gf/build-programs)]
+          (when progs
+            (let [src  (gf/upload-rgb! im)
+                  t    (gf/analyze! ctx progs src H W 768)
+                  perm (gen/upload-perm!)
+                  [n1 n0] (gf/noise-fields! ctx progs (:eigen t) (:flow t) perm
+                                            (:w t) (:h t) W H)
+                  want (seed/prep-noise (structure/analyze im 768))
+                  w (:w t) h (:h t)]
+              ;; cos2θ/sin2θ, not θ — that IS the stored representation, and
+              ;; comparing components sidesteps the wrap entirely
+              (doseq [[tex ch k] [[n1 0 :c2] [n1 1 :s2] [n1 2 :coherence]
+                                  [n0 0 :c2s] [n0 1 :s2s]]]
+                (let [d (max-diff (gf/read-channel ctx tex w h ch) (get want k))]
+                  ;; Perlin runs in float32 here against float64 on the CPU, and
+                  ;; the result goes through two atan2 blends
+                  (is (< d 1e-3) (str (name k) " max diff " d)))))))))))
+
+(defn- solid-image
+  "An image with a large perfectly uniform region — the case a photograph
+   fixture does not have. Every Sobel tap there is exactly 0, which is where
+   atan(0,0) lives."
+  [H W]
+  {:height H :width W :channels 3
+   :pixels (let [a (double-array (* H W 3))]
+             ;; left half solid black, right half a gentle ramp, so there is both
+             ;; a dead-flat area and a real edge between them
+             (dotimes [i (* H W)]
+               (let [x (mod i W)
+                     v (if (< x (quot W 2)) 0.0 (/ (double (- x (quot W 2))) W))]
+                 (aset a (* 3 i) v) (aset a (+ (* 3 i) 1) v) (aset a (+ (* 3 i) 2) v)))
+             a)})
+
+(deftest no-field-is-ever-nan
+  (testing "flat regions do not produce NaN anywhere in the chain"
+    ;; This is deliberately UNGATED. The theta comparison above only looks where
+    ;; grad2 clears a fraction of gmax — which is exactly where a zero tensor
+    ;; ISN'T — so it cannot see this. A NaN theta poisons a splat's covariance
+    ;; and propagates through the geometry shader.
+    (with-gl
+      (fn []
+        (let [im (solid-image 64 64)
+              H 64 W 64
+              ctx (gf/make-ctx) progs (gf/build-programs)]
+          (when progs
+            (let [src  (gf/upload-rgb! im)
+                  t    (gf/analyze! ctx progs src H W 768)
+                  pm   (gf/placement-map! ctx progs src (:eigen t) H W (:h t) (:w t) 768 4)
+                  perm (gen/upload-perm!)
+                  [n1 n0] (gf/noise-fields! ctx progs (:eigen t) (:flow t) perm
+                                            (:w t) (:h t) W H)
+                  nan? (fn [^doubles a] (areduce a i acc false
+                                                 (or acc (Double/isNaN (aget a i)))))]
+              (doseq [[label tex w h] [["eigen" (:eigen t) (:w t) (:h t)]
+                                       ["flow" (:flow t) (:w t) (:h t)]
+                                       ["noise" n1 (:w t) (:h t)]
+                                       ["noise-swirl0" n0 (:w t) (:h t)]
+                                       ["detail" (:detail pm) (:w pm) (:h pm)]
+                                       ["sharp" (:sharp pm) (:w pm) (:h pm)]
+                                       ["mid" (:mid pm) (:w pm) (:h pm)]
+                                       ["edge" (:edge pm) (:w pm) (:h pm)]
+                                       ["subject" (:subject pm) (:w pm) (:h pm)]]
+                      c (range 3)]
+                (is (not (nan? (gf/read-channel ctx tex w h c)))
+                    (str label " channel " c " contains NaN"))))))))))
 
 (deftest box-blur-replicates-edges
   (testing "corner pixels use the clamped window, not a zero-padded one"

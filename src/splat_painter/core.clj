@@ -21,6 +21,7 @@
             [splat-painter.gen       :as gen]
             [splat-painter.image     :as image]
             [splat-painter.fields    :as fields]
+            [splat-painter.gpu-fields :as gf]
             [splat-painter.seed      :as seed]
             [jolt.ffi       :as ffi]))
 
@@ -67,8 +68,6 @@
 ;; goldens pin it, GA_PAINTER_GPU_VERIFY compares the two fields numerically, and
 ;; `jolt -M:preview` renders one to PNG with no GL context at all.
 (defonce image-atom (atom nil))   ; {:height :width :channels :pixels} or nil
-;; a raw image waiting for its fields — see ensure-fields!
-(defonce ^:private pending-image-atom (atom nil))
 (defonce gl-state   (atom {}))    ; per-GLArea GL handles, keyed by area pointer
 (defonce saved?-atom (atom false)) ; one-shot headless save via GA_PAINTER_SAVE_PNG
 (defonce viewport   (atom [800 600]))
@@ -167,9 +166,14 @@
 (defn- cur-tex-edge   [] (or (some-> (System/getenv "GA_PAINTER_TEX_EDGE")   Double/parseDouble) @tex-edge-atom))
 (defn- cur-layer-opacity [] (or (some-> (System/getenv "GA_PAINTER_LAYER_OPACITY") Double/parseDouble) @layer-opacity-atom))
 
-(defn- field-for-current-controls []
-  (when-let [img @image-atom]
-    (seed/splat-field img {:count     (cur-count)
+(defn- field-for-current-controls
+  "The CPU reference field. image-atom now holds RAW pixels — the shipping path
+   builds its fields on the GPU — so this builds the CPU ones on demand. Only
+   GA_PAINTER_GPU_VERIFY and the diagnostics come through here, never a render."
+  []
+  (when-let [img0 @image-atom]
+    (let [img (if (:structure img0) img0 (fields/prepare img0))]
+      (seed/splat-field img {:count     (cur-count)
                            :size      (cur-size)
                            :stroke    (cur-stroke)
                            :detail    (cur-detail)
@@ -180,7 +184,7 @@
                            :size-mid   (cur-mid)
                            :size-fine  (cur-fine)
                            :edge-band  (cur-cutin)
-                           :swirl      (cur-swirl)})))
+                           :swirl      (cur-swirl)}))))
 
 (defn- request-render! []
   (when-let [a @area-atom] (glx/gtk-gl-area-queue-render a)))
@@ -194,34 +198,14 @@
   [img0]
   (fields/prepare img0))
 
-(defn- ensure-fields!
-  "Build the deferred image's fields, if one is waiting. Returns the prepared
-   image (or nil).
-
-   Field construction is deferred because -main loads the first image BEFORE
-   ui/run, so there is no GL context at that point — and the fields are moving
-   onto the GPU, which needs one. Every other prepare-image caller (add-layer!,
-   the passes driver) already runs on the GUI thread with a context current; this
-   only covers the startup path. Call it from on-render, where that is true."
-  []
-  (when-let [raw @pending-image-atom]
-    (reset! pending-image-atom nil)
-    ;; on-image-loaded used to catch a failure in here; now that the work happens
-    ;; on the render callback it needs its own guard, or one bad image throws
-    ;; through GTK's signal handler on every frame.
-    (try
-      (reset! image-atom (prepare-image raw))
-      (catch Throwable e
-        (reset! status-atom (str "failed to prepare image: " (ex-message e))))))
-  @image-atom)
-
 (defn- on-image-loaded [path]
   (try
+    ;; Just the pixels. Every field is derived in ensure-gpu! on the render
+    ;; callback, which is the only place a GL context exists — -main loads the
+    ;; first image before ui/run, so nothing here may touch GL or depend on it.
     (let [img (image/load-image path 1024)]
       (clear-layers!)               ; new file: drop the previous image's committed layers + free their textures
-      ;; hand the RAW image to the render thread; the fields are built there
-      (reset! image-atom nil)
-      (reset! pending-image-atom img)
+      (reset! image-atom img)
       (reset! image-path-atom path)
       ;; Size is the base (flat-region) stroke stdev; detail shrinks it locally. Seed
       ;; it relative to the image so default strokes are visible brush marks.
@@ -340,6 +324,26 @@
     (gl/gl-get-integerv gl/GL-FRAMEBUFFER-BINDING p)
     (let [v (ffi/read p :int 0)] (ffi/free p) v)))
 
+(defonce ^:private gpu-fields-ctx (atom nil))
+
+(defn- build-image-fields!
+  "The per-image field textures. Builds them with GPU passes when the shaders
+   compile, otherwise falls back to computing them on the CPU and uploading.
+
+   The fallback is not ceremony: gpu-fields needs GLSL that a driver could
+   reject, and an image that will not load is worse than one that loads slowly.
+   GA_PAINTER_CPU_FIELDS forces it, which is also how the two paths get compared."
+  [img perm]
+  (let [forced? (some? (System/getenv "GA_PAINTER_CPU_FIELDS"))
+        progs   (when-not forced?
+                  (or (:progs @gpu-fields-ctx)
+                      (when-let [p (gf/build-programs)]
+                        (swap! gpu-fields-ctx assoc :progs p) p)))]
+    (if-not progs
+      (gen/upload-fields! (fields/prepare img) perm)
+      (let [ctx (gf/make-ctx)]
+        (gf/build-fields! ctx progs img perm)))))
+
 (defn- gpu-controls []
   {:count (cur-count) :size (cur-size) :stroke (cur-stroke) :detail (cur-detail)
    :variation (cur-var) :curvature (cur-curv) :contrast (cur-contrast)
@@ -412,7 +416,7 @@
         gpu (if (identical? img (:fields-img gpu))
               gpu
               (do (delete-field-textures! (:fields gpu))   ; free outgoing per-image textures
-                  (assoc gpu :fields (gen/upload-fields! img (:perm gpu)) :fields-img img)))]
+                  (assoc gpu :fields (build-image-fields! img (:perm gpu)) :fields-img img)))]
     (swap! gl-state assoc-in [area :gpu] gpu)
     gpu))
 
@@ -768,7 +772,7 @@
             img' (rgba->image buf iw ih)]
         (ffi/free buf)
         (commit-active!)                         ; snapshot the live pass (needs the OLD image fields)
-        (reset! image-atom (prepare-image img')))
+        (reset! image-atom img'))
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))
       (reset! active-layer-atom (count @layers-atom))
@@ -805,7 +809,7 @@
             ;; bottom layer: source is the original file (reload fields, but do NOT touch
             ;; the slider atoms — on-image-loaded would reset size-atom).
             (when @image-path-atom
-              (reset! image-atom (prepare-image (image/load-image @image-path-atom 1024))))
+              (reset! image-atom (image/load-image @image-path-atom 1024)))
             ;; else: composite the layers below j over opaque black, read it back.
             (let [iw      (int (:width @image-atom)) ih (int (:height @image-atom))
                   prev-fbo (read-fbo-binding)]
@@ -814,7 +818,7 @@
               (gpu-draw! area iw ih iw ih {:blits-below true})
               (let [buf (ffi/alloc (* iw ih 4))]
                 (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
-                (reset! image-atom (prepare-image (rgba->image buf iw ih)))
+                (reset! image-atom (rgba->image buf iw ih))
                 (ffi/free buf))
               (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
               (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))))
@@ -851,10 +855,8 @@
     (require 'splat-painter.tf-smoke)
     ((resolve 'splat-painter.tf-smoke/run!)))
   (when-let [_st (get @gl-state area)]
-    ;; a context is current here, which is why the fields are built from this
-    ;; point and not at load time
     (let [[w h] @viewport
-          img   (ensure-fields!)]
+          img   @image-atom]
       (if-not img
         (do (gl/gl-clear-color 0.05 0.06 0.09 1.0) (gl/gl-clear gl/GL-COLOR-BUFFER-BIT))
         (gpu-draw! area w h (:width img) (:height img)))
