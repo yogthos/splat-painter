@@ -100,9 +100,14 @@ Headless overrides (for scripting/testing): `GA_PAINTER_SAVE_PNG`,
 `GA_PAINTER_DETAIL`, `GA_PAINTER_STROKE`, `GA_PAINTER_VAR`, `GA_PAINTER_CURV`,
 `GA_PAINTER_BROAD/MID/FINE`, `GA_PAINTER_CUTIN`, `GA_PAINTER_SWIRL`,
 `GA_PAINTER_CONTRAST`, `GA_PAINTER_HARDNESS`, `GA_PAINTER_TEX_STREAK/GRAIN/EDGE`.
-Then `GA_PAINTER_CPU_GEN` (CPU reference path), `GA_PAINTER_GPU_VERIFY`,
-`GA_PAINTER_LOOP_RENDER`, `GA_PAINTER_TF_SMOKE`.
+Then `GA_PAINTER_GPU_VERIFY`, `GA_PAINTER_LOOP_RENDER`, `GA_PAINTER_TF_SMOKE`.
 `core-test` pins the one-per-slider rule.
+
+The CPU generator (`splat-painter.seed/splat-field`) stays the tested reference —
+the goldens pin it, `GA_PAINTER_GPU_VERIFY` compares the two fields numerically,
+and `jolt -M:preview` renders one to PNG with no GL context. There is no CPU
+render path in the app: `GA_PAINTER_LOOP_RENDER` swaps the quad renderer for the
+pixels×splats loop, which only completes at low splat counts.
 
 ## REPL-driven development
 
