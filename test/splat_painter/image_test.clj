@@ -2,7 +2,6 @@
   (:require [clojure.test :refer [deftest is testing]]
             [jolt.ffi :as ffi]
             [splat-painter.image :as image]
-            [splat-painter.png :as png]
             [splat-painter.seed :as seed]
             [splat-painter.gaussian :as g]))
 
@@ -36,12 +35,12 @@
 
 (deftest read-gerror-returns-nil-on-null-slot
   ;; A zeroed GError** slot (NULL GError*) must read back as nil, not
-  ;; dereference address 0+offset into a native fault. Both copies (image +
-  ;; png) were built with the same broken read-gerror, so test them together.
+  ;; dereference address 0+offset into a native fault. The message pointer sits
+  ;; at byte offset 8, after the two 4-byte fields — reading 16 fetched one
+  ;; pointer past the struct and faulted.
   (let [slot (ffi/alloc (ffi/sizeof :pointer))]
     (ffi/write slot :pointer 0 ffi/null)
     (is (nil? (#'splat-painter.image/read-gerror slot)))
-    (is (nil? (#'splat-painter.png/read-gerror slot)))
     (ffi/free slot)))
 
 (deftest load-image-error-carries-the-real-glib-message
