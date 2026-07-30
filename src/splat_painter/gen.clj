@@ -188,6 +188,22 @@ float mapAt(int sel, float x, float y){
 float edgeAt(float x, float y){
   return fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc).b;
 }
+// How far the ridge under a stroke RUNS along its own tangent (mirror
+// seed/edge-run). Returns the SHORTER of the two directions — a stroke centred on
+// its seed is cropped by whichever end runs out first. RUN_TAPS must match
+// seed/run-taps or the two paths crop differently.
+const float EDGE_FLOOR = 0.10;   // mirror seed/edge-floor
+const int RUN_TAPS = 8;
+float edgeRun(float x, float y, float dx, float dy, float maxd){
+  float step = maxd / float(RUN_TAPS);
+  float lo = maxd, hi = maxd;
+  for (int i = 1; i <= RUN_TAPS; ++i) {
+    float d = step * float(i);
+    if (hi == maxd && edgeAt(x + d*dx, y + d*dy) < EDGE_FLOOR) hi = d - step;
+    if (lo == maxd && edgeAt(x - d*dx, y - d*dy) < EDGE_FLOOR) lo = d - step;
+  }
+  return min(lo, hi);
+}
 // ABSOLUTE subjectness (mirror wavelet/subject-abs-at): raw globally-scaled
 // fine-band energy + edge strength — 0 in bokeh, high on real structure. Drives
 // the broad tier's bokeh adaptation; the locally-normalized maps (which light
@@ -293,7 +309,7 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, 4-tap bilinear (mirr
 // `cohmul` rounds MELTED bokeh strokes off (coherence → 0 kills the elongation
 // and pulls the colour toward the smooth blur): an elongated needle on a soft
 // gradient always reads as a directional streak, however faithful its colour.
-void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap, float cohmul, float selong){
+void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap, float cohmul, float selong, float rcap){
   vec2  tc    = fieldsAt(px, py);
   float theta = tc.x, coh0 = tc.y * cohmul;
   vec3  bilat = sampleRGB(u_blurTex, hx, hy);
@@ -322,8 +338,15 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   // of the tier (csz/selong) rather than of whatever coherence happens to sit there.
   float se  = (selong > 0.0) ? selong : sqrt(e);
   float s0  = csz * (1.0 + u_variation * 0.5 * (2.0 * sn));
-  float sx  = s0 * se;
   float sy  = s0 / se;
+  // RIDGE CROP (mirror seed/splat-record): the long axis may not outrun the
+  // feature. rcap is how far this segment's ridge stays alive along its tangent;
+  // a gaussian reads to ~2 sigma, so sigma past rcap/2 paints beyond the feature's
+  // end — on a line of text, into the gap before the next letter. Only the LONG
+  // axis moves: shrinking se would divide into sy and fatten the stroke ACROSS the
+  // edge. Floored at sy so a cropped stroke becomes a round dab, not a cross dash.
+  float sxf = s0 * se;
+  float sx  = (rcap > 0.0) ? max(sy, min(sxf, 0.5 * rcap)) : sxf;
   float sx2 = sx*sx, sy2 = sy*sy;
   float c = cos(theta), s = sin(theta);
   float c00 = sx2*c*c + sy2*s*s;
@@ -496,7 +519,7 @@ void main(){
   // paint AVERAGED colour, mids halfway, fine layers fully specific
   float tcap = (lvl <= 1) ? 0.35 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
-    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt, 0.0);
+    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt, 0.0, 0.0);
     return;
   }
 
@@ -721,7 +744,8 @@ void main(){
         // position, where the fixed offset would draw the dark ground through a lit shape.
         emitSplat(px, py, cpx + bax*(wsl < 1.0 ? 1.0 : 0.0) + wsl*(px - cpx),
                         cpy + bay*(wsl < 1.0 ? 1.0 : 0.0) + wsl*(py - cpy),
-                  sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt, selong);
+                  sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt, selong,
+                  detail ? edgeRun(px, py, dx0, dy0, 2.0 * sz * 3.0) : 0.0);
       }
       emitted++;
       // bend gated by coherence, physical size AND the wavelet edge map (mirror seed);
