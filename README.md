@@ -84,7 +84,7 @@ Sliders (live):
 ## Test & check
 
 ```sh
-jolt -M:test      # unit + golden-field regression tests
+jolt -M:test      # unit + golden-field regression tests (incl. GPU field passes)
 jolt -M:check     # headless: shader GLSL structure, packing, full pipeline
 jolt -M:preview   # CPU render to PNG (no GL needed)
 jolt -M:prof      # analysis/placement profiling
@@ -95,6 +95,12 @@ jolt -M:pin       # print the golden fixture's actual checksums (for re-pinning)
 ```
 
 Dev/debug entry points live under `test/`; only the app ships from `src/`.
+
+The GPU field passes (`splat-painter.gpu-fields`) are tested against their CPU
+twins on a windowless GL context — `glimmer-gl.offscreen` asks GDK for a context
+bound to the display rather than a surface, so `-M:test` covers render-to-texture
+code with no window. On a machine with no display those tests print why they
+skipped rather than failing.
 
 Headless overrides (for scripting/testing): `GA_PAINTER_SAVE_PNG`,
 `GA_PAINTER_QUIT_MS`, and one per slider — `GA_PAINTER_COUNT`, `GA_PAINTER_SIZE`,
