@@ -25,6 +25,7 @@
    (x,y) into them exactly like the CPU (round(x·dim/src))."
   (:require [glimmer-gl.gl :as gl]
             [splat-painter.shader :as shader]
+            [splat-painter.structure :as structure]
             [splat-painter.seed :as seed]
             [splat-painter.noise :as noise]
             [jolt.ffi :as ffi]))
@@ -188,6 +189,33 @@ float mapAt(int sel, float x, float y){
 float edgeAt(float x, float y){
   return fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc).b;
 }
+// How far the ridge under a stroke RUNS along its own tangent (mirror
+// seed/edge-run). Returns the SHORTER of the two directions — a stroke centred on
+// its seed is cropped by whichever end runs out first. RUN_TAPS must match
+// seed/run-taps or the two paths crop differently.
+const float EDGE_FLOOR = 0.10;   // mirror seed/edge-floor
+const int RUN_TAPS = 8;
+// FULL-RESOLUTION edge strength, carried in the raw texture's alpha (mirror
+// structure/full-edge). NEAREST, not bilinear: the point of this map is that it
+// is unsmoothed, and interpolating would put a blur straight back on it. The
+// placement maps cannot answer at this scale — measured on a line of text, :mid
+// is saturated at 1.0 across the whole title and :edge stays over 0.6 in the
+// gaps, so every probe against them reports the ridge alive and nothing crops.
+float fullEdgeAt(float x, float y){
+  int r = int(clamp(floor(x + 0.5), 0.0, float(u_H - 1)));
+  int c = int(clamp(floor(y + 0.5), 0.0, float(u_W - 1)));
+  return texelFetch(u_rawTex, ivec2(c, r), 0).a;
+}
+float edgeRun(float x, float y, float dx, float dy, float maxd){
+  float step = maxd / float(RUN_TAPS);
+  float lo = maxd, hi = maxd;
+  for (int i = 1; i <= RUN_TAPS; ++i) {
+    float d = step * float(i);
+    if (hi == maxd && fullEdgeAt(x + d*dx, y + d*dy) < EDGE_FLOOR) hi = d - step;
+    if (lo == maxd && fullEdgeAt(x - d*dx, y - d*dy) < EDGE_FLOOR) lo = d - step;
+  }
+  return min(lo, hi);
+}
 // ABSOLUTE subjectness (mirror wavelet/subject-abs-at): raw globally-scaled
 // fine-band energy + edge strength — 0 in bokeh, high on real structure. Drives
 // the broad tier's bokeh adaptation; the locally-normalized maps (which light
@@ -293,7 +321,7 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, 4-tap bilinear (mirr
 // `cohmul` rounds MELTED bokeh strokes off (coherence → 0 kills the elongation
 // and pulls the colour toward the smooth blur): an elongated needle on a soft
 // gradient always reads as a directional streak, however faithful its colour.
-void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap, float cohmul, float selong){
+void emitSplat(float px, float py, float hx, float hy, float csz, float D, float sn, float tn, float alpha, float hb, float traw, float tcap, float cohmul, float selong, float rcap){
   vec2  tc    = fieldsAt(px, py);
   float theta = tc.x, coh0 = tc.y * cohmul;
   vec3  bilat = sampleRGB(u_blurTex, hx, hy);
@@ -322,8 +350,15 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   // of the tier (csz/selong) rather than of whatever coherence happens to sit there.
   float se  = (selong > 0.0) ? selong : sqrt(e);
   float s0  = csz * (1.0 + u_variation * 0.5 * (2.0 * sn));
-  float sx  = s0 * se;
   float sy  = s0 / se;
+  // RIDGE CROP (mirror seed/splat-record): the long axis may not outrun the
+  // feature. rcap is how far this segment's ridge stays alive along its tangent;
+  // a gaussian reads to ~2 sigma, so sigma past rcap/2 paints beyond the feature's
+  // end — on a line of text, into the gap before the next letter. Only the LONG
+  // axis moves: shrinking se would divide into sy and fatten the stroke ACROSS the
+  // edge. Floored at sy so a cropped stroke becomes a round dab, not a cross dash.
+  float sxf = s0 * se;
+  float sx  = (rcap > 0.0) ? max(sy, min(sxf, 0.5 * rcap)) : sxf;
   float sx2 = sx*sx, sy2 = sy*sy;
   float c = cos(theta), s = sin(theta);
   float c00 = sx2*c*c + sy2*s*s;
@@ -496,7 +531,7 @@ void main(){
   // paint AVERAGED colour, mids halfway, fine layers fully specific
   float tcap = (lvl <= 1) ? 0.35 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
-    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt, 0.0);
+    emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt, 0.0, 0.0);
     return;
   }
 
@@ -721,7 +756,8 @@ void main(){
         // position, where the fixed offset would draw the dark ground through a lit shape.
         emitSplat(px, py, cpx + bax*(wsl < 1.0 ? 1.0 : 0.0) + wsl*(px - cpx),
                         cpy + bay*(wsl < 1.0 ? 1.0 : 0.0) + wsl*(py - cpy),
-                  sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt, selong);
+                  sz, D, snoise, tnoise, al, hb, traw, tcap, 1.0 - melt, selong,
+                  detail ? edgeRun(px, py, dx0, dy0, 2.0 * sz * 3.0) : 0.0);
       }
       emitted++;
       // bend gated by coherence, physical size AND the wavelet edge map (mirror seed);
@@ -822,6 +858,8 @@ void main(){
         ^doubles de (or (:edge dmap) (double-array (alength dd)))
         ^doubles dm2 (or (:mid dmap) dd)
         ^doubles dsu (or (:subject dmap) dd)
+        ;; full-res edge for raw's alpha; recomputed only if prepare did not attach it
+        ^doubles efull (:edge (or (:edge-full img) (structure/full-edge img)))
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
         ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
@@ -841,7 +879,14 @@ void main(){
     (upload-rgba! blur-t   W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blur b) (aget blur (+ b 1)) (aget blur (+ b 2)) 1.0]))))
     (upload-rgba! blurd-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurd b) (aget blurd (+ b 1)) (aget blurd (+ b 2)) 1.0]))))
     (upload-rgba! blurh-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurh b) (aget blurh (+ b 1)) (aget blurh (+ b 2)) 1.0]))))
-    (upload-rgba! raw-t    W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget raw b) (aget raw (+ b 1)) (aget raw (+ b 2)) 1.0]))))
+    ;; ALPHA carries FULL-RESOLUTION edge strength (structure/full-edge), not 1.0.
+    ;; The generation shader's ridge crop needs a pixel-scale "is the feature still
+    ;; here?" signal, and every placement map is too smoothed to give one — on a
+    ;; line of text :mid is saturated at 1.0 across the whole title. Riding in this
+    ;; unused channel costs no extra texture. Mirrors gpu-fields/build-fields!.
+    (upload-rgba! raw-t    W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)]
+                                                         [(aget raw b) (aget raw (+ b 1)) (aget raw (+ b 2))
+                                                          (aget ^doubles efull i)]))))
     {:detail detail-t :subject subj-t :noise noise-t :noise-swirl0 noises-t
      :blur blur-t :blur-drift blurd-t :blur-heavy blurh-t :raw raw-t :perm perm-tex
      :dmap dmap                              ; the CPU detail map, for layer-params' budget

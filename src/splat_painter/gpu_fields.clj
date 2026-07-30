@@ -721,6 +721,49 @@ void main(){
   frag = vec4(cos(2.0*theta), sin(2.0*theta), coherence, 0.0);
 }"))
 
+;; --- full-resolution edge strength -------------------------------------------
+;; Rides in the ALPHA channel of the raw image texture, which the generation
+;; shader has never used — so a pixel-scale edge signal costs no extra texture and
+;; no extra memory. See structure/full-edge for why it has to exist: every
+;; placement map is built at ≤768 with blurs over the tensor's own, so none of
+;; them can tell whether a 4px feature is still there.
+
+(def ^:private fulledge-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;      // raw image
+uniform sampler2D u_g2;       // per-texel jxx+jyy from the Sobel pass
+uniform sampler2D u_stats;    // 1x1 (max, sum) of u_g2
+uniform vec2 u_dim;
+void main(){
+  ivec2 p = ivec2(floor(v_uv * u_dim));
+  float gmax = max(texelFetch(u_stats, ivec2(0), 0).r, 1e-12);
+  float e = sqrt(texelFetch(u_g2, p, 0).r / gmax);
+  // keep the colour, replace the unused alpha
+  frag = vec4(texelFetch(u_src, p, 0).rgb, e);
+}")
+
+(def ^:private g2-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_dim;
+vec3 tap(ivec2 q){
+  return pow(texelFetch(u_src, clamp(q, ivec2(0), ivec2(u_dim) - ivec2(1)), 0).rgb, vec3(0.4545));
+}
+void main(){
+  ivec2 c = ivec2(floor(v_uv * u_dim));
+  vec3 L00 = tap(c + ivec2(-1,-1)), L01 = tap(c + ivec2(0,-1)), L02 = tap(c + ivec2(1,-1));
+  vec3 L10 = tap(c + ivec2(-1, 0)),                             L12 = tap(c + ivec2(1, 0));
+  vec3 L20 = tap(c + ivec2(-1, 1)), L21 = tap(c + ivec2(0, 1)), L22 = tap(c + ivec2(1, 1));
+  vec3 gx = (L20 + 2.0*L21 + L22) - (L00 + 2.0*L01 + L02);
+  vec3 gy = (-L00 + L02) + (-2.0*L10 + 2.0*L12) + (-L20 + L22);
+  // jxx + jyy, unblurred and at source resolution — that is the whole point
+  frag = vec4(dot(gx,gx) + dot(gy,gy), 0.0, 0.0, 1.0);
+}")
+
 (def ^:private pack-fs
   "#version 330 core
 in vec2 v_uv;
@@ -762,7 +805,9 @@ void main(){
             :binfin  (gl/make-program vs-src binfin-fs)
             :upsamp  (gl/make-program vs-src upsample-fs)
             :noise   (gl/make-program vs-src noise-fs)
-            :pack    (gl/make-program vs-src pack-fs)}]
+            :pack    (gl/make-program vs-src pack-fs)
+            :g2      (gl/make-program vs-src g2-fs)
+            :fulledge (gl/make-program vs-src fulledge-fs)}]
     (when (every? some? (vals ps))
       (into {} (map (fn [[k v]] [k {:program v}])) ps))))
 
@@ -1057,16 +1102,27 @@ void main(){
         blur   (bilateral-blur! ctx progs src (new-target W H) W H 3)
         drift  (box-blur! ctx progs src (new-target W H) (new-scratch W H) W H 2)
         heavy  (dominant-blur! ctx progs src (new-target W H) W H (heavy-radius H))
+        ;; pixel-scale edge strength into raw's unused alpha — the signal every
+        ;; placement map is too smoothed to carry
+        g2     (new-target W H)
+        _      (run-pass! ctx (:g2 progs) g2 W H [["u_src" src]] [["u_dim" :2f W H]])
+        gstat2 (let [[t sc] (stats! ctx progs g2 W H 0)]
+                 (free-textures! sc) t)
+        rawe   (new-target W H)
+        _      (run-pass! ctx (:fulledge progs) rawe W H
+                          [["u_src" src] ["u_g2" g2] ["u_stats" gstat2]]
+                          [["u_dim" :2f W H]])
         ;; the budget reduction's inputs — the only thing that comes back
         [dd ds de dm] (read-rgba ctx packed Wd Hd)
         [su _ _ _]    (read-rgba ctx (:subject pm) Wd Hd)]
     ;; NOT (:subject pm) — it is returned as :subject and outlives this call
     (free-textures! [(:eigen tensor) (:flow tensor) (:tensor tensor)
-                     (:detail pm) (:sharp pm) (:mid pm) (:edge pm)])
+                     (:detail pm) (:sharp pm) (:mid pm) (:edge pm)
+                     g2 gstat2 src])
     ;; the caller is mid-draw; give back the viewport the passes trampled
     (restore-viewport! ctx)
     {:detail packed :subject (:subject pm) :noise noise :noise-swirl0 noise0
-     :blur blur :blur-drift drift :blur-heavy heavy :raw src :perm perm
+     :blur blur :blur-drift drift :blur-heavy heavy :raw rawe :perm perm
      ;; placement-map is pre-normalized, so dmax is 1.0 by construction
      :dmap {:h Hd :w Wd :detail dd :sharp ds :edge de :mid dm :subject su
             :dmax 1.0 :src-h H :src-w W}
