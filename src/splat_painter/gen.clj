@@ -25,6 +25,7 @@
    (x,y) into them exactly like the CPU (round(x·dim/src))."
   (:require [glimmer-gl.gl :as gl]
             [splat-painter.shader :as shader]
+            [splat-painter.structure :as structure]
             [splat-painter.seed :as seed]
             [splat-painter.noise :as noise]
             [jolt.ffi :as ffi]))
@@ -194,13 +195,24 @@ float edgeAt(float x, float y){
 // seed/run-taps or the two paths crop differently.
 const float EDGE_FLOOR = 0.10;   // mirror seed/edge-floor
 const int RUN_TAPS = 8;
+// FULL-RESOLUTION edge strength, carried in the raw texture's alpha (mirror
+// structure/full-edge). NEAREST, not bilinear: the point of this map is that it
+// is unsmoothed, and interpolating would put a blur straight back on it. The
+// placement maps cannot answer at this scale — measured on a line of text, :mid
+// is saturated at 1.0 across the whole title and :edge stays over 0.6 in the
+// gaps, so every probe against them reports the ridge alive and nothing crops.
+float fullEdgeAt(float x, float y){
+  int r = int(clamp(floor(x + 0.5), 0.0, float(u_H - 1)));
+  int c = int(clamp(floor(y + 0.5), 0.0, float(u_W - 1)));
+  return texelFetch(u_rawTex, ivec2(c, r), 0).a;
+}
 float edgeRun(float x, float y, float dx, float dy, float maxd){
   float step = maxd / float(RUN_TAPS);
   float lo = maxd, hi = maxd;
   for (int i = 1; i <= RUN_TAPS; ++i) {
     float d = step * float(i);
-    if (hi == maxd && edgeAt(x + d*dx, y + d*dy) < EDGE_FLOOR) hi = d - step;
-    if (lo == maxd && edgeAt(x - d*dx, y - d*dy) < EDGE_FLOOR) lo = d - step;
+    if (hi == maxd && fullEdgeAt(x + d*dx, y + d*dy) < EDGE_FLOOR) hi = d - step;
+    if (lo == maxd && fullEdgeAt(x - d*dx, y - d*dy) < EDGE_FLOOR) lo = d - step;
   }
   return min(lo, hi);
 }
@@ -846,6 +858,8 @@ void main(){
         ^doubles de (or (:edge dmap) (double-array (alength dd)))
         ^doubles dm2 (or (:mid dmap) dd)
         ^doubles dsu (or (:subject dmap) dd)
+        ;; full-res edge for raw's alpha; recomputed only if prepare did not attach it
+        ^doubles efull (:edge (or (:edge-full img) (structure/full-edge img)))
         nf (:noise-fields img)
         Hn (long (:h nf)) Wn (long (:w nf))
         ^doubles c2 (:c2 nf) ^doubles s2 (:s2 nf) ^doubles co (:coherence nf)
@@ -865,7 +879,14 @@ void main(){
     (upload-rgba! blur-t   W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blur b) (aget blur (+ b 1)) (aget blur (+ b 2)) 1.0]))))
     (upload-rgba! blurd-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurd b) (aget blurd (+ b 1)) (aget blurd (+ b 2)) 1.0]))))
     (upload-rgba! blurh-t  W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget blurh b) (aget blurh (+ b 1)) (aget blurh (+ b 2)) 1.0]))))
-    (upload-rgba! raw-t    W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)] [(aget raw b) (aget raw (+ b 1)) (aget raw (+ b 2)) 1.0]))))
+    ;; ALPHA carries FULL-RESOLUTION edge strength (structure/full-edge), not 1.0.
+    ;; The generation shader's ridge crop needs a pixel-scale "is the feature still
+    ;; here?" signal, and every placement map is too smoothed to give one — on a
+    ;; line of text :mid is saturated at 1.0 across the whole title. Riding in this
+    ;; unused channel costs no extra texture. Mirrors gpu-fields/build-fields!.
+    (upload-rgba! raw-t    W  H  (rgba-ptr H W (fn [i] (let [b (* i 3)]
+                                                         [(aget raw b) (aget raw (+ b 1)) (aget raw (+ b 2))
+                                                          (aget ^doubles efull i)]))))
     {:detail detail-t :subject subj-t :noise noise-t :noise-swirl0 noises-t
      :blur blur-t :blur-drift blurd-t :blur-heavy blurh-t :raw raw-t :perm perm-tex
      :dmap dmap                              ; the CPU detail map, for layer-params' budget
