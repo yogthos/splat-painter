@@ -10,7 +10,8 @@
             [splat-painter.noise-test]
             [splat-painter.wavelet-test]
             [splat-painter.core-test]
-            [splat-painter.fields-test]))
+            [splat-painter.fields-test]
+            [splat-painter.gpu-fields-test]))
 
 (defmethod t/report :error [m]
   (t/with-test-out
@@ -31,7 +32,10 @@
                              'splat-painter.noise-test
                              'splat-painter.wavelet-test
                              'splat-painter.core-test
-                             'splat-painter.fields-test)
+                             'splat-painter.fields-test
+                             ;; needs a GL context; skips itself when there is no
+                             ;; display (glimmer-gl.offscreen reports why)
+                             'splat-painter.gpu-fields-test)
         failed (+ (:fail results 0) (:error results 0))]
     (println (format "\n%d tests, %d passed, %d failed"
                      (:test results 0) (:pass results 0) failed))
