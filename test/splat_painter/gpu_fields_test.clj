@@ -245,6 +245,50 @@
   (testing "the same with the nearest reduction in play"
     (with-gl #(check-placement 40))))
 
+;; --- binned colour fields ----------------------------------------------------
+
+(defn- rgb-max-diff
+  "max |a-b| between a GPU RGBA texture's three colour channels and a flat
+   H*W*3 CPU array."
+  [ctx tex w h ^doubles want]
+  (reduce max 0.0
+          (for [c (range 3)]
+            (let [^doubles got (gf/read-channel ctx tex w h c)]
+              (areduce got i m 0.0
+                       (max m (Math/abs (- (aget got i)
+                                           (aget want (+ (* 3 i) c))))))))))
+
+(deftest bilateral-blur-matches-the-cpu
+  (testing "the edge-aware colour field, K=9 luma bins"
+    (with-gl
+      (fn []
+        (let [im (img) H (long (:height im)) W (long (:width im))
+              ctx (gf/make-ctx) progs (gf/build-programs)]
+          (when progs
+            (let [src (gf/upload-rgb! im)
+                  dst (gf/new-scratch W H)]
+              (gf/bilateral-blur! ctx progs src dst W H 3)
+              (let [d (rgb-max-diff ctx dst W H (structure/bilateral-blur im 3))]
+                (is (< d 1e-4) (str "bilateral max diff " d))))))))))
+
+(deftest dominant-blur-matches-the-cpu
+  (testing "the modal-tone coverage colour, including the reduced-res path"
+    (with-gl
+      (fn []
+        (let [im (img) H (long (:height im)) W (long (:width im))
+              ctx (gf/make-ctx) progs (gf/build-programs)]
+          (when progs
+            (let [src (gf/upload-rgb! im)]
+              ;; radius 2 keeps step=1 (full res); 6 forces the downsample +
+              ;; bilinear expand, which is the path the app actually takes
+              (doseq [r [2 6]]
+                (let [dst (gf/new-scratch W H)]
+                  (gf/dominant-blur! ctx progs src dst W H r)
+                  (let [d (rgb-max-diff ctx dst W H (structure/dominant-blur im r))]
+                    ;; p=4 means pow() on a blurred weight, so the float32 gap is
+                    ;; wider here than for the linear fields
+                    (is (< d 1e-3) (str "dominant r=" r " max diff " d))))))))))))
+
 (deftest box-blur-replicates-edges
   (testing "corner pixels use the clamped window, not a zero-padded one"
     ;; The CPU clamps its sliding window at the border; a shader that samples
