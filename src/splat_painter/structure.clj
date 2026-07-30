@@ -173,6 +173,33 @@
   [arr H W radius]
   (box-blur-2d arr H W radius))
 
+(defn full-edge
+  "Di Zenzo edge strength at FULL resolution, unblurred: sqrt((jxx+jyy)/gmax).
+
+   The placement maps cannot answer 'is the feature still here?' at pixel scale.
+   They are built at ≤768 with blurs of radius ≥1 on top of the tensor's own
+   radius-2, so anything under ~5px is gone — measured on a line of text, :mid
+   reads a saturated 1.0 straight across the title and :edge stays above 0.6 in
+   the gaps between letters, because the flanking letters' energy is smeared over
+   them. A stroke asking 'has my ridge ended?' therefore always heard yes.
+
+   This is the same quantity, at source resolution with no smoothing, so a 4px
+   gap between two letters reads ~0.01 where the letters read ~0.7. Same
+   normalization (÷ its own max) so `edge-floor` means the same thing.
+
+   Returns {:h :w :edge ^doubles}."
+  [image]
+  (let [gf (gradient-field image)          ; already exactly this, at the res it is handed
+        H (long (:h gf)) W (long (:w gf))
+        ^doubles jxx (:jxx gf) ^doubles jyy (:jyy gf)
+        n (* H W)
+        e (double-array n)]
+    (dotimes [i n] (aset e i (+ (aget jxx i) (aget jyy i))))
+    (let [gmax (areduce e i m 0.0 (max m (aget e i)))
+          inv  (/ 1.0 (max gmax 1e-12))]
+      (dotimes [i n] (aset e i (Math/sqrt (* (aget e i) inv))))
+      {:h H :w W :edge e})))
+
 (defn bilateral-blur
   "EDGE-AWARE smooth colour field: a box window averaged with RANGE weights —
    each neighbour weighted by how close its raw luma is to the centre pixel's,

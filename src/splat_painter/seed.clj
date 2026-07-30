@@ -895,6 +895,44 @@
     (= kind :edge)  (wavelet/edge-at dmap x y)
     :else           (wavelet/detail-at dmap x y)))
 
+(def ^:private run-taps 8)         ; probe budget each way; beyond ~2σ nothing is cropped anyway
+
+(defn- efull-at
+  "Nearest sample of the FULL-RES edge map (structure/full-edge). Nearest, not
+   bilinear: the whole point of this map is that it is not smoothed, and a
+   bilinear tap would put a 2px blur back on top of it."
+  [ef x y]
+  (let [H (long (:h ef)) W (long (:w ef))
+        ^doubles e (:edge ef)
+        r (max 0 (min (dec H) (long (Math/round (double x)))))
+        c (max 0 (min (dec W) (long (Math/round (double y)))))]
+    (aget e (+ (* r W) c))))
+
+(defn- edge-run
+  "Distance (px) the ridge stays alive from (x,y) along ±(dx,dy), capped at
+   `maxd`. Returns the SHORTER of the two directions: a stroke centred on its
+   seed is cropped by whichever end runs out first.
+
+   Reads the FULL-RES edge map, never a placement map. Measured on a line of
+   text, :mid is saturated at 1.0 across the whole title and :edge stays over 0.6
+   in the gaps — the flanking letters' energy is smeared across them — so every
+   probe against those maps answers 'still alive' and nothing ever crops. The
+   full-res map reads ~0.01 in the same 4px gap."
+  [ef x y dx dy maxd]
+  (let [maxd (double maxd)
+        step (/ maxd (double run-taps))
+        walk (fn [sgn]
+               (loop [i 1]
+                 (if (> i run-taps)
+                   maxd
+                   (let [d (* step (double i))
+                         px (+ (double x) (* sgn d (double dx)))
+                         py (+ (double y) (* sgn d (double dy)))]
+                     (if (< (efull-at ef px py) edge-floor)
+                       (- d step)          ; last tap that was still on the ridge
+                       (recur (inc i)))))))]
+    (min (walk 1.0) (walk -1.0))))
+
 (defn- edge-near
   "MAX edge strength over the centre + 4 diagonal taps at radius d. A stroke of
    size ~d must answer for edges anywhere under its BODY, not just at its centre:
@@ -952,7 +990,7 @@
       ;; always reads as a directional streak, however faithful its colour.
       ;; base tier returns the SAME [rows reason] shape as the traced branch — a bare
       ;; row vector here made the call site read one row as the whole row list.
-      [[[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap lvl ssz) 0.0]] :base])
+      [[[x y ssz D sn tn 1.0 th (* coh (- 1.0 (double melt))) hb x y traw (spec-cap lvl ssz) 0.0 0.0]] :base])
     (let [          ;; the BAND tier is opaque by ROLE, like the coverage tiers: it exists
                     ;; to COVER the outward bleed, and a glaze alpha there just averages
                     ;; the bleed back in at the exact spot it is meant to replace.
@@ -1223,7 +1261,7 @@
                                  oby (* (double bay) (double (if (< wsl 1.0) 1.0 0.0)))
                                  cxs (+ cx0 obx (* wsl (- (double px) (double cx0))))
                                  cys (+ cy0 oby (* wsl (- (double py) (double cy0))))]
-                             [px py sz D0 sn0 tn0 al th chb hb cxs cys traw (spec-cap lvl ssz) selong]))
+                             [px py sz D0 sn0 tn0 al th chb hb cxs cys traw (spec-cap lvl ssz) selong (if detail? 1.0 0.0)]))
                          pre-records)]
           [rows reason])))))
 
@@ -1617,7 +1655,7 @@
                  blur in flat regions (seamless gradients, no stroke banding), raw at
                  edges/detail;
                  contrast about 0.5; tone = 1 + variation·0.3·tnoise."
-  [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast traw tcap selong]
+  [x y csz dlev theta coherence snoise tnoise blur-rgb raw-rgb stroke variation contrast traw tcap selong rcap]
   (let [coh (+ min-coh (* (- 1.0 min-coh) coherence))
         e   (+ 1.0 (* (min (double stroke) 1.5) coh (+ 0.25 (* 0.75 (double dlev)))))
         ;; `selong` > 0 forces the elongation instead of deriving it from the local
@@ -1626,8 +1664,9 @@
         ;; happens to be at that spot. 0 keeps the coherence-derived elongation.
         se  (if (pos? (double selong)) (double selong) (Math/sqrt e))
         s0  (* csz (+ 1.0 (* variation 0.5 (* 2.0 snoise))))
-        sx  (* s0 se)                 ; long axis along θ
         sy  (/ s0 se)                 ; short axis across the stroke
+        sxf (* s0 se)
+        sx  (if (pos? (double rcap)) (max sy (min sxf (* 0.5 (double rcap)))) sxf)
         ;; t is FLOORED by the level's rawness (traw) and CEILINGED by its
         ;; specificity cap (tcap) — the progressive colour ladder: broad layers
         ;; averaged, fine layers specific, whatever coherence says.
@@ -1681,6 +1720,7 @@
         contrast   (double contrast)
         sfield     (or (:structure image) (structure/analyze image))
         dmap       (or (:detail image)    (wavelet/placement-map image sfield))
+        efull      (or (:edge-full image) (structure/full-edge image))
         ^doubles raw-px  pixels
         ^doubles blur-px (or (:blur image) pixels)
         ^doubles blurh-px (or (:blur-heavy image) blur-px)
@@ -1696,7 +1736,7 @@
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
-                     (for [[x y csz dlev sn tn alpha theta coherence hb hx hy traw tcap selong] segments
+                     (for [[x y csz dlev sn tn alpha theta coherence hb hx hy traw tcap selong rcapf] segments
                            :let [bilat-rgb (sample-arr blur-px width height hx hy)
                                  blur-rgb  (if (and hb (pos? (double hb)))
                                              (sample-arr blurh-px width height hx hy)
@@ -1721,7 +1761,11 @@
                                           (+ (* (- 1.0 w) rb) (* w bcb))]]]
                        (assoc (splat-record x y csz dlev theta coherence sn tn
                                             blur-rgb raw-rgb stroke variation contrast
-                                            (or traw 0.0) (or tcap 1.0) (or selong 0.0))
+                                            (or traw 0.0) (or tcap 1.0) (or selong 0.0)
+                                            (if (pos? (double (or rcapf 0.0)))
+                                              (edge-run efull x y (Math/cos theta) (Math/sin theta)
+                                                        (* 6.0 (double csz)))
+                                              0.0))
                               :alpha (double alpha))))
         ;; PAINT ORDER needs NO sort: `layered-means` emits finest level first, so the field is
         ;; already small→large. The shader composites front-to-back (index 0 = topmost), so the
