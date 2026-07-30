@@ -274,7 +274,16 @@
     (is (= 850 (count splats)))
     (is (approx= 0.5  19111.677  sx) "Σ mean-x")
     (is (approx= 0.5  25937.161  sy) "Σ mean-y")
-    (is (approx= 1.0  219958.654 sd) "Σ det(cov)")
+    ;; (219958.654→219919.378) the RIDGE CROP: a stroke's long axis is capped at
+    ;; half the distance its ridge stays alive along its own tangent, so strokes
+    ;; that would have painted past the end of their feature get shorter. Σdet
+    ;; moves 0.018% and count / both means / Σcolour do not move at all — same
+    ;; splats in the same places with the same colours, only some long axes
+    ;; shortened, which is exactly what a long-axis-only crop does. It is small
+    ;; HERE because this fixture is a photograph: the crop bites where features
+    ;; are a few px apart, and on img/collapse-watch.jpg it cuts inter-letter gap
+    ;; ink 40.75→36.49. Anything that also moved the means would NOT be this.
+    (is (approx= 1.0  219919.378 sd) "Σ det(cov)")
     (is (approx= 0.05 933.066    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes

@@ -897,11 +897,28 @@
 
 (def ^:private run-taps 8)         ; probe budget each way; beyond ~2σ nothing is cropped anyway
 
+(defn- efull-at
+  "Nearest sample of the FULL-RES edge map (structure/full-edge). Nearest, not
+   bilinear: the whole point of this map is that it is not smoothed, and a
+   bilinear tap would put a 2px blur back on top of it."
+  [ef x y]
+  (let [H (long (:h ef)) W (long (:w ef))
+        ^doubles e (:edge ef)
+        r (max 0 (min (dec H) (long (Math/round (double x)))))
+        c (max 0 (min (dec W) (long (Math/round (double y)))))]
+    (aget e (+ (* r W) c))))
+
 (defn- edge-run
   "Distance (px) the ridge stays alive from (x,y) along ±(dx,dy), capped at
    `maxd`. Returns the SHORTER of the two directions: a stroke centred on its
-   seed is cropped by whichever end runs out first."
-  [dmap x y dx dy maxd]
+   seed is cropped by whichever end runs out first.
+
+   Reads the FULL-RES edge map, never a placement map. Measured on a line of
+   text, :mid is saturated at 1.0 across the whole title and :edge stays over 0.6
+   in the gaps — the flanking letters' energy is smeared across them — so every
+   probe against those maps answers 'still alive' and nothing ever crops. The
+   full-res map reads ~0.01 in the same 4px gap."
+  [ef x y dx dy maxd]
   (let [maxd (double maxd)
         step (/ maxd (double run-taps))
         walk (fn [sgn]
@@ -911,7 +928,7 @@
                    (let [d (* step (double i))
                          px (+ (double x) (* sgn d (double dx)))
                          py (+ (double y) (* sgn d (double dy)))]
-                     (if (< (wavelet/edge-at dmap px py) edge-floor)
+                     (if (< (efull-at ef px py) edge-floor)
                        (- d step)          ; last tap that was still on the ridge
                        (recur (inc i)))))))]
     (min (walk 1.0) (walk -1.0))))
@@ -1703,6 +1720,7 @@
         contrast   (double contrast)
         sfield     (or (:structure image) (structure/analyze image))
         dmap       (or (:detail image)    (wavelet/placement-map image sfield))
+        efull      (or (:edge-full image) (structure/full-edge image))
         ^doubles raw-px  pixels
         ^doubles blur-px (or (:blur image) pixels)
         ^doubles blurh-px (or (:blur-heavy image) blur-px)
@@ -1745,7 +1763,7 @@
                                             blur-rgb raw-rgb stroke variation contrast
                                             (or traw 0.0) (or tcap 1.0) (or selong 0.0)
                                             (if (pos? (double (or rcapf 0.0)))
-                                              (edge-run dmap x y (Math/cos theta) (Math/sin theta)
+                                              (edge-run efull x y (Math/cos theta) (Math/sin theta)
                                                         (* 6.0 (double csz)))
                                               0.0))
                               :alpha (double alpha))))
