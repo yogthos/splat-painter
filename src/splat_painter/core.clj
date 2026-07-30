@@ -206,7 +206,13 @@
   []
   (when-let [raw @pending-image-atom]
     (reset! pending-image-atom nil)
-    (reset! image-atom (prepare-image raw)))
+    ;; on-image-loaded used to catch a failure in here; now that the work happens
+    ;; on the render callback it needs its own guard, or one bad image throws
+    ;; through GTK's signal handler on every frame.
+    (try
+      (reset! image-atom (prepare-image raw))
+      (catch Throwable e
+        (reset! status-atom (str "failed to prepare image: " (ex-message e))))))
   @image-atom)
 
 (defn- on-image-loaded [path]
