@@ -403,23 +403,26 @@
    winning bin flips abruptly where two modes are close — visible as flat patches
    in bokeh and a stepped edge on an eyelash by p=8.
 
-   Computed on a DOWNSAMPLED copy and bilinearly upsampled: the result is a window
-   statistic over a ~25px neighbourhood, so it carries nothing near pixel frequency
-   and full-resolution binning is 16x the work for no visible difference (5.5s vs
-   0.4s on a 0.9MP frame — this runs per image load, alongside the bilateral). The
-   downsample is NEAREST-NEIGHBOUR on purpose: area-averaging first would blend a
-   black line into the white paper around it and hand the filter a gray population
-   to find the mode of, which is the halo this exists to remove. Nearest keeps every
-   sample a true pixel, and a thin line simply loses the vote."
+   Computed at FULL RESOLUTION. It used to run on a nearest-downsampled copy and
+   be bilinearly upsampled, on the argument that a ~25px window statistic carries
+   nothing near pixel frequency. That is true away from a boundary and false at
+   one: a reduced-res cell straddling a silhouette holds both populations, so its
+   mode is a mixture, and the bilinear expansion then smears that mixture several
+   pixels out — which IS the silhouette halo.
+
+   Measured on img/portrait.jpg (scratchpad halo metric, outward bleed Σ over
+   rings 1-14), holding the window at 13px and varying only the working
+   resolution: third-res 28.55, half-res 25.18, full-res 23.58. Resolution alone
+   is 4.97 of the 8.07 available, against 3.10 for the window width — so the
+   halo was mostly a resampling artifact, not a window-width one.
+
+   Costs 0.48s → 1.56s on a 1024px frame. That was the whole reason for the
+   reduction, and it no longer governs: the app builds its fields on the GPU
+   (splat-painter.gpu-fields), and this path is now the reference the tests and
+   -M:preview use plus the fallback if the shaders will not compile."
   ([image radius] (dominant-blur image radius 4.0))
   ([image radius p]
-   (let [step (max 1 (quot (long radius) 3))]
-     (if (> step 1)
-       (let [H (long (:height image)) W (long (:width image))
-             sh (max 1 (quot H step)) sw (max 1 (quot W step))]
-         (upsample-rgb (dominant-blur (downsample image sh sw) (quot (long radius) step) p)
-                       sh sw H W))
-       (dominant-blur-full image radius p)))))
+   (dominant-blur-full image radius p)))
 
 (defn blur-image
   "Box-blur an RGB image's pixels (flat H*W*3 doubles) with `radius`, returning a
