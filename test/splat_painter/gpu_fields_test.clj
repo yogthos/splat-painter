@@ -19,7 +19,8 @@
             [splat-painter.structure :as structure]
             [splat-painter.seed :as seed]
             [splat-painter.gen :as gen]
-            [splat-painter.wavelet :as wavelet]))
+            [splat-painter.wavelet :as wavelet]
+            [jolt.ffi :as ffi]))
 
 (def ^:private fixture "test/splat_painter/fixtures/eye.jpeg")
 
@@ -361,6 +362,30 @@
                       c (range 3)]
                 (is (not (nan? (gf/read-channel ctx tex w h c)))
                     (str label " channel " c " contains NaN"))))))))))
+
+(deftest build-fields-restores-the-viewport
+  (testing "a pass chain hands back the viewport it was called with"
+    ;; Every pass resizes the viewport to its own target and build-fields! runs
+    ;; from inside gpu-draw!, which is about to draw the splat quads. Leaving the
+    ;; viewport at the last pass's size painted the image at that size in the
+    ;; bottom-left corner of the pane. Nothing headless draws to a screen, so
+    ;; this asserts the invariant directly rather than the symptom.
+    (with-gl
+      (fn []
+        (let [im (img) H (long (:height im)) W (long (:width im))
+              progs (gf/build-programs)]
+          (when progs
+            (gl/gl-viewport 0 0 640 480)
+            (let [ctx  (gf/make-ctx)
+                  perm (gen/upload-perm!)]
+              (gf/build-fields! ctx progs im perm)
+              (let [p (ffi/alloc (* 4 (ffi/sizeof :int)))]
+                (gl/gl-get-integerv 0x0BA2 p)
+                (let [vp (mapv #(ffi/read p :int (* 4 %)) (range 4))]
+                  (ffi/free p)
+                  (is (= [0 0 640 480] vp)
+                      (str "viewport left at " vp " instead of the caller's"))))
+              (gf/free-ctx! ctx))))))))
 
 (deftest box-blur-replicates-edges
   (testing "corner pixels use the clamped window, not a zero-padded one"

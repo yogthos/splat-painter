@@ -341,8 +341,11 @@
                         (swap! gpu-fields-ctx assoc :progs p) p)))]
     (if-not progs
       (gen/upload-fields! (fields/prepare img) perm)
+      ;; the ctx is remade per load because it captures the caller's viewport and
+      ;; framebuffer to restore; free it so we don't leak an FBO+VAO per image
       (let [ctx (gf/make-ctx)]
-        (gf/build-fields! ctx progs img perm)))))
+        (try (gf/build-fields! ctx progs img perm)
+             (finally (gf/free-ctx! ctx)))))))
 
 (defn- gpu-controls []
   {:count (cur-count) :size (cur-size) :stroke (cur-stroke) :detail (cur-detail)
