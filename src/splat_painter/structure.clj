@@ -10,7 +10,10 @@
     y = col index (0..W-1, increasing rightward)
     θ = 0 means the major axis is along the x/row direction.
 
-  All per-pixel buffers are Java double-arrays for speed on ~1e6-pixel images.")
+  All per-pixel buffers are Java double-arrays for speed on ~1e6-pixel images, and
+  the per-pixel loops band across threads via splat-painter.par — each band writes
+  a disjoint index range, so the output matches the serial loop exactly."
+  (:require [splat-painter.par :as par]))
 
 ;; ---------------------------------------------------------------------------
 ;; helpers
@@ -99,44 +102,54 @@
   [^doubles src H W radius]
   ;; ^doubles src/tmp/dst + a double divisor `wd` let the sliding sums read via the
   ;; unboxed flvector path (jolt-flaget) and the +/-// lower to fl+/fl-/fl/.
+  ;; each pass is a disjoint write per row (then per column), so the loops band
+  ;; across threads unchanged — same sliding sums, same order within a band.
   (let [wd (double (inc (* 2 radius)))
         ^doubles tmp (double-array (* H W))]
     ;; horizontal pass: blur each row
-    (dotimes [x H]
-      (let [row-off (* x W)
-            sum-init (loop [dy (- radius) s 0.0]
-                       (if (> dy radius)
-                         s
-                         (let [cy (clamp dy 0 (dec W))]
-                           (recur (inc dy) (+ s (aget src (+ row-off cy)))))))]
-        (aset tmp (+ row-off 0) (/ sum-init wd))
-        (loop [y 1 y-sum sum-init]
-          (when (< y W)
-            (let [drop-y (clamp (- y radius 1) 0 (dec W))
-                  add-y  (clamp (+ y radius) 0 (dec W))
-                  new-sum (+ y-sum
-                             (aget src (+ row-off add-y))
-                             (- (aget src (+ row-off drop-y))))]
-              (aset tmp (+ row-off y) (/ new-sum wd))
-              (recur (inc y) new-sum))))))
+    (par/dobands! H (* H W)
+      (fn [xlo xhi]
+        (loop [x (long xlo)]
+          (when (< x (long xhi))
+            (let [row-off (* x W)
+                  sum-init (loop [dy (- radius) s 0.0]
+                             (if (> dy radius)
+                               s
+                               (let [cy (clamp dy 0 (dec W))]
+                                 (recur (inc dy) (+ s (aget src (+ row-off cy)))))))]
+              (aset tmp (+ row-off 0) (/ sum-init wd))
+              (loop [y 1 y-sum sum-init]
+                (when (< y W)
+                  (let [drop-y (clamp (- y radius 1) 0 (dec W))
+                        add-y  (clamp (+ y radius) 0 (dec W))
+                        new-sum (+ y-sum
+                                   (aget src (+ row-off add-y))
+                                   (- (aget src (+ row-off drop-y))))]
+                    (aset tmp (+ row-off y) (/ new-sum wd))
+                    (recur (inc y) new-sum)))))
+            (recur (inc x))))))
     ;; vertical pass: blur each column of tmp into dst
     (let [^doubles dst (double-array (* H W))]
-      (dotimes [y W]
-        (let [sum-init (loop [dx (- radius) s 0.0]
-                         (if (> dx radius)
-                           s
-                           (let [cx (clamp dx 0 (dec H))]
-                             (recur (inc dx) (+ s (aget tmp (+ (* cx W) y)))))))]
-          (aset dst (+ (* 0 W) y) (/ sum-init wd))
-          (loop [x 1 v-sum sum-init]
-            (when (< x H)
-              (let [drop-x (clamp (- x radius 1) 0 (dec H))
-                    add-x  (clamp (+ x radius) 0 (dec H))
-                    new-sum (+ v-sum
-                               (aget tmp (+ (* add-x W) y))
-                               (- (aget tmp (+ (* drop-x W) y))))]
-                (aset dst (+ (* x W) y) (/ new-sum wd))
-                (recur (inc x) new-sum))))))
+      (par/dobands! W (* H W)
+        (fn [ylo yhi]
+          (loop [y (long ylo)]
+            (when (< y (long yhi))
+              (let [sum-init (loop [dx (- radius) s 0.0]
+                               (if (> dx radius)
+                                 s
+                                 (let [cx (clamp dx 0 (dec H))]
+                                   (recur (inc dx) (+ s (aget tmp (+ (* cx W) y)))))))]
+                (aset dst (+ (* 0 W) y) (/ sum-init wd))
+                (loop [x 1 v-sum sum-init]
+                  (when (< x H)
+                    (let [drop-x (clamp (- x radius 1) 0 (dec H))
+                          add-x  (clamp (+ x radius) 0 (dec H))
+                          new-sum (+ v-sum
+                                     (aget tmp (+ (* add-x W) y))
+                                     (- (aget tmp (+ (* drop-x W) y))))]
+                      (aset dst (+ (* x W) y) (/ new-sum wd))
+                      (recur (inc x) new-sum)))))
+              (recur (inc y))))))
       dst)))
 
 (defn structure-tensor
@@ -189,26 +202,34 @@
             wr (double-array n)
             wg (double-array n)
             wb (double-array n)]
-        (dotimes [i n]
-          (let [w (max 0.0 (- 1.0 (/ (Math/abs (- (aget L i) lk)) dl)))
-                b (* 3 i)]
-            (aset wk i w)
-            (aset wr i (* w (aget px b)))
-            (aset wg i (* w (aget px (+ b 1))))
-            (aset wb i (* w (aget px (+ b 2))))))
+        (par/dobands! n
+          (fn [lo hi]
+            (loop [i (long lo)]
+              (when (< i (long hi))
+                (let [w (max 0.0 (- 1.0 (/ (Math/abs (- (aget L i) lk)) dl)))
+                      b (* 3 i)]
+                  (aset wk i w)
+                  (aset wr i (* w (aget px b)))
+                  (aset wg i (* w (aget px (+ b 1))))
+                  (aset wb i (* w (aget px (+ b 2)))))
+                (recur (inc i))))))
         (let [^doubles bw (box-blur-2d wk H W radius)
               ^doubles br (box-blur-2d wr H W radius)
               ^doubles bg (box-blur-2d wg H W radius)
               ^doubles bb (box-blur-2d wb H W radius)]
-          (dotimes [i n]
-            (let [h (max 0.0 (- 1.0 (/ (Math/abs (- (aget L i) lk)) dl)))]
-              (when (pos? h)
-                (let [b (* 3 i)
-                      inv (/ h (max (aget bw i) 1e-12))]
-                  (aset out b       (+ (aget out b)       (* inv (aget br i))))
-                  (aset out (+ b 1) (+ (aget out (+ b 1)) (* inv (aget bg i))))
-                  (aset out (+ b 2) (+ (aget out (+ b 2)) (* inv (aget bb i))))
-                  (aset osum i (+ (aget osum i) h)))))))))
+          (par/dobands! n
+            (fn [lo hi]
+              (loop [i (long lo)]
+                (when (< i (long hi))
+                  (let [h (max 0.0 (- 1.0 (/ (Math/abs (- (aget L i) lk)) dl)))]
+                    (when (pos? h)
+                      (let [b (* 3 i)
+                            inv (/ h (max (aget bw i) 1e-12))]
+                        (aset out b       (+ (aget out b)       (* inv (aget br i))))
+                        (aset out (+ b 1) (+ (aget out (+ b 1)) (* inv (aget bg i))))
+                        (aset out (+ b 2) (+ (aget out (+ b 2)) (* inv (aget bb i))))
+                        (aset osum i (+ (aget osum i) h)))))
+                  (recur (inc i)))))))))
     ;; hat kernels form a partition of unity, but guard the division anyway
     (dotimes [i n]
       (let [s (aget osum i) b (* 3 i)]
@@ -283,29 +304,37 @@
             wr (double-array n)
             wg (double-array n)
             wb (double-array n)]
-        (dotimes [i n]
-          (let [w (max 0.0 (- 1.0 (/ (Math/abs (- (aget L i) lk)) dl)))
-                b (* 3 i)]
-            (aset wk i w)
-            (aset wr i (* w (aget px b)))
-            (aset wg i (* w (aget px (+ b 1))))
-            (aset wb i (* w (aget px (+ b 2))))))
+        (par/dobands! n
+          (fn [lo hi]
+            (loop [i (long lo)]
+              (when (< i (long hi))
+                (let [w (max 0.0 (- 1.0 (/ (Math/abs (- (aget L i) lk)) dl)))
+                      b (* 3 i)]
+                  (aset wk i w)
+                  (aset wr i (* w (aget px b)))
+                  (aset wg i (* w (aget px (+ b 1))))
+                  (aset wb i (* w (aget px (+ b 2)))))
+                (recur (inc i))))))
         (let [^doubles bw (box-blur-2d wk H W radius)
               ^doubles br (box-blur-2d wr H W radius)
               ^doubles bg (box-blur-2d wg H W radius)
               ^doubles bb (box-blur-2d wb H W radius)]
           ;; bin colour is br/bw; its vote is bw^p. Accumulate bw^p·(br/bw) = bw^(p-1)·br
           ;; directly so the division never has to be done twice.
-          (dotimes [i n]
-            (let [w (aget bw i)]
-              (when (> w 1e-12)
-                (let [wp (Math/pow w (double p))
-                      f  (/ wp w)
-                      b  (* 3 i)]
-                  (aset num b       (+ (aget num b)       (* f (aget br i))))
-                  (aset num (+ b 1) (+ (aget num (+ b 1)) (* f (aget bg i))))
-                  (aset num (+ b 2) (+ (aget num (+ b 2)) (* f (aget bb i))))
-                  (aset den i (+ (aget den i) wp)))))))))
+          (par/dobands! n
+            (fn [lo hi]
+              (loop [i (long lo)]
+                (when (< i (long hi))
+                  (let [w (aget bw i)]
+                    (when (> w 1e-12)
+                      (let [wp (Math/pow w (double p))
+                            f  (/ wp w)
+                            b  (* 3 i)]
+                        (aset num b       (+ (aget num b)       (* f (aget br i))))
+                        (aset num (+ b 1) (+ (aget num (+ b 1)) (* f (aget bg i))))
+                        (aset num (+ b 2) (+ (aget num (+ b 2)) (* f (aget bb i))))
+                        (aset den i (+ (aget den i) wp)))))
+                  (recur (inc i)))))))))
     (let [out (double-array (* n 3))]
       (dotimes [i n]
         (let [d (max (aget den i) 1e-12) b (* 3 i)]

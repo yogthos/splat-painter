@@ -41,7 +41,8 @@
   (:require [splat-painter.gaussian :as gauss]
             [splat-painter.structure :as structure]
             [splat-painter.wavelet :as wavelet]
-            [splat-painter.noise :as noise]))
+            [splat-painter.noise :as noise]
+            [splat-painter.par :as par]))
 
 ;; Baseline elongation floor: even a flat region (coherence 0) elongates a little so
 ;; the field reads as brushwork, but keep it modest — too much makes flat areas a
@@ -1493,9 +1494,15 @@
         ^doubles f-theta (:flow-theta sfield) ^doubles f-str (:flow-str sfield)
         c2 (double-array n) s2 (double-array n) cohr (double-array n)
         c2s (double-array n) s2s (double-array n)]
-    (dotimes [xi H]
-      (dotimes [yi W]
-        (let [idx (+ (* xi W) yi)
+    ;; rows are independent (each writes only its own idx range), so the Perlin
+    ;; bake — the two noise2 calls per texel the docstring costs at 2.3s — bands
+    ;; across threads. Same values, same places (splat-painter.fields-test).
+    (par/dobands! H (* H W)
+     (fn [xlo xhi]
+      (dotimes [xoff (- (long xhi) (long xlo))]
+       (let [xi (+ (long xlo) xoff)]
+        (dotimes [yi W]
+          (let [idx (+ (* xi W) yi)
               x (* xi (/ srch H)) y (* yi (/ srcw W))
               fvx (- (noise/noise2 (* x fs) (* y fs)) 0.5)
               fvy (- (noise/noise2 (+ (* x fs) 137.0) (+ (* y fs) 91.0)) 0.5)
@@ -1507,11 +1514,11 @@
               ;; the diffused tensor's own direction — the nearby edges' direction voted
               ;; into the flat area — with no image-independent field in the blend.
               theta-s (blend-angle (aget f-theta idx) (aget s-theta idx) coherence)]
-          (aset c2 idx (Math/cos (* 2.0 theta)))
-          (aset s2 idx (Math/sin (* 2.0 theta)))
-          (aset c2s idx (Math/cos (* 2.0 theta-s)))
-          (aset s2s idx (Math/sin (* 2.0 theta-s)))
-          (aset cohr idx coherence))))
+            (aset c2 idx (Math/cos (* 2.0 theta)))
+            (aset s2 idx (Math/sin (* 2.0 theta)))
+            (aset c2s idx (Math/cos (* 2.0 theta-s)))
+            (aset s2s idx (Math/sin (* 2.0 theta-s)))
+            (aset cohr idx coherence)))))))
     {:h H :w W :src-h (:src-h sfield) :src-w (:src-w sfield)
      :c2 c2 :s2 s2 :c2s c2s :s2s s2s :coherence cohr}))
 
