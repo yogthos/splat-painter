@@ -54,6 +54,25 @@ void main(){
     (gl/gl-get-integerv gl/GL-FRAMEBUFFER-BINDING p)
     (let [v (ffi/read p :int 0)] (ffi/free p) v)))
 
+(def ^:private GL-VIEWPORT 0x0BA2)
+
+(defn- read-viewport []
+  (let [p (ffi/alloc (* 4 (ffi/sizeof :int)))]
+    (gl/gl-get-integerv GL-VIEWPORT p)
+    (let [v (mapv #(ffi/read p :int (* 4 %)) (range 4))] (ffi/free p) v)))
+
+(declare read-viewport)
+
+(defn restore-viewport!
+  "Put back the viewport that was current when `ctx` was made. A pass chain leaves
+   the viewport sized to its last target, and the caller is usually about to draw
+   to a differently-sized framebuffer — on screen that shows up as the image
+   painted at the last pass's size in the corner."
+  [ctx]
+  (when-let [[x y w h] (:vp ctx)]
+    (gl/gl-viewport (int x) (int y) (int w) (int h)))
+  nil)
+
 (defn make-ctx
   "GL objects shared by every pass: one FBO to attach targets to, one empty VAO
    (core profile still requires a bound VAO for an attributeless draw), and the
@@ -61,7 +80,19 @@ void main(){
   []
   {:fbo  (gl/gen-one gl/gl-gen-framebuffers)
    :vao  (gl/gen-one gl/gl-gen-vertex-arrays)
-   :prev (read-fbo-binding)})
+   :prev (read-fbo-binding)
+   ;; Every pass resizes the viewport to its own target. Whoever called us was
+   ;; about to draw something else at a different size, so remember theirs and
+   ;; hand it back — see restore-viewport!.
+   :vp   (read-viewport)})
+
+(defn free-ctx!
+  "Release a ctx's FBO and VAO. One of each per image load is a slow leak, but a
+   leak — the ctx has to be remade per load because it captures the viewport."
+  [ctx]
+  (gl/delete-one gl/gl-delete-framebuffers (:fbo ctx))
+  (gl/delete-one gl/gl-delete-vertex-arrays (:vao ctx))
+  nil)
 
 (defn run-pass!
   "Render one fullscreen pass of `prog` into `dst` (w×h RGBA32F).
@@ -1032,6 +1063,8 @@ void main(){
     ;; NOT (:subject pm) — it is returned as :subject and outlives this call
     (free-textures! [(:eigen tensor) (:flow tensor) (:tensor tensor)
                      (:detail pm) (:sharp pm) (:mid pm) (:edge pm)])
+    ;; the caller is mid-draw; give back the viewport the passes trampled
+    (restore-viewport! ctx)
     {:detail packed :subject (:subject pm) :noise noise :noise-swirl0 noise0
      :blur blur :blur-drift drift :blur-heavy heavy :raw src :perm perm
      ;; placement-map is pre-normalized, so dmax is 1.0 by construction
