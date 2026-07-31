@@ -313,8 +313,18 @@
                                   [n0 0 :c2s] [n0 1 :s2s]]]
                 (let [d (max-diff (gf/read-channel ctx tex w h ch) (get want k))]
                   ;; Perlin runs in float32 here against float64 on the CPU, and
-                  ;; the result goes through two atan2 blends
-                  (is (< d 1e-3) (str (name k) " max diff " d)))))))))))
+                  ;; the result goes through two atan2 blends. The bound is 1e-2,
+                  ;; not the 1e-3 it was: 1e-3 was calibrated on ONE GL
+                  ;; implementation (Apple M1 Max hardware) and the CI macOS runner
+                  ;; uses the Apple SOFTWARE Renderer, whose float32 trig differs
+                  ;; enough to reach 3.9e-3 — c2 3.26e-3, s2 3.58e-3, c2s 3.91e-3,
+                  ;; s2s 3.34e-3, while :coherence (no trig) stayed inside 1e-3.
+                  ;; These are cos2θ/sin2θ in [-1,1], so 1e-2 is still ~0.3° of
+                  ;; angle: a real defect here (transposed components, a dropped
+                  ;; blend term) diverges by O(1), not by 1e-2. Mutation-checked at
+                  ;; this bound — comparing n1 channel 0 against :s2 instead of :c2
+                  ;; fails at 1.41.
+                  (is (< d 1e-2) (str (name k) " max diff " d)))))))))))
 
 (defn- solid-image
   "An image with a large perfectly uniform region — the case a photograph
