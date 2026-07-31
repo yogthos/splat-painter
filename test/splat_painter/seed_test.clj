@@ -271,9 +271,16 @@
     ;; instead of late-binding it, which is how this surfaced. Only Σcolour moves,
     ;; by 0.045%; count, both means and Σdet are unchanged — a colour-sampling
     ;; change with no geometry change, which is the signature of exactly this fix.
-    (is (= 850 (count splats)))
-    (is (approx= 0.5  19111.677  sx) "Σ mean-x")
-    (is (approx= 0.5  25937.161  sy) "Σ mean-y")
+    ;; (850→904) band-th 0.30→0.15 plus the band tier's measured accounting
+    ;; (band-paint-per-candidate): the charge and the nx cap now key on the tier's
+    ;; REALIZED paint per candidate instead of the flat nx·frac·band-trace model.
+    ;; On this fixture the measured paint per candidate is below the old flat
+    ;; charge, so the detail slice grows and the count rises. Σdet moves 0.017%
+    ;; (219919.378→219957.791) — same size class traded, which is what a budget
+    ;; reallocation looks like; means and Σcolour move with the added splats.
+    (is (= 904 (count splats)))
+    (is (approx= 0.5  19491.593  sx) "Σ mean-x")
+    (is (approx= 0.5  26054.199  sy) "Σ mean-y")
     ;; (219958.654→219919.378) the RIDGE CROP: a stroke's long axis is capped at
     ;; half the distance its ridge stays alive along its own tangent, so strokes
     ;; that would have painted past the end of their feature get shorter. Σdet
@@ -283,8 +290,8 @@
     ;; HERE because this fixture is a photograph: the crop bites where features
     ;; are a few px apart, and on img/collapse-watch.jpg it cuts inter-letter gap
     ;; ink 40.75→36.49. Anything that also moved the means would NOT be this.
-    (is (approx= 1.0  219919.378 sd) "Σ det(cov)")
-    (is (approx= 0.05 933.066    sc) "Σ colour")))
+    (is (approx= 1.0  219957.791 sd) "Σ det(cov)")
+    (is (approx= 0.05 973.073    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -1460,6 +1467,67 @@
     (is (>= demand (/ pure 1.5))
         (str "demand must not under-charge: demand " demand " vs pure " pure
              " (x" (/ demand (double pure)) ")"))))
+
+(deftest edge-band-charge-tracks-real-coverage-when-ridge-dense
+  ;; REGRESSION for the band-th 0.15 budget blowout. edge-band-demand-tracks-what-the-
+  ;; tier-paints runs the FALLBACK charge (placement-map dmap, no :band-ppc) on a
+  ;; disk-field with short photo-like traces; this one runs the MEASURED path
+  ;; (band-paint-per-candidate) on a ridge-dense image, where every pixel clears the
+  ;; trace's ridge floor so band strokes run to the 32-segment cap. There the flat
+  ;; nx·frac·band-trace charge decouples from paint entirely: the nx cap pins
+  ;; survivors (nx·frac = band-share·budget/band-segs), so the demand came out a
+  ;; budget-only constant — 120 charged vs 549 emitted at Splats 1000 — and lowering
+  ;; band-th 0.30→0.15 admitted +137 splats (412→549) with no charge change and no
+  ;; detail thinning to pay for them, pushing the field to 1512 against the 1500
+  ;; guard. Pins, at both thresholds: (1) the measured-path demand stays within 1.5x
+  ;; of the band's PURE emitted splats (selong>0), and (2) the band's realized paint
+  ;; stays inside its band-share ceiling — the nx cap keys on the realized
+  ;; paint-per-candidate, so more coverage buys FEWER, longer strokes at the same
+  ;; spend. (The naive expectation "demand must RISE when band-th falls" is wrong
+  ;; under a binding cap: the ceiling pins the tier's spend at band-share·budget at
+  ;; every threshold — what changes with coverage is how many seeds it buys.)
+  ;; Decouple the charge from the measured paint-per-candidate and (1) fails at
+  ;; ~3.4-4.6x; key the cap back on the nominal band-segs and (2) fails at ~2.2x —
+  ;; the two halves of the original blowout.
+  (let [H 256 W 256
+        img  (gray-img H W (fn [x y]
+                             (let [coarse (* 0.25 (+ 1.0 (Math/sin (* 0.04 (+ x y)))))
+                                   fine   (if (odd? (+ (quot x 2) (quot y 3))) 0.12 -0.12)]
+                               (max 0.0 (min 1.0 (+ coarse fine))))))
+        sfield (structure/analyze img)
+        dmap0  (wavelet/placement-map img sfield)
+        nf     (seed/with-swirl (seed/prep-noise sfield) 1.0)
+        px     (:pixels img)
+        cnt    1000
+        run    (fn [th]
+                 (with-redefs-fn {#'splat-painter.seed/band-th th}
+                   (fn []
+                     (let [dmap (assoc dmap0 :band-ppc
+                                       (seed/band-paint-per-candidate dmap0 nf px px H W))
+                           lp   (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.0 [1.0 1.0 1.0 1.0] cnt H W)
+                           band (first (filter :band (:levels lp)))
+                           segs (#'splat-painter.seed/layered-means
+                                 dmap nf 1.0 6.0 0.5 0.5 2.0 1.0 [1.0 1.0 1.0 1.0] cnt H W px px)
+                           pure (count (filter (fn [s] (pos? (double (nth s 14)))) segs))]
+                       {:demand (double (:demand band))
+                        :pure   pure}))))
+        lo     (run 0.15)
+        hi     (run 0.30)]
+    (doseq [{:keys [demand pure]} [lo hi]]
+      (is (pos? pure) "the band tier is live on this fixture")
+      (is (<= demand (* 1.5 pure))
+          (str "the charge tracks real coverage: demand " demand
+               " vs band paint " pure " (x" (/ demand (double pure)) ")"))
+      (is (>= demand (/ pure 1.5))
+          (str "the charge must not under-charge: demand " demand
+               " vs band paint " pure " (x" (/ demand (double pure)) ")"))
+      ;; the cap makes the ceiling hold in EXPECTATION: ppc is the probe-stream mean,
+      ;; and the realized paint of nx hashed candidates is a sample of it (±~16% at
+      ;; nx 9-15 here), so 1.2x is the honest bound — the nominal-segs cap breaches
+      ;; the ceiling at 2.2x on this fixture, far outside it
+      (is (<= pure (* 1.2 @#'splat-painter.seed/band-share cnt))
+          (str "the tier's realized paint stays inside its band-share ceiling: paint "
+               pure " vs ceiling " (* @#'splat-painter.seed/band-share cnt))))))
 
 (deftest detail-demand-tracks-what-the-tier-paints
   ;; DETAIL-tier twin of edge-band-demand-tracks-what-the-tier-paints. det-demand charges

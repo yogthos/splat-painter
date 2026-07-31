@@ -383,7 +383,7 @@
 ;; 7px, which is the BASE tier's own reach (σ 7.2 ⇒ a 25px quad), not a band artifact.
 ;; This is the first of thirteen attempts on this artifact to move the metric the RIGHT
 ;; way; the twelve rejected ones are tabulated in .dirge/spec-coat-edge-fuzz.md.
-(def ^:private band-th 0.30)          ; edge strength a band seed needs (raw :edge, unnormalized)
+(def ^:private band-th 0.15)          ; edge strength a band seed needs (raw :edge, unnormalized)
 (def ^:private band-se 2.6)           ; forced elongation: sx = s0·se, sy = s0/se (NOT coherence-derived)
 (def ^:private band-sideo 1.4)        ; side push in units of ssz, jittered ×0.6–3.15 per seed (see soff)
 (def ^:private band-ssz-max 1.6)      ; the band paints a LINE; above this it would read as a daub
@@ -405,14 +405,19 @@
 ;; the mechanism worked wherever it landed and mostly did not land. At 0.45 the
 ;; nx-cap below binds instead, so band-share is what actually sets the density.
 (def ^:private band-segs 12)
-;; ^ the band tier's NOMINAL traced length, governing its SEED SPACING and the nx CAP
-;; (band-share·budget is the density ceiling — see nx-cap below). NOT the charged demand:
-;; that uses band-trace (the MEASURED traced length), which is far shorter. It is NOT
+;; ^ the band tier's NOMINAL traced length, governing its SEED SPACING and the nx CAP's
+;; nominal model (band-share·budget is the density ceiling — see nx-cap below; the cap
+;; keys on the realized :band-ppc instead whenever that is larger). NOT the charged demand:
+;; that uses the measured paint per candidate (fallback band-trace), which is far shorter. It is NOT
 ;; expected-segs either: that 4 was measured for :sharp-placed strokes, which stop as soon
 ;; as the fine-band ridge dies. A band stroke follows a SILHOUETTE, nominally long and
 ;; smooth, so 12 sets a generous density; what it actually EMITS is much less (band-trace).
 (def ^:private band-trace 6.0)
-;; ^ the band tier's MEAN traced length per SURVIVING seed — the budget DEMAND term only.
+;; ^ the band tier's MEAN traced length per SURVIVING seed — the FALLBACK budget term,
+;; used only when the dmap carries no measured :band-ppc (fields/prepare and splat-field
+;; measure the tier's realized paint per candidate on the image itself — see
+;; band-paint-per-candidate — so the charge and the density ceiling track real coverage;
+;; the photo value below is what the fallback nx·frac·band-trace model then charges).
 ;; Measured directly by counting emitted segments with selong>0 (band strokes only),
 ;; ÷ survivors (survivors ≈ frac·nx, since candidates land uniformly so survival ≈ frac):
 ;;   DSC_8428  5.16 segs at 512px / 5.46 at 1024px   (8194 band splats of 40991 at 1024)
@@ -422,9 +427,12 @@
 ;; paint count — NOT the Cut-in on/off field delta, which under-counts it: the old 12-based
 ;; charge (18000 at Splats 72000) starved the detail tier so badly that turning the band ON
 ;; shrank detail more than the band added, so the field delta (2213 at DSC 1024) read ~8×
-;; below the 18000 charge when the real over-charge was 18000/8194 ≈ 2.2×. Spacing and the
-;; nx cap still key on band-segs (12), so the tier paints EXACTLY the same — only its charge
-;; drops toward what it emits, freeing the fine tier's candidate slice (cand-thin).
+;; below the 18000 charge when the real over-charge was 18000/8194 ≈ 2.2×. As a FLAT charge
+;; it also breaks in the other direction on ridge-dense images: band strokes there run to
+;; the segment cap (p50 = 32 on the budget fixture), and since the nx cap pins survivors
+;; (nx·frac = band-share·budget/band-segs), the demand came out independent of what the
+;; tier painted — 120 charged vs 549 emitted at Splats 1000, the uncharged paint landing
+;; on top of the budget. That is why the charge is measured per image now.
 
 (defn- band-level
   "The edge-band level map, or nil when the tier should not exist. `finest` is the
@@ -460,10 +468,26 @@
               sp     (/ (* band-ovl (Math/sqrt (double band-segs)) ssz)
                         (Math/sqrt (double strength)))
               nx-nat (Math/ceil (/ (double area) (* sp sp)))
-              ;; the cap inverts the NOMINAL nx·frac·band-segs model so band-share·budget is
-              ;; the density ceiling; the charged :demand below uses the measured band-trace
+              ;; PAINT PER CANDIDATE: the tier's REALIZED cost per candidate cell —
+              ;; P(survive the edge gate) x E[traced segments | survive]. Measured on
+              ;; the image itself by band-paint-per-candidate (probe seeds run through
+              ;; the real gate and the real tracer) and carried in the dmap; the
+              ;; fallback is the shipped nominal model frac·band-trace. A dmap-only
+              ;; estimate is impossible in principle: the trace's chroma stop reads
+              ;; the COLOUR field (not in any placement map), and on a high-contrast
+              ;; edge-dense image it kills traces at ~2.4 segs while a low-contrast
+              ;; image with the SAME ridge density runs them to the 32 cap — no
+              ;; placement-map statistic separates the two (measured).
+              ppc    (double (or (:band-ppc dmap) (* frac (double band-trace))))
+              ;; the cap inverts the NOMINAL nx·frac·band-segs model so
+              ;; band-share·budget is the density ceiling, but keys on the REALIZED
+              ;; ppc wherever it exceeds the nominal model: where strokes really
+              ;; trace 2-5x band-segs, admitting band-segs-worth of seeds lets the
+              ;; tier paint 2-5x its band-share — exactly the blowout the ceiling
+              ;; exists to prevent. On photos ppc < frac·band-segs, so the nominal
+              ;; model binds and the shipped density is unchanged.
               nx-cap (/ (* band-share (double strength) (double budget))
-                        (* frac (double band-segs)))
+                        (max (* frac (double band-segs)) ppc))
               nx     (long (max 0.0 (min nx-nat nx-cap)))]
           (when (pos? nx)
             {:lvl band-lvl :ssz ssz :sp sp :th band-th
@@ -471,10 +495,9 @@
              :segs max-segs :stepf (step-frac band-lvl) :bendf 0.0
              :map-kind :edge :traw (raw-floor band-lvl ssz)
              :sideo band-sideo :selong band-se :band true
-             ;; charge the MEASURED yield (nx·frac·band-trace), not nominal band-segs —
-             ;; nx, spacing and the cap above are unchanged, so the tier paints identically;
-             ;; only its budget charge drops to what it actually emits.
-             :demand (* (double nx) frac (double band-trace))}))))))
+             ;; charge the REALIZED paint (nx·ppc), not the nominal band-segs model —
+             ;; the tier comes out of the detail slice for exactly what it emits.
+             :demand (* (double nx) ppc)}))))))
 
 (defn- band-prepend
   "Put the edge-band level at the FRONT of a finest-first level vector (index 0 =
@@ -863,6 +886,7 @@
      ;; Both halves are needed to check a charge against what the tier paints — the
      ;; demands are the UNTHINNED pools' charge, emission comes from the thinned ones.
      :det-demand det-demand :cand-thin cand-thin
+     :cov-demand cov-demand :det-budget det-budget
      :mid-demand mid-demand :fine-demand fine-demand :fine-thin fine-thin}))
 
 ;; forward references: these are defined below but used by the placement pass above.
@@ -1290,6 +1314,68 @@
   (if (and (>= (long lvl) 2) (= reason :chroma))
     (mapv (fn [r] (assoc r 6 (* 0.5 (double (nth r 6))))) rows)
     rows))
+
+(defn band-paint-per-candidate
+  "Measure the edge-band tier's REALIZED paint per candidate cell on this image:
+   probe seeds drawn from the same hashed stream the tier uses (poshash(i, band-lvl,
+   29/31)) are run through the real edge gate (dithered band-th, subject-gated) and
+   the real tracer (stroke-segments), and the result is the mean emitted segments
+   PER PROBE — P(survive) x E[trace | survive] in one number. band-level charges
+   nx x this and caps nx at band-share·budget / this, so the tier's budget slice is
+   its measured paint, never the nominal model.
+
+   Why a measurement and not a map statistic: the trace's chroma-runaway stop reads
+   the COLOUR field, which no placement map carries, and it dominates exactly where
+   the ridge-density statistic says traces should run long — on the 256x256 8px
+   full-contrast checker the ridge is alive everywhere (q = 0.93 at edge-floor) yet
+   traces die at ~2.4 segs, while the low-contrast budget fixture at q = 1.0 runs
+   them to the 32 cap. Every placement map is normalized (per-image max or
+   local-relative), so absolute contrast — the thing that fires the chroma stop —
+   is invisible to them. Only running the tracer separates the two.
+
+   Reference controls (ssz 1.5 mid-range, variation/detail/stroke/curvature neutral,
+   broad 1 so bgate = 1): ppc is per-candidate, so it is independent of the budget
+   and the strength dial; the remaining control dependence is second-order. Callers
+   pass the orientation field pre-blended (with-swirl prep-noise 1.0) so every
+   caller measures the same number. Deterministic: same image, same probes."
+  [dmap nf blur-px blurd-px H W]
+  (let [probes 128
+        ssz    1.5
+        rr     (/ (double H) 24.0)
+        hd     (double (dec H))
+        wd     (double (dec W))
+        stepf  (step-frac band-lvl)
+        total  (loop [i 0 acc 0]
+                 (if (== i probes)
+                   acc
+                   (let [cx    (* (double H) (poshash i band-lvl 29))
+                         cy    (* (double W) (poshash i band-lvl 31))
+                         sgate (subject-at dmap cx cy rr)
+                         gain  (+ 0.25 (* 0.75 sgate))
+                         dv    (map-at dmap :edge cx cy)
+                         thd   (* (double band-th)
+                                  (+ 0.75 (* 0.5 (hash01 (+ (* i 43) band-lvl) 0 19))))]
+                     (if (< (* dv gain) thd)
+                       (recur (inc i) acc)
+                       (let [Ev    (wavelet/edge-at dmap cx cy)
+                             szf   (max 0.75 (+ 1.0 (* 0.5 (- (hash01 (+ (* i 31) band-lvl) 0 11) 0.5))))
+                             cssz  (* ssz szf (- 1.0 (* (min 0.7 (* 0.1 (max 1.0 (/ (* ssz szf) 8.0)))) Ev)))
+                             D     (min 1.0 (* dv 2.2))
+                             tn    (* 0.15 (- (hash01 (+ (* i 37) band-lvl) 0 13) 0.5))
+                             ds    (if (< (hash01 (+ (* i 41) band-lvl) 0 17) 0.5) 1.0 -1.0)
+                             traw  (density-scaled-traw band-lvl (raw-floor band-lvl ssz)
+                                                        (wavelet/sharp-at dmap cx cy))
+                             [rows _] (stroke-segments
+                                       nf dmap band-lvl
+                                       (max 0.0 (min hd cx)) (max 0.0 (min wd cy))
+                                       cssz D 0.0 tn ds 0.5 2.0 hd wd
+                                       max-segs stepf 0.0 0.0
+                                       traw sgate blur-px W H
+                                       band-th 0.0 :edge gain blurd-px
+                                       (hash01 (+ (* i 67) band-lvl) 0 53)
+                                       (double band-sideo) (double band-se))]
+                         (recur (inc i) (+ acc (count rows))))))))]
+    (/ (double total) (double probes))))
 
 (defn- layered-means
   "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
@@ -1740,7 +1826,16 @@
         ;; the orientation field is baked per image at BOTH ends of the Swirl dial;
         ;; mixing them is O(texels) arithmetic, cheap enough to redo per render, so the
         ;; dial stays live without the 2.3s re-bake (see prep-noise / with-swirl).
-        nf         (with-swirl (or (:noise-fields image) (prep-noise sfield)) swirl)
+        nf0        (or (:noise-fields image) (prep-noise sfield))
+        nf         (with-swirl nf0 swirl)
+        ;; the band tier's realized paint per candidate — measured once per image
+        ;; (fields/prepare carries it on a prepared image; otherwise measure here at
+        ;; the reference swirl so both paths agree)
+        dmap       (if (contains? dmap :band-ppc)
+                     dmap
+                     (assoc dmap :band-ppc
+                            (band-paint-per-candidate dmap (with-swirl nf0 1.0)
+                                                      blur-px blurd-px height width)))
         segments   (layered-means dmap nf detail size variation curvature stroke swirl
                                   [(double size-broad) (double size-mid) (double size-fine)
                                    (double edge-band)]
