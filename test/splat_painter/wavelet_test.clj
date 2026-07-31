@@ -89,3 +89,31 @@
         pm  (w/placement-map img sf)]
     (is (every? (fn [[x y]] (<= 0.0 (w/detail-at pm x y) 1.0))
                 (for [x (range 0 32 4) y (range 0 32 4)] [x y])))))
+
+(deftest subject-map-saturates-on-genuine-structure
+  ;; The subject map ends in a saturating remap so genuine structure clears 0.95
+  ;; (the Broad dial must not smear real subjects, per gen.clj's m=1 invariant)
+  ;; while flat bokeh collapses toward 0. Pre-remap the dense period-8 stripes
+  ;; only reach ~0.905, below the bar — so this assertion discriminates.
+  ;; Period-8 (1px line / 7px gap), NOT wide 1px/15px stripes (~0.54) which would
+  ;; miscalibrate the constants; and NOT a fine checker which saturates already.
+  (let [H 256 W 256
+        img (gray-img H W
+              (fn [x y]
+                (if (and (<= 64 x 191) (<= 64 y 191))
+                  (if (zero? (mod y 8)) 0.2 0.5)    ; 1px line / 7px gap, period 8
+                  0.5)))                             ; flat bokeh
+        sf  (structure/analyze img)
+        pm  (w/placement-map img sf)
+        mean-subj (fn [r0 r1 c0 c1]
+                    (let [xs (for [x (range r0 r1) y (range c0 c1)]
+                               (w/subject-abs-at pm x y))]
+                      (/ (reduce + xs) (count xs))))
+        inside (mean-subj 120 140 120 140)
+        flat   (mean-subj 8 28 8 28)]
+    (is (>= inside 0.95)
+        (str "dense structure subjectness " inside " should clear 0.95"))
+    (is (<= flat 0.35)
+        (str "flat bokeh subjectness " flat " should be <= 0.35"))
+    (is (>= (- inside flat) 0.5)
+        (str "separation " (- inside flat) " should be >= 0.5"))))

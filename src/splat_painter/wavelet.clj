@@ -227,8 +227,32 @@
                       (aset out (+ (* x sw) y)
                             (loop [i lo m 0.0]
                               (if (> i hi) m (recur (inc i) (max m (aget tmp (+ (* i sw) y))))))))))
-                (structure/box-blur out sh sw (max 2 (quot (min sh sw) 30))))]
-     {:h sh :w sw :detail P :sharp Ps :mid Pm :edge E-arr :subject subj
+                 (let [^doubles blurred (structure/box-blur out sh sw (max 2 (quot (min sh sw) 30)))]
+                   ;; SATURATING REMAP — last operation on the subject map. The
+                   ;; pipeline above separates subject from bokeh correctly but its
+                   ;; RANGE is compressed (measured max 0.910, a face ~0.70), so
+                   ;; (1-sabs) is never 0 and the Broad dial is never inert on the
+                   ;; subject — the invariant gen.clj claims. Rescale so genuine
+                   ;; subjects clear 1.0.
+                   ;; Only the TOP of the range is wrong, so only the top is touched:
+                   ;; blend toward 1.0 over [0.45,0.70] and leave everything below 0.45
+                   ;; EXACTLY as it was. Two rejected alternatives, both measured:
+                   ;; remapping the whole range (smoothstep 0.30->0.70) crushed bokeh
+                   ;; 0.33 -> 0.01, driving melt/growth far past their old strength —
+                   ;; the background went to mush; rescaling from 0 (v/0.72) lifted
+                   ;; bokeh 0.33 -> 0.43, which weakens the Broad dial in BOTH
+                   ;; directions there (and made the band-charge fixture's budget
+                   ;; slack). Blending only the top leaves bokeh untouched, so nothing
+                   ;; downstream of it changes, while a face saturates 0.695 -> 0.999.
+                   ;; GLSL: mix(s, 1.0, smoothstep(0.45, 0.70, s)) — mirrored verbatim
+                   ;; in gpu_fields/subjsat-fs.
+                   (dotimes [i n]
+                     (let [v (aget blurred i)
+                           t (max 0.0 (min 1.0 (/ (- v 0.45) 0.25)))
+                           k (* t t (- 3.0 (* 2.0 t)))]
+                       (aset blurred i (+ v (* (- 1.0 v) k)))))
+                   blurred))]
+      {:h sh :w sw :detail P :sharp Ps :mid Pm :edge E-arr :subject subj
       :dmax 1.0 :src-h H :src-w W})))
 
 (defn- bilerp1
