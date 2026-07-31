@@ -15,9 +15,19 @@
 
 (defn heavy-radius
   "Window for the coverage tiers' colour source — a brush-sized neighbourhood,
-   scaled to the image so it means the same thing at any resolution."
+   scaled to the image so it means the same thing at any resolution.
+
+   H/128, not the H/80 it was (12px -> 8px on a 1024 frame). The window has to stay
+   under the width of the features it paints around: at 12px it was comparable to a
+   finger, so the dominant tone near the boundary flipped to background and ate holes
+   out of thin bright shapes. Measured on A7A01535 at Size 7.5, with spec-cap already
+   at 0.60: finger holes 293 -> 216, severe 60 -> 42, nose-shadow |d| 8.85 -> 8.64.
+   Swept 12/8/6/4 — past 8 the SEVERE holes turn back up (42 -> 50 -> 62) as the
+   window stops rejecting sub-brush structure, so 8 is the floor of the useful range,
+   not a midpoint. Text is unaffected (collapse-watch: inter-letter gap ink
+   4.45 -> 4.47, letter ink held 48.83 -> 48.10)."
   [image]
-  (max 6 (quot (long (:height image)) 80)))
+  (max 6 (quot (long (:height image)) 128)))
 
 (defn prepare
   "Attach the precomputed placement fields to a loaded image map. Returns the

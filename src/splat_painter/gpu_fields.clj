@@ -1079,7 +1079,7 @@ void main(){
   "Window for the coverage tiers' colour source. Mirrors fields/heavy-radius —
    duplicated rather than required to keep this namespace off the CPU field
    builders, which pull in the whole analysis stack."
-  [H] (max 6 (quot (long H) 80)))
+  [H] (max 6 (quot (long H) 128)))
 
 (defn build-fields!
   "Every per-image field, built by passes and left in VRAM. Returns the same map
