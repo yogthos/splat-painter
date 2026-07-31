@@ -775,7 +775,7 @@
     (testing "coverage tiers (lvl 0-1) take coverage constants regardless of size"
       (doseq [lvl [0 1]]
         (is (zero? (raw-floor lvl ssz))        (str "lvl " lvl ": traw 0.0 (faithful colour)"))
-        (is (== 0.35 (spec-cap lvl ssz))       (str "lvl " lvl ": tcap 0.35 (averaged colour)"))
+        (is (== 0.60 (spec-cap lvl ssz))       (str "lvl " lvl ": tcap 0.60 (averaged colour)"))
         (is (== 1.0 (level-alpha lvl ssz))     (str "lvl " lvl ": lal 1.0 (full opacity)"))))
     (testing "a detail tier (lvl 2) at the same size keeps the size-keyed values"
       (is (== 0.45 (raw-floor 2 ssz)))
