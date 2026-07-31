@@ -529,7 +529,7 @@ void main(){
   if (lvl >= 2) traw *= 1.0 - 0.7 * sharpAt(cx, cy);
   // colour-specificity ceiling per level (mirror seed/spec-cap): broad layers
   // paint AVERAGED colour, mids halfway, fine layers fully specific
-  float tcap = (lvl <= 1) ? 0.35 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;
+  float tcap = (lvl <= 1) ? 0.60 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;
   if (lvl == 0) {                                 // base fill: one full-alpha splat
     emitSplat(x2, y2, x2, y2, ssz2, D, snoise, tnoise, 1.0, hb, traw, tcap, 1.0 - melt, 0.0, 0.0);
     return;

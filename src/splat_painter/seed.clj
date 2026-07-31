@@ -311,10 +311,22 @@
    progressive colour refinement: a fat brush cannot place a pixel-specific highlight,
    so broad layers stay AVERAGED and full specificity arrives only at feature scale.
    Size-keyed for the same reason as raw-floor: index-keyed, the finest surviving
-   level was capped at 0.7 and painted 30% blur."
+   level was capped at 0.7 and painted 30% blur.
+
+   The coverage constant is 0.60, not the 0.35 it was: emitSplat ALREADY damps
+   specificity by stroke size (tcap2 = min(tcap, 0.3+0.7·min(1,3/csz))), which is
+   what actually keeps a fat brush from stamping a pixel-specific mark — 0.43 at
+   16px, 0.37 at 30px. A flat 0.35 on top of that over-restricted MID-SIZE coverage
+   strokes, which is where thin features live: at 0.35 the base painted >=65%
+   blurred colour, and the blur it samples (dominant-blur at heavy-radius, ~12px on
+   a 1024 frame) is comparable to a finger's WIDTH, so near the boundary the
+   dominant tone flips to background and eats holes in the feature. Measured on
+   A7A01535 at Size 7.5: finger holes 413 -> 293, nose-shadow |d| 9.23 -> 8.85,
+   whole-image |d| 6.44 -> 6.26. Text (collapse-watch) is a wash: inter-letter gap
+   ink 5.21 -> 5.40, letter ink held 54.28 -> 53.69."
   [lvl ssz]
   (if (<= (long lvl) 1)
-    0.35                         ; coverage tiers: averaged colour, by role
+    0.60                         ; coverage tiers: averaged colour, by role
     (let [v (double ssz)]
       (cond (>= v 8.0) 0.35 (>= v 3.5) 0.7 :else 1.0))))
 ;; The PHYSICAL stroke stdev below which a level reads as a drawn LINE and earns liner
