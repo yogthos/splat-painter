@@ -68,5 +68,11 @@
                 ;; solid black over a 12px radius and nothing repainted the paper
                 ;; around it — letters fattened, counters filled, gaps closed.
                 :blur-heavy @heavy
-                :detail @detail
+                ;; the band tier's realized paint per candidate, measured with the
+                ;; real gate and tracer (seed/band-paint-per-candidate) so band-level
+                ;; charges and caps the tier for what it actually paints on THIS image
+                :detail (assoc @detail :band-ppc
+                               (seed/band-paint-per-candidate @detail (seed/with-swirl @noise 1.0)
+                                                              @light @drift
+                                                              (:height img0) (:width img0)))
                 :noise-fields @noise)))

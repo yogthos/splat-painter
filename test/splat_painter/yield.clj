@@ -74,7 +74,9 @@
                (layered-means dmap nf detail size variation curvature stroke 1.0
                               muls count H W px px))
         band?   (fn [s] (pos? (double (nth s 14))))
-        by-lvl  (frequencies (map (fn [s] (if (band? s) :band (long (nth s 15)))) segs))
+        ;; rows are 16-element vectors (idx 0-15) with lvl CONJ'd at index 16 above;
+        ;; reading 15 (rcapf) misattributed every non-band segment
+        by-lvl  (frequencies (map (fn [s] (if (band? s) :band (long (nth s 16)))) segs))
         natural (fn [l] (Math/ceil (/ (double area) (* (double (:sp l)) (double (:sp l))))))
         pool    (fn [pred] (reduce + 0.0 (map natural (filter pred (remove :band (:levels lp))))))
         mid-pool  (pool (fn [l] (and (>= (long (:lvl l)) 2) (< (long (:lvl l)) broad-end))))
