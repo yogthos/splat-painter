@@ -549,6 +549,19 @@ void main(){
   frag = vec4(m, 0.0, 0.0, 1.0);
 }")
 
+;; --- subject saturating remap (mirrors wavelet.clj's final smoothstep) --------
+(def ^:private subjsat-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_src;
+uniform vec2 u_dim;
+void main(){
+  ivec2 p = ivec2(floor(v_uv * u_dim));
+  float s = texelFetch(u_src, p, 0).r;
+  frag = vec4(mix(s, 1.0, smoothstep(0.45, 0.70, s)), 0.0, 0.0, 1.0);
+}")
+
 ;; --- binned colour fields (bilateral + dominant) -----------------------------
 ;; structure/bilateral-blur and dominant-blur-full share one algorithm: K=9 luma
 ;; bins, each pixel given a hat weight around its bin centre, the weighted colour
@@ -799,6 +812,7 @@ void main(){
             :fuse    (gl/make-program vs-src fuse-fs)
             :subjraw (gl/make-program vs-src subjraw-fs)
             :dilate  (gl/make-program vs-src dilate-fs)
+            :subjsat (gl/make-program vs-src subjsat-fs)
             :binw    (gl/make-program vs-src binw-fs)
             :bilacc  (gl/make-program vs-src bilacc-fs)
             :domacc  (gl/make-program vs-src domacc-fs)
@@ -922,7 +936,13 @@ void main(){
                             [["u_dim" :2f sw sh] ["u_step" :2f 1 0] ["u_radius" :1f dr]])
          _       (run-pass! ctx (:dilate progs) dy sw sh [["u_src" dx]]
                             [["u_dim" :2f sw sh] ["u_step" :2f 0 1] ["u_radius" :1f dr]])
-         subject (blur! dy (new-target sw sh) (max 2 (quot mn 30)))]
+          sb30    (blur! dy (tmp!) (max 2 (quot mn 30)))
+          ;; SATURATING REMAP (final op): smoothstep(0.30,0.70) into a new-target
+          ;; so `subject` outlives the scratch sweep (sb30 is a tmp!, freed below).
+          subject (let [out (new-target sw sh)]
+                    (run-pass! ctx (:subjsat progs) out sw sh
+                               [["u_src" sb30]] dims)
+                    out)]
      ;; `edge` is an output, so hand back a copy that outlives the scratch sweep
      (let [edge-out (blur! E (new-target sw sh) 0)]
        (free-textures! @scratch)
