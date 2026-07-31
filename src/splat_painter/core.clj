@@ -41,6 +41,7 @@
                                        ; orientation + position warp; 0 = structure only
 (defonce hardness-atom (r/atom 1.7))   ; edge crispness of detail strokes; large strokes always
                                        ; soften to a round gaussian (u_hard_soft fixed at 1.0)
+(defonce sharpen-atom  (r/atom 0.0))   ; final-output edge-gated unsharp on the composite; 0 = off
 ;; paint-texture experiment (render-time, quad shader only): pigment-like variance
 ;; WITHIN each stroke. All zero == the clean-gaussian render.
 (defonce tex-streak-atom (r/atom 0.18)) ; bristle tonal streaks along the drag
@@ -161,6 +162,7 @@
 (defn- cur-swirl  [] (or (some-> (System/getenv "GA_PAINTER_SWIRL")  Double/parseDouble)      @swirl-atom))
 (defn- cur-contrast [] (or (some-> (System/getenv "GA_PAINTER_CONTRAST") Double/parseDouble)  @contrast-atom))
 (defn- cur-hardness [] (or (some-> (System/getenv "GA_PAINTER_HARDNESS") Double/parseDouble)  @hardness-atom))
+(defn- cur-sharpen [] (or (some-> (System/getenv "GA_PAINTER_SHARPEN") Double/parseDouble)  @sharpen-atom))
 (defn- cur-tex-streak [] (or (some-> (System/getenv "GA_PAINTER_TEX_STREAK") Double/parseDouble) @tex-streak-atom))
 (defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
 (defn- cur-tex-edge   [] (or (some-> (System/getenv "GA_PAINTER_TEX_EDGE")   Double/parseDouble) @tex-edge-atom))
@@ -268,6 +270,44 @@
                                   gl/GL-TEXTURE-2D ctex 0)
     (swap! gl-state update area assoc :export-fbo fbo :export-tex ctex)
     [fbo ctex]))
+
+(defn- ensure-render-targets!
+  "The two IMAGE-RESOLUTION FBO + RGBA8 texture pairs render-final! ping-pongs
+   between: `composite` is what the splat passes draw into, `post` is what a
+   final-output pass (sharpen) writes. Separate from ensure-export-targets!,
+   which is the destination the layer captures read back.
+
+   Reallocates ONLY when the size actually changes. ensure-export-targets!
+   re-runs glTexImage2D unconditionally, which is fine for a save; this runs on
+   every frame, so an unconditional realloc would churn a multi-megabyte texture
+   through the driver on every step of a slider drag.
+
+   LINEAR filtering: the pane blit resamples these to the widget size. The
+   sharpen pass samples at exact texel centres, where LINEAR and NEAREST agree,
+   so this costs it nothing."
+  [area iw ih]
+  (let [st (get @gl-state area)
+        mk (fn [fbo-k tex-k]
+             (let [fbo (or (fbo-k st) (gl/gen-one gl/gl-gen-framebuffers))
+                   tex (or (tex-k st) (gl/gen-one gl/gl-gen-textures))]
+               (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
+               (when-not (= [iw ih] (:render-size st))
+                 (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 GL-RGBA8 (int iw) (int ih) 0
+                                     gl/GL-RGBA gl/GL-UNSIGNED-BYTE ffi/null)
+                 (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MIN-FILTER gl/GL-LINEAR)
+                 (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MAG-FILTER gl/GL-LINEAR)
+                 (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-S gl/GL-CLAMP-TO-EDGE)
+                 (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-T gl/GL-CLAMP-TO-EDGE)
+                 (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER fbo)
+                 (gl/gl-framebuffer-texture-2d gl/GL-FRAMEBUFFER gl/GL-COLOR-ATTACHMENT0
+                                               gl/GL-TEXTURE-2D tex 0))
+               [fbo tex]))
+        [cfbo ctex] (mk :composite-fbo :composite-tex)
+        [pfbo ptex] (mk :post-fbo :post-tex)]
+    (swap! gl-state update area assoc
+           :composite-fbo cfbo :composite-tex ctex
+           :post-fbo pfbo :post-tex ptex :render-size [iw ih])
+    {:composite [cfbo ctex] :post [pfbo ptex]}))
 
 (defn- handle-save-result [dialog res]
   (let [errslot (ffi/alloc (ffi/sizeof :pointer))
@@ -407,6 +447,7 @@
                  :render  render
                  :quad    (shader/build-program-quad)
                  :blit    (shader/build-program-blit)
+                 :sharpen (shader/build-program-sharpen)
                  :perm    (gen/upload-perm!)
                  :tf-buf  tf-buf
                  :query   (gl/gen-one gl/gl-gen-queries)
@@ -462,7 +503,11 @@
    Optional opts map (trailing arg):
      nil / {}        full composite — committed layers below `active` blit under the
                      live splat pass, committed layers above blit over it (all src-over,
-                     premultiplied), opaque-black clear. The on-screen + save path.
+                     premultiplied), opaque-black clear. What render-final! wraps.
+
+   Every caller passes vw/vh == iw/ih: this always draws at native image resolution,
+   and the letterbox fit exists only in blit-to-pane!. The vw/vh parameters are kept
+   because the quad shader's mapping is written in terms of them.
      {:solo true}    capture the live pass ALONE: transparent clear, NO blits, splats
                      at the fixed 0.9. Used by commit-active! to grab a layer's solo
                      texture (premultiplied RGBA over the transparent clear).
@@ -563,6 +608,72 @@
         (gl/gl-disable gl/GL-BLEND)))
     {:count count :total total :n n}))
 
+(defn- post-sharpen!
+  "Draw the edge-gated unsharp pass (shader/build-program-sharpen) from `src-tex`
+   into the currently-bound framebuffer, at iw*ih. The target IS the image here —
+   the letterbox exists only in the pane blit — so the clamp rect is the whole
+   texture."
+  [area iw ih src-tex amount]
+  (let [{:keys [sharpen gen-vao]} (ensure-gpu! area)
+        locs (:locs sharpen)]
+    (gl/gl-viewport 0 0 (int iw) (int ih))
+    (gl/gl-clear-color 0.0 0.0 0.0 1.0)
+    (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
+    (gl/gl-disable gl/GL-BLEND)
+    (gl/gl-use-program (:program sharpen))
+    (gl/gl-active-texture gl/GL-TEXTURE0)
+    (gl/gl-bind-texture gl/GL-TEXTURE-2D src-tex)
+    (gl/gl-uniform-1i (:u_src locs) 0)
+    (gl/gl-uniform-2f (:u_viewport locs) (double iw) (double ih))
+    (gl/gl-uniform-4f (:u_rect locs) 0.0 0.0 (double iw) (double ih))
+    (gl/gl-uniform-1f (:u_amount locs) (double amount))
+    (gl/gl-bind-vertex-array gen-vao)            ; no attribs — gl_VertexID only
+    (gl/gl-draw-arrays gl/GL-TRIANGLES 0 6)))
+
+(defn- render-final!
+  "Render the finished picture at NATIVE IMAGE RESOLUTION into a texture; returns
+   [tex result] and leaves that texture's FBO bound, so a caller can read it back
+   directly. THE definition of what a render is: the on-screen pane and the saved
+   PNG both come from here, so what you are looking at is what you will get.
+
+   Before this, the pane composited at WIDGET resolution — 1766x1488 device px
+   against a 1024x1024 image on a Retina display. The splats were rasterized at a
+   different scale than the export, and a final-output pass ran at a different
+   physical radius, so nothing judged on screen was the thing written to disk."
+  [area iw ih]
+  (let [{[cfbo ctex] :composite [pfbo ptex] :post} (ensure-render-targets! area iw ih)
+        amount (double (cur-sharpen))]
+    (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER cfbo)
+    (gl/gl-viewport 0 0 (int iw) (int ih))
+    (let [result (gpu-draw! area iw ih iw ih)]
+      (if (pos? amount)
+        (do (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER pfbo)
+            (post-sharpen! area iw ih ctex amount)
+            [ptex result])
+        [ctex result]))))
+
+(defn- blit-to-pane!
+  "Resample the finished native-resolution texture into the currently-bound
+   framebuffer, letterboxed into a vw*vh pane. The layer blit program at full
+   opacity with blending OFF — a straight resample, not a composite."
+  [area tex vw vh iw ih]
+  (let [{:keys [blit gen-vao]} (ensure-gpu! area)
+        locs (:locs blit)]
+    (gl/gl-viewport 0 0 (int vw) (int vh))
+    (gl/gl-clear-color 0.0 0.0 0.0 1.0)
+    (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
+    (gl/gl-disable gl/GL-BLEND)
+    (gl/gl-use-program (:program blit))
+    (gl/gl-active-texture (+ gl/GL-TEXTURE0 9))
+    (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
+    (gl/gl-uniform-1i (:u_layer locs) 9)
+    (gl/gl-uniform-1f (:u_alpha locs) 1.0)
+    (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
+    (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
+    (gl/gl-bind-vertex-array gen-vao)            ; no attribs — gl_VertexID only
+    (gl/gl-draw-arrays gl/GL-TRIANGLES 0 6)
+    (gl/gl-active-texture gl/GL-TEXTURE0)))
+
 (defn- splat-stats [splats]
   (reduce (fn [[sx sy sd sc sa] {[mx my] :mean [c00 c01 _ c11] :cov [r g b] :color a :alpha}]
             [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc r g b)
@@ -646,9 +757,10 @@
   (when-let [img @image-atom]
     (let [iw (int (:width img)) ih (int (:height img))
           prev-fbo (read-fbo-binding)]
-      (ensure-export-targets! area iw ih)
-      (gl/gl-viewport 0 0 iw ih)
-      (let [{:keys [count total n]} (gpu-draw! area iw ih iw ih)
+      ;; render-final! leaves ITS framebuffer bound and the picture is already at
+      ;; native resolution, so the readback comes straight off it — no separate
+      ;; export target, and by construction the same pixels the pane is showing.
+      (let [[_tex {:keys [count total n]}] (render-final! area iw ih)
             buf (ffi/alloc (* iw ih 4))]
         (println (format "gpu-save: %d candidates -> %d survivors (render %d)" total count n))
         (when (System/getenv "GA_PAINTER_GPU_VERIFY")   ; recomputes the CPU field — dev only
@@ -862,7 +974,13 @@
           img   @image-atom]
       (if-not img
         (do (gl/gl-clear-color 0.05 0.06 0.09 1.0) (gl/gl-clear gl/GL-COLOR-BUFFER-BIT))
-        (gpu-draw! area w h (:width img) (:height img)))
+        ;; render at native resolution, then resample into the pane. The pane is a
+        ;; VIEWER of the finished picture, not a second renderer at another scale.
+        (let [iw (int (:width img)) ih (int (:height img))
+              pane-fbo (read-fbo-binding)
+              [tex _]  (render-final! area iw ih)]
+          (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER pane-fbo)
+          (blit-to-pane! area tex w h iw ih)))
       (when-let [p (System/getenv "GA_PAINTER_SAVE_PNG")]
         (when (and (not @saved?-atom) img)
           (reset! saved?-atom true)
@@ -923,6 +1041,7 @@
    [slider "Stroke"    1.0  4.0   0.05  stroke-atom]   ; <1 degenerates chains to bead dots
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
    [slider "Hardness"  1.0  4.0   0.05  hardness-atom]   ; detail-stroke crispness (big strokes stay round)
+   [slider "Sharpen"   0.0  1.5   0.05  sharpen-atom]    ; final-output edge-gated unsharp; 0 = off
    [slider "Cut-in"    0.0  1.5   0.05  cutin-atom]     ; edge-band tier: restate silhouettes from their own sides; 0 = off
    [slider "Swirl"     0.0  1.0   0.02  swirl-atom]    ; Perlin share of the flow + position warp; 0 = image structure only
    [:separator {}]
