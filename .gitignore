@@ -27,3 +27,6 @@ ideas.md
 # jolt build output
 /splat-painter
 splat-painter.build/
+
+# harness scratch
+dev/harness/ab-server.log

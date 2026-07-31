@@ -383,6 +383,99 @@ void main(){
             :u_layer    (gl/gl-get-uniform-location prog "u_layer")
             :u_alpha    (gl/gl-get-uniform-location prog "u_alpha")}}))
 
+;; --- sharpen present pass (final-output unsharp, gated) ----------------------
+;; A view/output effect applied ONCE to the finished composite (screen + PNG
+;; export), never fed back into placement. Geometry is the vs-src-blit approach —
+;; attribute-less, 6 GL_TRIANGLES from gl_VertexID over the image rect — but
+;; parameterised by u_rect directly so the drawn coverage and the fragment-stage
+;; clamp rect are the same numbers by construction (no varyings: the FS addresses
+;; the composite texture by gl_FragCoord).
+(def ^:private vs-src-sharpen
+  "#version 330 core
+uniform vec2 u_viewport;        // framebuffer pixels (vw, vh)
+uniform vec4 u_rect;            // image rect in framebuffer px: (ox, oy, dw, dh)
+void main(){
+  // two triangles (0,1,2)(2,1,3) over corner ids 0..3, same winding as vs-src-blit
+  int corner = gl_VertexID;
+  int cid = corner == 0 ? 0 : (corner == 1 || corner == 4) ? 1
+          : (corner == 2 || corner == 3) ? 2 : 3;
+  vec2 s = vec2((cid & 1) == 0 ? -1.0 : 1.0, (cid & 2) == 0 ? -1.0 : 1.0);
+  vec2 pane = u_rect.xy + 0.5 * u_rect.zw * (vec2(1.0) + s);
+  gl_Position = vec4(pane / u_viewport * 2.0 - 1.0, 0.0, 1.0);
+}")
+
+(def ^:private fs-src-sharpen
+  "#version 330 core
+uniform sampler2D u_src;        // the finished composite (RGBA8, NEAREST)
+uniform vec2  u_viewport;       // composite texture size in px
+uniform vec4  u_rect;           // image rect in framebuffer px: (ox, oy, dw, dh)
+uniform float u_amount;         // 0.0 = off (the app also skips the pass entirely)
+out vec4 frag;
+
+// Gate thresholds — compile-time constants, one slider not three. Measured on the
+// 1024x1024 baseline render (dev/harness/sharpen/measure_gate.py), render Sobel
+// magnitude by region: bokeh box p90 = 0.0117, flat stroke-texture p90 = 0.0074,
+// strong-edge band (source-gradient p85) p10 = 0.0093 — the distributions OVERLAP,
+// so no clean split exists; 0.010/0.030 is the best compromise (88% of bokeh and
+// 93% of flat texture fully gated off, mean gate 0.74 inside the band; offline
+// simulation of this exact pass: sharpness 0.73 -> 0.89 at amount 1.5 with +6.6%
+// background gradient energy).
+const float GATE_LO = 0.010;
+const float GATE_HI = 0.030;
+
+float lum(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// CLAMP INTO THE IMAGE RECT. Without this the 3x3 neighbourhood reaches into
+// the black letterbox bar at the frame border and rings it.
+vec3 tap(vec2 p){
+  vec2 q = clamp(p, u_rect.xy + 0.5, u_rect.xy + u_rect.zw - 0.5);
+  return texture(u_src, q / u_viewport).rgb;
+}
+
+void main(){
+  vec2 p = gl_FragCoord.xy;
+  // the 3x3 neighbourhood, fetched once and reused for blur + gate
+  vec3 cTL = tap(p + vec2(-1.0,  1.0));
+  vec3 cTM = tap(p + vec2( 0.0,  1.0));
+  vec3 cTR = tap(p + vec2( 1.0,  1.0));
+  vec3 cML = tap(p + vec2(-1.0,  0.0));
+  vec3 c   = tap(p);
+  vec3 cMR = tap(p + vec2( 1.0,  0.0));
+  vec3 cBL = tap(p + vec2(-1.0, -1.0));
+  vec3 cBM = tap(p + vec2( 0.0, -1.0));
+  vec3 cBR = tap(p + vec2( 1.0, -1.0));
+  float lTL = lum(cTL), lTM = lum(cTM), lTR = lum(cTR);
+  float lML = lum(cML), lC  = lum(c),   lMR = lum(cMR);
+  float lBL = lum(cBL), lBM = lum(cBM), lBR = lum(cBR);
+  // binomial blur, radius 1px — matched to the min-phys 1.4px floor, the scale
+  // the ladder terminates at and therefore the scale the softness lives at
+  float blur = (lTL + 2.0*lTM + lTR + 2.0*lML + 4.0*lC + 2.0*lMR
+              + lBL + 2.0*lBM + lBR) / 16.0;
+  // high-pass on LUMA only, added to all three channels: sharpening R,G,B
+  // independently shifts hue at strong edges, a shared luma delta does not
+  float hp = lC - blur;
+  // Sobel gate: the [1 2 1] smoothing perpendicular to each derivative is what
+  // makes it respond to feature edges rather than single-pixel grain
+  float gx = (lTR + 2.0*lMR + lBR) - (lTL + 2.0*lML + lBL);
+  float gy = (lBL + 2.0*lBM + lBR) - (lTL + 2.0*lTM + lTR);
+  float gate = smoothstep(GATE_LO, GATE_HI, length(vec2(gx, gy)) / 8.0);
+  frag = vec4(clamp(c + u_amount * gate * hp, 0.0, 1.0), 1.0);
+}")
+
+(defn build-program-sharpen
+  "Compile + link the sharpen present pass (needs a current GL context).
+  Attribute-less: bind any VAO with no enabled attribs and draw 6 GL_TRIANGLES
+  with blending DISABLED over a target cleared to opaque black (the letterbox
+  bars stay black). u_src is the finished composite texture, u_rect the image
+  rect inside it. Returns {:program :locs} or nil."
+  []
+  (when-let [prog (gl/make-program vs-src-sharpen fs-src-sharpen)]
+    {:program prog
+     :locs {:u_src      (gl/gl-get-uniform-location prog "u_src")
+            :u_viewport (gl/gl-get-uniform-location prog "u_viewport")
+            :u_rect     (gl/gl-get-uniform-location prog "u_rect")
+            :u_amount   (gl/gl-get-uniform-location prog "u_amount")}}))
+
 (defn- render-uniform-locs [prog]
   {:u_splats   (gl/gl-get-uniform-location prog "u_splats")
    :u_count    (gl/gl-get-uniform-location prog "u_count")
@@ -406,12 +499,14 @@ void main(){
                      :a_pos (gl/gl-get-attrib-location prog "a_pos"))}))
 
 (defn sources
-  "Return {:vs-src :fs-src-buf :vs-src-quad :fs-src-quad :vs-src-blit :fs-src-blit}
+  "Return {:vs-src :fs-src-buf :vs-src-quad :fs-src-quad :vs-src-blit :fs-src-blit
+           :vs-src-sharpen :fs-src-sharpen}
   — pure, no GL context (for headless inspection/tests)."
   []
   {:vs-src vs-src :fs-src-buf fs-src-buf
    :vs-src-quad vs-src-quad :fs-src-quad fs-src-quad
-   :vs-src-blit vs-src-blit :fs-src-blit fs-src-blit})
+   :vs-src-blit vs-src-blit :fs-src-blit fs-src-blit
+   :vs-src-sharpen vs-src-sharpen :fs-src-sharpen fs-src-sharpen})
 
 (defn pack-splats
   "Flatten a seq of splats into the RGBA32F texture payload (length 3*N*4): splat i
