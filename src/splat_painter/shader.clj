@@ -85,6 +85,7 @@ uniform float u_hard_sharp;
 uniform float u_hard_soft;
 uniform float u_sig_min;
 uniform float u_sig_max;
+uniform float u_aa;          // ANTIALIAS: stdev below which hard edges ease to a pure gaussian
 const int MAX_SPLATS = " max-splats ";
 
 void main(){
@@ -116,9 +117,9 @@ void main(){
     float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
     ts = ts * ts * (3.0 - 2.0 * ts);
     float hardness = mix(u_hard_sharp, u_hard_soft, ts);
-    // ANTIALIAS: below ~2.5px stdev a hard-edged profile spans less than a pixel and
+    // ANTIALIAS: below u_aa px stdev a hard-edged profile spans less than a pixel and
     // shimmers as jaggies — tiny marks ease back to a pure gaussian (soft dab).
-    hardness = 1.0 + (hardness - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
+    hardness = 1.0 + (hardness - 1.0) * clamp(sig / max(u_aa, 1e-4), 0.0, 1.0);
     float a = t2.x * u_opacity * exp(-pow(pdf, hardness));
     float wa = T * a;
     acc += wa * t1.yzw;
@@ -155,6 +156,7 @@ uniform float u_hard_sharp;
 uniform float u_hard_soft;
 uniform float u_sig_min;
 uniform float u_sig_max;
+uniform float u_aa;          // ANTIALIAS: stdev below which hard edges ease to a pure gaussian
 uniform float u_tex_edge;        // paint-texture: edge-raggedness amount (0 = clean ellipse)
 flat out vec3  v_color;
 flat out vec3  v_prec;           // p00, p11, cross
@@ -195,7 +197,7 @@ void main(){
   ts = ts * ts * (3.0 - 2.0 * ts);
   v_hard = mix(u_hard_sharp, u_hard_soft, ts);
   // ANTIALIAS: tiny marks ease back to a pure gaussian (see the loop shaders)
-  v_hard = 1.0 + (v_hard - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
+  v_hard = 1.0 + (v_hard - 1.0) * clamp(sig / max(u_aa, 1e-4), 0.0, 1.0);
   // edge raggedness rides the SMALLER strokes only: the base/large coverage layer
   // (ts→1) stays solid so thinning coverage can't open gaps to the black clear;
   // fine marks (ts→0) get the full break-up, over the underpainting where it reads.
@@ -364,6 +366,7 @@ void main(){
             :u_hard_soft  (gl/gl-get-uniform-location prog "u_hard_soft")
             :u_sig_min    (gl/gl-get-uniform-location prog "u_sig_min")
             :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")
+            :u_aa         (gl/gl-get-uniform-location prog "u_aa")
             :u_tex_streak (gl/gl-get-uniform-location prog "u_tex_streak")
             :u_tex_grain  (gl/gl-get-uniform-location prog "u_tex_grain")
             :u_tex_edge   (gl/gl-get-uniform-location prog "u_tex_edge")}}))
@@ -505,7 +508,8 @@ void main(){
    :u_hard_sharp (gl/gl-get-uniform-location prog "u_hard_sharp")
    :u_hard_soft  (gl/gl-get-uniform-location prog "u_hard_soft")
    :u_sig_min    (gl/gl-get-uniform-location prog "u_sig_min")
-   :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")})
+   :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")
+   :u_aa         (gl/gl-get-uniform-location prog "u_aa")})
 
 (defn build-program-buf
   "Compile + link the samplerBuffer render variant (needs a current GL context).

@@ -53,11 +53,13 @@
 
 (deftest settings-snapshot-round-trip
   (testing "snapshot then restore reproduces every control atom exactly"
-    (let [saved (core/snapshot-settings)]
-      (is (= 16 (count saved)))                  ; count size broad mid fine detail
-      (core/restore-settings! (vec (repeat 16 0.37))) ; variation curvature stroke contrast
-                                                 ; hardness cutin swirl tex-streak/grain/edge
-      (is (every? #(== 0.37 %) (core/snapshot-settings))) ; hardness tex-streak/grain/edge
+    ;; derived from settings-atoms, not hardcoded — the count is whatever the slider
+    ;; list holds, and pinning a literal here just breaks on the next slider added
+    (let [n     (count @#'core/settings-atoms)
+          saved (core/snapshot-settings)]
+      (is (= n (count saved)))
+      (core/restore-settings! (vec (repeat n 0.37)))
+      (is (every? #(== 0.37 %) (core/snapshot-settings)))
       (core/restore-settings! saved)
       (is (= saved (core/snapshot-settings))))))
 

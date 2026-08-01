@@ -40,6 +40,7 @@
 (defonce swirl-atom    (r/atom 1.0))   ; share of the image-INDEPENDENT Perlin field in the flow
                                        ; orientation + position warp; 0 = structure only
 (defonce hardness-atom (r/atom 1.7))   ; edge crispness of detail strokes; large strokes always
+(defonce aa-atom       (r/atom 2.5))   ; ANTIALIAS: stdev below which hard edges ease to a gaussian
                                        ; soften to a round gaussian (u_hard_soft fixed at 1.0)
 (defonce sharpen-atom  (r/atom 0.0))   ; final-output edge-gated unsharp on the composite; 0 = off
 ;; paint-texture experiment (render-time, quad shader only): pigment-like variance
@@ -162,6 +163,7 @@
 (defn- cur-swirl  [] (or (some-> (System/getenv "GA_PAINTER_SWIRL")  Double/parseDouble)      @swirl-atom))
 (defn- cur-contrast [] (or (some-> (System/getenv "GA_PAINTER_CONTRAST") Double/parseDouble)  @contrast-atom))
 (defn- cur-hardness [] (or (some-> (System/getenv "GA_PAINTER_HARDNESS") Double/parseDouble)  @hardness-atom))
+(defn- cur-aa       [] (or (some-> (System/getenv "GA_PAINTER_AA")       Double/parseDouble)  @aa-atom))
 (defn- cur-sharpen [] (or (some-> (System/getenv "GA_PAINTER_SHARPEN") Double/parseDouble)  @sharpen-atom))
 (defn- cur-tex-streak [] (or (some-> (System/getenv "GA_PAINTER_TEX_STREAK") Double/parseDouble) @tex-streak-atom))
 (defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
@@ -554,6 +556,7 @@
                           (+ 1.0 (* (- (double (cur-hardness)) 1.0)
                                     (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
+        (gl/gl-uniform-1f (:u_aa locs) (double (cur-aa)))
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
         (gl/gl-bind-vertex-array quad-vao)
@@ -580,6 +583,7 @@
                           (+ 1.0 (* (- (double (cur-hardness)) 1.0)
                                     (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
+        (gl/gl-uniform-1f (:u_aa locs) (double (cur-aa)))
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
         (gl/gl-uniform-1f (:u_tex_streak locs) (double (cur-tex-streak)))
@@ -801,13 +805,13 @@
   "The slider atoms a committed layer must snapshot so re-selecting it reproduces the
    pass deterministically. Positional — snapshot-settings / restore-settings! use the
    same order. (count size broad mid fine detail variation curvature stroke contrast
-   hardness cutin swirl tex-streak tex-grain tex-edge.)"
+   hardness aa cutin swirl tex-streak tex-grain tex-edge.)"
   [count-atom size-atom broad-atom mid-atom fine-atom detail-atom variation-atom
-   curvature-atom stroke-atom contrast-atom hardness-atom cutin-atom swirl-atom
+   curvature-atom stroke-atom contrast-atom hardness-atom aa-atom cutin-atom swirl-atom
    tex-streak-atom tex-grain-atom tex-edge-atom])
 
 (defn snapshot-settings
-  "Snapshot every placement slider atom into a 16-vector. Stored on a committed layer
+  "Snapshot every placement slider atom into a 17-vector. Stored on a committed layer
    so re-selecting it restores the exact field that generated it."
   []
   (vec (for [a settings-atoms] @a)))
@@ -1059,6 +1063,7 @@
    [slider "Stroke"    1.0  4.0   0.05  stroke-atom]   ; <1 degenerates chains to bead dots
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
    [slider "Hardness"  1.0  4.0   0.05  hardness-atom]   ; detail-stroke crispness (big strokes stay round)
+   [slider "Antialias" 0.0  6.0   0.1   aa-atom]        ; stdev below which hard edges ease to a gaussian; 0 = off
    [slider "Sharpen"   0.0  1.5   0.05  sharpen-atom]    ; final-output edge-gated unsharp; 0 = off
    [slider "Cut-in"    0.0  1.5   0.05  cutin-atom]     ; edge-band tier: restate silhouettes from their own sides; 0 = off
    [slider "Swirl"     0.0  1.0   0.02  swirl-atom]    ; Perlin share of the flow + position warp; 0 = image structure only
