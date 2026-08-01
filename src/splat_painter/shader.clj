@@ -447,15 +447,34 @@ void main(){
   float lTL = lum(cTL), lTM = lum(cTM), lTR = lum(cTR);
   float lML = lum(cML), lC  = lum(c),   lMR = lum(cMR);
   float lBL = lum(cBL), lBM = lum(cBM), lBR = lum(cBR);
-  // binomial blur, radius 1px — matched to the min-phys 1.4px floor, the scale
-  // the ladder terminates at and therefore the scale the softness lives at
-  float blur = (lTL + 2.0*lTM + lTR + 2.0*lML + 4.0*lC + 2.0*lMR
-              + lBL + 2.0*lBM + lBR) / 16.0;
+  // BLUR RADIUS 3 (7x7 binomial, sigma ~1.22), NOT the radius 1 this shipped with.
+  // Radius 1 is sigma ~0.7, which sharpens structure FINER than the ~1.4px softness
+  // it exists to correct — to undo a blur you need a radius at or above its scale.
+  // The original 'matched to the min-phys 1.4px floor' reasoning was backwards, and
+  // it was measurable: at radius 1 the whole pass moved mean|d| 0.92/255 with only
+  // 10% of pixels changing by more than 2 levels, i.e. invisible, while the
+  // sharpness metric still read a flattering 0.73 -> 0.89. Offline sweep at
+  // amount 1.5 (sharpness / mean|d| per 255): sigma 0.70 -> 0.867 / 0.81,
+  // 1.20 -> 0.980 / 1.33, 1.80 -> 1.056 / 1.80, 2.50 -> 1.088 / 2.17, then it
+  // plateaus. 1.22 restores edges to roughly source parity in one pass.
+  // Constant bounds and a constant weight table so the compiler fully unrolls —
+  // see the Apple GL 4.1 note on uniform-bound loops in gen.clj.
+  const float W7[7] = float[7](1.0, 6.0, 15.0, 20.0, 15.0, 6.0, 1.0);
+  float blur = 0.0;
+  for (int j = 0; j < 7; j++) {
+    for (int i = 0; i < 7; i++) {
+      blur += W7[i] * W7[j] * lum(tap(p + vec2(float(i - 3), float(j - 3))));
+    }
+  }
+  blur /= 4096.0;
   // high-pass on LUMA only, added to all three channels: sharpening R,G,B
   // independently shifts hue at strong edges, a shared luma delta does not
   float hp = lC - blur;
   // Sobel gate: the [1 2 1] smoothing perpendicular to each derivative is what
-  // makes it respond to feature edges rather than single-pixel grain
+  // makes it respond to feature edges rather than single-pixel grain.
+  // Deliberately still the TIGHT 3x3 while the blur above widened: GATE_LO/HI were
+  // measured against this operator, and a Sobel over a wider neighbourhood is a
+  // different, smoother detector whose output would need re-calibrating.
   float gx = (lTR + 2.0*lMR + lBR) - (lTL + 2.0*lML + lBL);
   float gy = (lBL + 2.0*lBM + lBR) - (lTL + 2.0*lTM + lTR);
   float gate = smoothstep(GATE_LO, GATE_HI, length(vec2(gx, gy)) / 8.0);
