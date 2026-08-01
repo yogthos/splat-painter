@@ -684,6 +684,24 @@
   ;; numerical m11 check: compare the GPU-generated field to the CPU golden reference
   ;; for the current controls (aggregate Σmean/Σdet/Σcolour — exact match is impossible
   ;; across double↔float + Perlin/hash, so we report both for a closeness read).
+  ;;
+  ;; THIS ONLY PRINTS. It asserts nothing, and neither does anything else: gpu-fields-test
+  ;; compares FIELDS, never the splat field, and check.clj pins GLSL source text. Tracer
+  ;; parity is a convention, not a gate — do not read a count ratio here as pass/fail.
+  ;;
+  ;; TOLERATED DIVERGENCE (splat-painter-9wx, characterized 2026-08-01, deliberately not
+  ;; fixed). At a dying ridge, edge-snap's Newton step has a degenerate denominator
+  ;; (den 0.0046 vs numerator 0.0091 — the raw position lands within 0.02px of the probe
+  ;; midpoint); float32-vs-float64 drift flips its sign, the step saturates at ±1.0, and
+  ;; the paths pull ~2.98px in OPPOSITE directions. The CPU is the one misbehaving; the
+  ;; GPU, which is also the shipping path, pulls the right way.
+  ;;
+  ;; It shows up as a COUNT RATIO ABOVE 100% and is masked by the band tier's side push,
+  ;; which keeps band strokes off the ridge where the razor lives. As shipped that leaves
+  ;; parity at 100.0% (425709/425696). Reduce or remove the push — which splat-painter-d37
+  ;; does — and it opens to single-digit percent (121.4% with the push gone entirely).
+  ;; That is expected, not a regression. Every fix tried changed the render for a defect
+  ;; that never reaches the screen (+5.5% to +13% splats), which is why it stands.
   (let [gpu (gen/read-splats tf-buf n)
         cpu (:splats (field-for-current-controls))
         [gx gy gd gc ga] (splat-stats gpu)
