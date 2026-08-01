@@ -135,6 +135,7 @@
     (assert-contains gs-src "float tcap = (lvl <= 1) ? 0.60 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;" "progressive colour-specificity ceiling")
     (assert-contains gs-src "float mapAt(int sel, float x, float y){" "scale-matched map selector")
     (assert-contains gs-src "vec4 fieldBilerp(sampler2D tex, float x, float y, vec2 dim, vec2 src){" "field maps sampled bilinearly (fieldBilerp)")
+    (assert-contains (:fs-src-sharpen (shader/sources)) "float dscale = SHARP_DETAIL_FLOOR + (1.0 - SHARP_DETAIL_FLOOR) * smoothstep(DETAIL_KNEE.x, DETAIL_KNEE.y, subj);" "sharpen gated on subjectness (detail-sharpen-scale)")
     (assert-contains gs-src "vec4 t = fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc);" "detail/sharp/mid maps via fieldBilerp")
     (assert-contains gs-src "fieldBilerp(u_subjTex, x, y, u_detailDim, u_detailSrc).r" "absolute subjectness via fieldBilerp")
     (assert-contains gs-src "vec3 r11 = texelFetch(tex, ivec2(y1, x1), 0).rgb;" "colour sampled 4-tap bilinear (sampleRGB), not nearest")

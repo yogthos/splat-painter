@@ -146,25 +146,9 @@ float warpNoise(int i, int lvl, int salt, float fx, float fy){
   return u_swirl * noise2(fx, fy) + (1.0 - u_swirl) * poshash(i, lvl, salt);
 }
 
-// bilinear-map a full-image (x,y) into a reduced field grid (dim=(rows,cols),
-// src=(src_h,src_w)), CLAMPED at the borders — matches CPU wavelet/bilerp1 exactly:
-// floor-based texel selection with lerp (NO GL_LINEAR — hardware filtering would not
-// match the CPU). texelFetch(col,row) as before; fx blends the ROW axis, fy the COL.
-vec4 fieldBilerp(sampler2D tex, float x, float y, vec2 dim, vec2 src){
-  float gx = clamp(x * dim.x / src.x, 0.0, dim.x - 1.0);
-  float gy = clamp(y * dim.y / src.y, 0.0, dim.y - 1.0);
-  float x0f = floor(gx); float y0f = floor(gy);
-  int x0 = int(x0f); int y0 = int(y0f);
-  int x1 = min(x0 + 1, int(dim.x) - 1); int y1 = min(y0 + 1, int(dim.y) - 1);
-  float fx = gx - x0f; float fy = gy - y0f;
-  vec4 v00 = texelFetch(tex, ivec2(y0, x0), 0);   // row x0, col y0
-  vec4 v10 = texelFetch(tex, ivec2(y0, x1), 0);   // row x1, col y0
-  vec4 v01 = texelFetch(tex, ivec2(y1, x0), 0);   // row x0, col y1
-  vec4 v11 = texelFetch(tex, ivec2(y1, x1), 0);   // row x1, col y1
-  vec4 r0 = mix(v00, v10, fx);                    // along the ROW axis (x0->x1)
-  vec4 r1 = mix(v01, v11, fx);
-  return mix(r0, r1, fy);                         // along the COL axis (y0->y1)
-}
+"
+  shader/field-bilerp-glsl
+  "
 float detailAt(float x, float y){
   vec4 t = fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc);
   return u_dmax > 0.0 ? min(1.0, t.r / u_dmax) : 0.0;

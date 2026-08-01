@@ -633,6 +633,23 @@
     (gl/gl-uniform-2f (:u_viewport locs) (double iw) (double ih))
     (gl/gl-uniform-4f (:u_rect locs) 0.0 0.0 (double iw) (double ih))
     (gl/gl-uniform-1f (:u_amount locs) (double amount))
+    ;; SHARPEN also gates on absolute subjectness, so the dial spends itself on
+    ;; foreground detail instead of crunching bokeh and canvas texture — the same
+    ;; field the generation shader gates hardness on. The AA pass shares this body
+    ;; and has no such uniform, so this is conditional on the location existing.
+    (when-let [subj-loc (:u_subjTex locs)]
+      (when (>= (long subj-loc) 0)
+        (let [fields (:fields gpu)]
+          (gl/gl-active-texture (+ gl/GL-TEXTURE0 1))
+          (gl/gl-bind-texture gl/GL-TEXTURE-2D (:subject fields))
+          (gl/gl-uniform-1i subj-loc 1)
+          (gl/gl-uniform-2f (:u_detailDim locs)
+                            (double (nth (:detail-dim fields) 0))
+                            (double (nth (:detail-dim fields) 1)))
+          (gl/gl-uniform-2f (:u_detailSrc locs)
+                            (double (nth (:detail-src fields) 0))
+                            (double (nth (:detail-src fields) 1)))
+          (gl/gl-active-texture gl/GL-TEXTURE0))))
     (gl/gl-bind-vertex-array gen-vao)            ; no attribs — gl_VertexID only
     (gl/gl-draw-arrays gl/GL-TRIANGLES 0 6)))
 

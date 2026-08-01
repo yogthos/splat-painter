@@ -44,13 +44,16 @@
           "never softer than a pure gaussian")
       (is (== dialled (apply-scale dialled 1.0))
           "full detail spends the whole dial")
-      (testing "and the separation is a large fraction of the dial's travel"
-        ;; the point of the feature: if this ratio drifts toward 1 the dial is
-        ;; global again and w4w has silently regressed.
+      (testing "and the separation is exactly the floor, by construction"
+        ;; bg/fg IS hard-detail-floor: fg lift = (dial-1)*1.0, bg lift = (dial-1)*floor.
+        ;; Asserting a separate magic number here would just be the floor written
+        ;; twice, and the first version of this test did exactly that and then failed
+        ;; the moment the floor was retuned. Pin the identity, and bound the floor.
         (let [fg (- (apply-scale dialled 1.0) 1.0)
               bg (- (apply-scale dialled 0.0) 1.0)]
-          (is (<= (/ bg fg) 0.5)
-              "background must get at most half the foreground's hardness lift")))))
+          (is (< (Math/abs (- (/ bg fg) shader/hard-detail-floor)) 1e-9))
+          (is (<= shader/hard-detail-floor 0.85)
+              "above this the dial is effectively global again and w4w is undone")))))
   (testing "hardness 1.0 (dial off) is unaffected by detail"
     (let [apply-scale (fn [hard d]
                         (+ 1.0 (* (- hard 1.0) (shader/detail-hardness-scale d))))]
@@ -80,3 +83,72 @@
     (let [p (shader/pack-splats [{:mean [0.0 0.0] :cov [1.0 0.0 0.0 1.0]
                                   :color [1.0 1.0 1.0] :alpha 1.0}])]
       (is (== 1.0 (nth p 9))))))
+
+;; --- sharpen detail gate (splat-painter, same request as w4w) ----------------
+;; Sharpen is a present pass on the flattened composite, so it rides the subjectness
+;; FIELD rather than a per-splat value, but the shape of the scale is the same.
+
+(deftest sharpen-scale-spans-floor-to-full
+  (testing "a flat region gets the floor, a fully-detailed one the whole dial"
+    (is (== shader/sharp-detail-floor (shader/detail-sharpen-scale 0.0)))
+    (is (== 1.0 (shader/detail-sharpen-scale 1.0)))
+    (is (< 0.0 shader/sharp-detail-floor 1.0))))
+
+(deftest sharpen-scale-is-monotone-and-clamped
+  (testing "more detail never means less sharpening"
+    (let [ys (map shader/detail-sharpen-scale (range 0.0 1.01 0.05))]
+      (is (= ys (sort ys)))))
+  (testing "out-of-range subjectness cannot exceed the dial"
+    (is (== shader/sharp-detail-floor (shader/detail-sharpen-scale -0.5)))
+    (is (== 1.0 (shader/detail-sharpen-scale 3.0)))))
+
+(deftest sharpen-separates-foreground-from-background
+  (testing "detailed foreground sharpens more than flat background"
+    (is (> (shader/detail-sharpen-scale 1.0) (shader/detail-sharpen-scale 0.0))))
+  (testing "amount 0 stays 0 everywhere -- the pass is skipped, but the scale is
+            multiplicative so it must not manufacture sharpening from nothing"
+    (doseq [d [0.0 0.5 1.0]]
+      (is (== 0.0 (* 0.0 (shader/detail-sharpen-scale d))))))
+  (testing "background keeps SOME sharpening -- a hard zero would make flat regions
+            visibly different in kind, not degree"
+    (is (> (shader/detail-sharpen-scale 0.0) 0.25))))
+
+;; --- the knee ----------------------------------------------------------------
+
+(deftest knee-gives-subject-the-full-dial-and-flat-the-floor
+  (testing "absolute subjectness is BIMODAL on real photographs (Lenin percentiles
+            p05 0.342, p25 0.946, p50 1.000), so a linear ramp spends its travel
+            crossing a nearly empty gap and charges the cost to genuine subject.
+            The knee must clear that: anything reading as subject gets the whole
+            dial, anything genuinely flat gets the floor."
+    (let [[lo hi] shader/detail-knee]
+      (is (< 0.0 lo hi 1.0) "knee is a real, ordered, interior range")
+      ;; measured region values on img/Lenin.jpg
+      (is (== 1.0 (shader/detail-weight 0.946)) "p25 subjectness -> full dial")
+      (is (== 1.0 (shader/detail-weight 1.000)) "jacket/face -> full dial")
+      (is (== 0.0 (shader/detail-weight 0.337)) "the flat corner -> floor only")
+      (is (== 0.0 (shader/detail-weight 0.342)) "p05 subjectness -> floor only"))))
+
+(deftest knee-is-smooth-and-monotone
+  (testing "a hard step would band the gate visibly across a gradient"
+    (let [xs (range 0.0 1.001 0.02)
+          ys (mapv shader/detail-weight xs)]
+      (is (= ys (sort ys)) "monotone")
+      (is (== 0.0 (first ys)))
+      (is (== 1.0 (last ys)))
+      ;; smoothstep has zero derivative at both ends — no visible seam where the
+      ;; gate starts or stops acting
+      (let [d (mapv - (rest ys) (butlast ys))]
+        (is (< (first d) (apply max d)) "eases in, not a linear ramp")
+        (is (< (last d) (apply max d)) "eases out")))))
+
+(deftest both-dials-share-one-notion-of-foreground
+  (testing "hardness and sharpen have independent FLOORS but the same SHAPE, so a
+            region that counts as foreground for one counts for the other"
+    (doseq [d [0.0 0.2 0.337 0.5 0.7 0.946 1.0]]
+      (let [h (/ (- (shader/detail-hardness-scale d) shader/hard-detail-floor)
+                 (- 1.0 shader/hard-detail-floor))
+            s (/ (- (shader/detail-sharpen-scale d) shader/sharp-detail-floor)
+                 (- 1.0 shader/sharp-detail-floor))]
+        (is (< (Math/abs (- h s)) 1e-9)
+            (str "normalized weight must match at subjectness " d))))))

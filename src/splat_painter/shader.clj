@@ -62,6 +62,71 @@ float noise2(float x, float y){ return noise3(x, y, 0.0); }")
 
 (def max-splats "shader splat ceiling + transform-feedback buffer capacity" 786432)
 
+(def field-bilerp-glsl
+  "Bilinear sampler for the reduced-resolution field maps, shared verbatim by the
+   generation geometry shader and the sharpen present pass — the two must agree on
+   what subjectness is at a point, and the surest way is one copy of the source
+   rather than two that look alike (same reasoning as perlin-glsl)."
+  "// bilinear-map a full-image (x,y) into a reduced field grid (dim=(rows,cols),
+// src=(src_h,src_w)), CLAMPED at the borders — matches CPU wavelet/bilerp1 exactly:
+// floor-based texel selection with lerp (NO GL_LINEAR — hardware filtering would not
+// match the CPU). texelFetch(col,row) as before; fx blends the ROW axis, fy the COL.
+vec4 fieldBilerp(sampler2D tex, float x, float y, vec2 dim, vec2 src){
+  float gx = clamp(x * dim.x / src.x, 0.0, dim.x - 1.0);
+  float gy = clamp(y * dim.y / src.y, 0.0, dim.y - 1.0);
+  float x0f = floor(gx); float y0f = floor(gy);
+  int x0 = int(x0f); int y0 = int(y0f);
+  int x1 = min(x0 + 1, int(dim.x) - 1); int y1 = min(y0 + 1, int(dim.y) - 1);
+  float fx = gx - x0f; float fy = gy - y0f;
+  vec4 v00 = texelFetch(tex, ivec2(y0, x0), 0);   // row x0, col y0
+  vec4 v10 = texelFetch(tex, ivec2(y0, x1), 0);   // row x1, col y0
+  vec4 v01 = texelFetch(tex, ivec2(y1, x0), 0);   // row x0, col y1
+  vec4 v11 = texelFetch(tex, ivec2(y1, x1), 0);   // row x1, col y1
+  vec4 r0 = mix(v00, v10, fx);                    // along the ROW axis (x0->x1)
+  vec4 r1 = mix(v01, v11, fx);
+  return mix(r0, r1, fy);                         // along the COL axis (y0->y1)
+}")
+
+(def detail-knee
+  "Subjectness range over which a dial hands over from its floor to full strength,
+   as [lo hi]. A LINEAR ramp is the wrong shape here: absolute subjectness is
+   bimodal on real photographs — measured on img/Lenin.jpg the percentiles are
+   p05 0.342, p25 0.946, p50 1.000, with only ~15% of the frame below 0.70 — so a
+   straight line spends most of its travel crossing a gap that is nearly empty, and
+   charges that cost to mid-to-high values that are genuinely subject.
+
+   A knee gives full strength to anything that reads as subject and the floor to
+   anything genuinely flat, which is the stated goal (apply the dial to detailed
+   foreground, not to background where it only makes artifacts) rather than a
+   compromise between the two. GLSL: smoothstep(lo, hi, subj)."
+  [0.45 0.85])
+
+(defn detail-weight
+  "smoothstep over detail-knee — the shared shape both dials shape their floor with."
+  [d]
+  (let [[lo hi] detail-knee
+        t (max 0.0 (min 1.0 (/ (- (double d) (double lo)) (- (double hi) (double lo)))))]
+    (* t t (- 3.0 (* 2.0 t)))))
+
+(def sharp-detail-floor
+  "Share of the dialled Sharpen a COMPLETELY flat region still gets. Same idea as
+   hard-detail-floor: the dial should spend itself on foreground detail rather than
+   crunching bokeh and canvas texture. 1.0 restores the pre-change global behaviour."
+  0.45)
+
+(defn detail-sharpen-scale
+  "How much of the dialled Sharpen a point with subjectness `d` receives — THE SPEC
+   the present pass mirrors (GLSL: SHARP_DETAIL_FLOOR + (1.0 - SHARP_DETAIL_FLOOR) * subj).
+
+   Sharpen already has a local-gradient gate, but that gate cannot tell a real
+   feature edge from a stroke edge in flat paint: the measured distributions overlap
+   (see the GATE_LO/GATE_HI note), so the constants are a compromise that still lets
+   the dial crunch background texture. Subjectness is the signal the gradient gate
+   lacks, and it is the SAME one hardness rides, so both dials answer to one notion
+   of foreground."
+  [d]
+  (+ sharp-detail-floor (* (- 1.0 sharp-detail-floor) (detail-weight d))))
+
 (def hard-detail-floor
   "Share of the dialled hardness a stroke in a COMPLETELY flat region still gets.
    1.0 would restore the pre-w4w behaviour (hardness keyed on size alone)."
@@ -88,8 +153,7 @@ float noise2(float x, float y){ return noise3(x, y, 0.0); }")
    floors at 1.0, so (hard-1) ≥ 0 and this can only ever soften toward a pure
    gaussian — it cannot invert a stroke to softer-than-gaussian."
   [d]
-  (let [d (max 0.0 (min 1.0 (double d)))]
-    (+ hard-detail-floor (* (- 1.0 hard-detail-floor) d))))
+  (+ hard-detail-floor (* (- 1.0 hard-detail-floor) (detail-weight d))))
 
 (def ^:private vs-src
   "#version 330 core
@@ -118,6 +182,7 @@ uniform float u_sig_min;
 uniform float u_sig_max;
 const int MAX_SPLATS = " max-splats ";
 const float HARD_DETAIL_FLOOR = " hard-detail-floor ";
+const vec2  DETAIL_KNEE = vec2(" (first detail-knee) ", " (second detail-knee) ");
 
 void main(){
   float pw = u_viewport.x, ph = u_viewport.y;
@@ -150,7 +215,7 @@ void main(){
     float hardness = mix(u_hard_sharp, u_hard_soft, ts);
     // DETAIL: spend the dial on foreground detail, not smooth background — t2.y is
     // the generator D (mirror of shader/detail-hardness-scale).
-    hardness = 1.0 + (hardness - 1.0) * (HARD_DETAIL_FLOOR + (1.0 - HARD_DETAIL_FLOOR) * t2.y);
+    hardness = 1.0 + (hardness - 1.0) * (HARD_DETAIL_FLOOR + (1.0 - HARD_DETAIL_FLOOR) * smoothstep(DETAIL_KNEE.x, DETAIL_KNEE.y, t2.y));
     // ANTIALIAS: below ~2.5px stdev a hard-edged profile spans less than a pixel and
     // shimmers as jaggies — tiny marks ease back to a pure gaussian (soft dab).
     hardness = 1.0 + (hardness - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
@@ -183,6 +248,7 @@ void main(){
 (def ^:private vs-src-quad
   (str "#version 330 core
 const float HARD_DETAIL_FLOOR = " hard-detail-floor ";
+const vec2  DETAIL_KNEE = vec2(" (first detail-knee) ", " (second detail-knee) ");
 uniform samplerBuffer u_splats;  // RGBA32F, 2 texels per splat (finest-first)
 uniform int   u_count;
 uniform vec2  u_viewport;        // pane pixels (pw, ph)
@@ -236,7 +302,7 @@ void main(){
   // face and in a wall now get different crispness — mirror of
   // shader/detail-hardness-scale. Runs BEFORE the antialias so the sub-pixel floor
   // stays the last word on tiny marks.
-  v_hard = 1.0 + (v_hard - 1.0) * (HARD_DETAIL_FLOOR + (1.0 - HARD_DETAIL_FLOOR) * t2.y);
+  v_hard = 1.0 + (v_hard - 1.0) * (HARD_DETAIL_FLOOR + (1.0 - HARD_DETAIL_FLOOR) * smoothstep(DETAIL_KNEE.x, DETAIL_KNEE.y, t2.y));
   // ANTIALIAS: tiny marks ease back to a pure gaussian (see the loop shaders)
   v_hard = 1.0 + (v_hard - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
   // edge raggedness rides the SMALLER strokes only: the base/large coverage layer
@@ -448,12 +514,21 @@ void main(){
 }")
 
 (def ^:private fs-src-sharpen
-  "#version 330 core
+  (str "#version 330 core
 uniform sampler2D u_src;        // the finished composite (RGBA8, NEAREST)
+uniform sampler2D u_subjTex;    // absolute subjectness (dmap grid, .r) — same field the
+                                // generation shader gates hardness on
+uniform vec2  u_detailDim;      // (H_d, W_d) of the field grid
+uniform vec2  u_detailSrc;      // (src_h, src_w) = image (H, W)
 uniform vec2  u_viewport;       // composite texture size in px
 uniform vec4  u_rect;           // image rect in framebuffer px: (ox, oy, dw, dh)
 uniform float u_amount;         // 0.0 = off (the app also skips the pass entirely)
 out vec4 frag;
+const float SHARP_DETAIL_FLOOR = " sharp-detail-floor ";
+const vec2  DETAIL_KNEE = vec2(" (first detail-knee) ", " (second detail-knee) ");
+"
+  field-bilerp-glsl
+  "
 
 // Gate thresholds — compile-time constants, one slider not three. Measured on the
 // 1024x1024 baseline render (dev/harness/sharpen/measure_gate.py), render Sobel
@@ -521,8 +596,18 @@ void main(){
   float gx = (lTR + 2.0*lMR + lBR) - (lTL + 2.0*lML + lBL);
   float gy = (lBL + 2.0*lBM + lBR) - (lTL + 2.0*lTM + lTR);
   float gate = smoothstep(GATE_LO, GATE_HI, length(vec2(gx, gy)) / 8.0);
-  frag = vec4(clamp(c + u_amount * gate * hp, 0.0, 1.0), 1.0);
-}")
+  // DETAIL: the gradient gate cannot separate a feature edge from a stroke edge in
+  // flat paint (its measured distributions overlap), so it still lets the dial crunch
+  // bokeh and canvas texture. Subjectness is the signal it lacks, and it is the same
+  // field hardness rides. Mirror of shader/detail-sharpen-scale.
+  // gl_FragCoord is bottom-up framebuffer px and the field is indexed by IMAGE
+  // (row, col), so the row axis flips: row = ih - y, col = x.
+  float subj = clamp(fieldBilerp(u_subjTex,
+                                 u_viewport.y - gl_FragCoord.y, gl_FragCoord.x,
+                                 u_detailDim, u_detailSrc).r, 0.0, 1.0);
+  float dscale = SHARP_DETAIL_FLOOR + (1.0 - SHARP_DETAIL_FLOOR) * smoothstep(DETAIL_KNEE.x, DETAIL_KNEE.y, subj);
+  frag = vec4(clamp(c + u_amount * dscale * gate * hp, 0.0, 1.0), 1.0);
+}"))
 
 ;; --- antialias present pass (edge-directed smoothing, runs LAST) -------------
 ;; Sharpen is an unsharp gated ON local gradient, so it targets silhouettes — and a
@@ -603,10 +688,15 @@ void main(){
   []
   (when-let [prog (gl/make-program vs-src-sharpen fs-src-sharpen)]
     {:program prog
-     :locs {:u_src      (gl/gl-get-uniform-location prog "u_src")
-            :u_viewport (gl/gl-get-uniform-location prog "u_viewport")
-            :u_rect     (gl/gl-get-uniform-location prog "u_rect")
-            :u_amount   (gl/gl-get-uniform-location prog "u_amount")}}))
+     :locs {:u_src        (gl/gl-get-uniform-location prog "u_src")
+            :u_viewport   (gl/gl-get-uniform-location prog "u_viewport")
+            :u_rect       (gl/gl-get-uniform-location prog "u_rect")
+            :u_amount     (gl/gl-get-uniform-location prog "u_amount")
+            ;; the subjectness field this pass gates on — absent from the AA pass,
+            ;; which shares present-pass!, so the caller must tolerate nil here
+            :u_subjTex    (gl/gl-get-uniform-location prog "u_subjTex")
+            :u_detailDim  (gl/gl-get-uniform-location prog "u_detailDim")
+            :u_detailSrc  (gl/gl-get-uniform-location prog "u_detailSrc")}}))
 
 (defn- render-uniform-locs [prog]
   {:u_splats   (gl/gl-get-uniform-location prog "u_splats")
