@@ -70,6 +70,13 @@ jobs:
       - name: Test (headless)
         run: jolt -M:test
 
+      # asserts the geometry shader still mirrors the CPU seed, line for line.
+      # It is not part of -M:test, so it went stale unnoticed for a day when a
+      # shader constant moved without its pin — exactly the drift it exists to
+      # catch. Running it here is what keeps it honest.
+      - name: Check (CPU/GPU mirror pins)
+        run: jolt -M:check
+
       - name: Build binary
         run: jolt build -m splat-painter.core -o splat-painter --opt
 

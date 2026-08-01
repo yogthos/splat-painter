@@ -131,7 +131,7 @@
     (assert-contains gs-src "float tcap2 = min(tcap, 0.3 + 0.7 * min(1.0, 3.0 / max(csz, 1e-6)));" "colour specificity follows brush size")
     (assert-contains gs-src "float t = min(tcap2, max(traw, clamp(0.15 + 0.85 * max(coh0, D), 0.0, 1.0)));" "gen colour blend with per-level raw floor + specificity cap")
     (assert-contains gs-src "* max(1.0, ssz * szf / 8.0)) * Ev);" "sigma-aware near-edge shrink")
-    (assert-contains gs-src "float tcap = (lvl <= 1) ? 0.35 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;" "progressive colour-specificity ceiling")
+    (assert-contains gs-src "float tcap = (lvl <= 1) ? 0.60 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;" "progressive colour-specificity ceiling")
     (assert-contains gs-src "float mapAt(int sel, float x, float y){" "scale-matched map selector")
     (assert-contains gs-src "vec4 fieldBilerp(sampler2D tex, float x, float y, vec2 dim, vec2 src){" "field maps sampled bilinearly (fieldBilerp)")
     (assert-contains gs-src "vec4 t = fieldBilerp(u_detailTex, x, y, u_detailDim, u_detailSrc);" "detail/sharp/mid maps via fieldBilerp")
