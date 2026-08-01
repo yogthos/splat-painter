@@ -195,6 +195,17 @@ float edgeAt(float x, float y){
 // seed/run-taps or the two paths crop differently.
 const float EDGE_FLOOR = 0.10;   // mirror seed/edge-floor
 const int RUN_TAPS = 8;
+// THIN-BRIGHT admission (mirror seed/thin-gain + seed/layered-means). The placement
+// maps are edge/detail-ENERGY, normalized — they light a thin bright feature's
+// BOUNDARY and miss its INTERIOR, so the fine tier never fills the gap a fat base
+// stroke leaves down a finger's middle. lum(bilateral) - lum(dominant-blur) is that
+// 'inside a thin bright shape' signal: the bilateral stays bright, the brush-sized
+// dominant blur is pulled toward the surrounding dark. THIN_GAIN scales it into the
+// dithered admission probability. Fine tier only — it paints the bright bilateral,
+// so admitting it fills the gap with the right colour (broad/base use the dominant
+// blur, which goes dark on a thin finger). Keep THIN_GAIN == seed/thin-gain.
+const float THIN_GAIN = 8.0;
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 // FULL-RESOLUTION edge strength, carried in the raw texture's alpha (mirror
 // structure/full-edge). NEAREST, not bilinear: the point of this map is that it
 // is unsmoothed, and interpolating would put a blur straight back on it. The
@@ -449,7 +460,13 @@ void main(){
   // into a smooth density ramp.
   float dv = mapAt(u_sharp[k], cx, cy);
   float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));
-  if (lvl > 0 && dv * gain < thd) return;         // not detailed enough -> discard
+  // THIN-BRIGHT admission (mirror seed/layered-means): the fine tier's map is silent
+  // inside a thin bright shape, so admit it where lum(bilateral)-lum(dominant) fires.
+  // The dither turns the knife edge into a density ramp.
+  float thp = THIN_GAIN * (dot(sampleRGB(u_blurTex, cx, cy), LUMA)
+                           - dot(sampleRGB(u_blurHTex, cx, cy), LUMA));
+  bool thinAdmit = (lvl == 2) && (hash01(i*59 + lvl, j, 59) < thp);
+  if (lvl > 0 && dv * gain < thd && !thinAdmit) return;         // not detailed enough -> discard
   // SUBDIVISION (mirror of seed/layered-means), broad/mid tiers only: a cell claimed
   // by the next-finer level (slot k-1 — slots are finest-first) is not painted by
   // this coarser level; dithered so the handoff interleaves. From level 3 up there

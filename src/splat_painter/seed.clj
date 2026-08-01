@@ -49,6 +49,18 @@
 ;; thin directional hatch instead of painterly dabs.
 (def ^:private min-coh 0.28)
 
+;; THIN-BRIGHT admission gain (bd splat-painter-ws1). The placement maps are
+;; edge/detail-ENERGY, normalized — they light a thin bright feature's BOUNDARY
+;; and miss its INTERIOR, so the fine tier never fills the gap a fat base stroke
+;; leaves down a finger's middle. lum(bilateral) - lum(dominant-blur) is that
+;; "inside a thin bright shape" signal (the bilateral stays bright, the brush-sized
+;; dominant blur is pulled toward the surrounding dark); this scales it into the
+;; dithered admission probability at the gate. Fine tier only — it paints with the
+;; bright bilateral, so admitting it fills the gap with the right colour (broad/base
+;; paint with the dominant blur, which goes dark on a thin finger). Mirrored as the
+;; THIN_GAIN const in the generation shader (gen.clj); keep them equal.
+(def thin-gain 8.0)
+
 ;; --- deterministic per-stroke pseudo-random helpers --------------------------
 
 (defn- hash01
@@ -1392,7 +1404,7 @@
    the surviving seed, then hand it to `stroke-segments` (base fill vs traced brush stroke).
    Emits [x y size D sn tn alpha theta coherence] per SEGMENT (D = effective detail 0..1;
    sn/tn = per-seed size/tone jitter hashes in [-0.5,0.5])."
-  [dmap nf detail size variation curvature stroke swirl tier-muls count H W blur-px blurd-px]
+  [dmap nf detail size variation curvature stroke swirl tier-muls count H W blur-px blurd-px blurh-px]
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
         iw   (long W) ih (long H)
         swirl (double swirl)
@@ -1477,6 +1489,17 @@
                             ;; a map oscillating around it dashes contours into beads.
                             dv (map-at dmap map-kind cx cy)
                             thd (* th (+ 0.75 (* 0.5 (hash01 (+ (* i 43) lvl) j 19))))
+                            ;; THIN-BRIGHT admission (mirror gen GS, see thin-gain): the
+                            ;; fine tier's detail map is silent inside a thin bright shape,
+                            ;; so admit it where lum(bilateral) - lum(dominant) fires. The
+                            ;; dither turns the knife edge into a density ramp.
+                            tbrgb (sample-arr blur-px iw ih cx cy)
+                            thrgb (sample-arr blurh-px iw ih cx cy)
+                            thp (* thin-gain
+                                   (- (+ (* 0.2126 (nth tbrgb 0)) (* 0.7152 (nth tbrgb 1)) (* 0.0722 (nth tbrgb 2)))
+                                      (+ (* 0.2126 (nth thrgb 0)) (* 0.7152 (nth thrgb 1)) (* 0.0722 (nth thrgb 2)))))
+                            thin-admit? (and (== (long lvl) 2)
+                                             (< (hash01 (+ (* i 59) lvl) j 59) thp))
                             ;; SUBDIVISION (broad/mid tiers only): skip if the next-finer
                             ;; level (previous entry — levels are finest-first) claims
                             ;; this cell, dithered like the threshold so the handoff
@@ -1495,9 +1518,9 @@
                                                               (+ 0.25 (* 0.75 sgate)) bgate)]
                                                    (>= fdv (* (:th fl)
                                                               (+ 0.75 (* 0.5 (hash01 (+ (* i 47) lvl) j 23)))))))))]
-                        (if (or thin?
-                                (and (pos? (long lvl)) (or claimed? (< (* dv gain) thd))))
-                          (recur (inc j) acc)      ; thinned bokeh / not detailed enough
+                         (if (or thin?
+                                 (and (pos? (long lvl)) (or claimed? (and (not thin-admit?) (< (* dv gain) thd)))))
+                           (recur (inc j) acc)      ; thinned bokeh / not detailed enough
                           (let [;; bokeh-adaptive broad size: kept flat-region daubs grow ×m
                             ssz (if (<= (long lvl) 1) (* ssz mloc) ssz)
                             ;; hashed positions need no jitter — they ARE the noise
@@ -1838,10 +1861,10 @@
                      (assoc dmap :band-ppc
                             (band-paint-per-candidate dmap (with-swirl nf0 1.0)
                                                       blur-px blurd-px height width)))
-        segments   (layered-means dmap nf detail size variation curvature stroke swirl
-                                  [(double size-broad) (double size-mid) (double size-fine)
-                                   (double edge-band)]
-                                  n height width blur-px blurd-px)
+         segments   (layered-means dmap nf detail size variation curvature stroke swirl
+                                   [(double size-broad) (double size-mid) (double size-fine)
+                                    (double edge-band)]
+                                   n height width blur-px blurd-px blurh-px)
         ;; each segment carries its sampled fields + taper alpha (stroke-segments did the
         ;; tracing); hand off to the pure `splat-record` math shared with the GPU.
         splats     (vec
