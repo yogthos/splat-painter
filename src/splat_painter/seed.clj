@@ -385,7 +385,9 @@
 ;; way; the twelve rejected ones are tabulated in .dirge/spec-coat-edge-fuzz.md.
 (def ^:private band-th 0.15)          ; edge strength a band seed needs (raw :edge, unnormalized)
 (def ^:private band-se 2.6)           ; forced elongation: sx = s0·se, sy = s0/se (NOT coherence-derived)
-(def ^:private band-sideo 1.4)        ; side push in units of ssz, jittered ×0.6–3.15 per seed (see soff)
+(def ^:private band-sideo 0.7)        ; side push in units of ssz, jittered ×0.6–3.15 per seed (see soff). Was 1.4;
+                                      ; measured overshoot — above ~0.7 dark lines rise sharply with no sharpness gain
+                                      ; (the band's dark-line stacking is coupled to this push; see band-dark-lines test)
 (def ^:private band-ssz-max 1.6)      ; the band paints a LINE; above this it would read as a daub
 (def ^:private band-lvl 7)            ; outside the ladder's 0..6, so poshash streams can never collide
 (def ^:private band-share 0.25)       ; hard ceiling on the band tier's slice of the working budget
@@ -1116,7 +1118,7 @@
           ;; how far off the ridge the stroke sits, in units of its own stdev. A liner
           ;; nudges 0.55σ (enough to keep to its side of a meeting line); the BAND is
           ;; pushed clear — at selong 2.6 its across-body σ is ssz/2.6, so even the
-          ;; smallest push here (0.6·1.4 = 0.84σ_ssz ≈ 2.2σ across) keeps the stroke off
+          ;; smallest push here (0.6·0.7 = 0.42σ_ssz ≈ 1.1σ across) keeps the stroke off
           ;; the ridge it restates. The push is jittered by the seed's bend hash (bendf
           ;; is 0 for the band, so bph is otherwise unused) so band strokes TILE the band
           ;; instead of stacking into one hard line — SQUARED, so the distribution

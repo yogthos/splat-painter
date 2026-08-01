@@ -278,9 +278,13 @@
     ;; charge, so the detail slice grows and the count rises. Σdet moves 0.017%
     ;; (219919.378→219957.791) — same size class traded, which is what a budget
     ;; reallocation looks like; means and Σcolour move with the added splats.
-    (is (= 904 (count splats)))
-    (is (approx= 0.5  19491.593  sx) "Σ mean-x")
-    (is (approx= 0.5  26054.199  sy) "Σ mean-y")
+    ;; (904→1218) band-sideo 1.4→0.7: the band tier's one-sided side-push was an
+    ;; overshoot — measured above ~0.7 it stacked into the dark-line artifact with no
+    ;; sharpness gain. Cutting it relocates band strokes (smaller perpendicular push),
+    ;; so count + both means + Σcolour move; Σdet barely moves (same cov shapes).
+    (is (= 1218 (count splats)))
+    (is (approx= 0.5  27450.820  sx) "Σ mean-x")
+    (is (approx= 0.5  37457.686  sy) "Σ mean-y")
     ;; (219958.654→219919.378) the RIDGE CROP: a stroke's long axis is capped at
     ;; half the distance its ridge stays alive along its own tangent, so strokes
     ;; that would have painted past the end of their feature get shorter. Σdet
@@ -290,8 +294,8 @@
     ;; HERE because this fixture is a photograph: the crop bites where features
     ;; are a few px apart, and on img/collapse-watch.jpg it cuts inter-letter gap
     ;; ink 40.75→36.49. Anything that also moved the means would NOT be this.
-    (is (approx= 1.0  219957.791 sd) "Σ det(cov)")
-    (is (approx= 0.05 973.073    sc) "Σ colour")))
+    (is (approx= 1.0  220306.708 sd) "Σ det(cov)")
+    (is (approx= 0.05 1425.018    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -1348,8 +1352,8 @@
 
 (deftest edge-band-tier-is-born-thin-across-the-edge
   ;; the point of the tier: its across-edge sigma is a property of the TIER
-  ;; (ssz/selong), not of the local tensor, and the push off the ridge exceeds
-  ;; 2 sigma across so the stroke cannot straddle the boundary it restates.
+  ;; (ssz/selong), not of the local tensor, and the push off the ridge clears
+  ;; 1 sigma across so the stroke's bulk stays off the boundary it restates.
   (let [img  (band-img)
         dmap (wavelet/placement-map img (structure/analyze img))
         {:keys [ssz selong sideo]} (band-of dmap 1.0 512 512)
@@ -1357,13 +1361,36 @@
         along  (* (double ssz) (double selong))]
     (is (< across 1.0) (str "across-edge sigma " across " is sub-pixel"))
     (is (> (/ along across) 6.0) (str "aspect ratio " (/ along across) " is a line, not a daub"))
-    ;; the SMALLEST push (jitter 0.6×, see soff) must still clear 2 sigma across
-    (is (> (* 0.6 (double sideo) (double ssz)) (* 2.0 across))
-        "even the least-pushed band stroke sits more than 2 sigma clear of the ridge")
+    ;; the SMALLEST push (jitter 0.6×, see soff) must still clear 1 sigma across so the
+    ;; stroke's bulk stays off the ridge (edge sharpness holds — measured 0.7386 ≥ 0.7293
+    ;; at band-sideo 0.7). The prior >2σ floor was an overshoot: it bought no extra
+    ;; sharpness and its larger one-sided pushes stacked into the dark-line artifact
+    ;; (see band-push-is-bounded-by-the-dark-line-measurement below).
+    (is (> (* 0.6 (double sideo) (double ssz)) (* 1.0 across))
+        "the least-pushed band stroke clears the ridge by >=1 across-edge sigma")
     ;; discriminating: the coherence-derived elongation this replaces is far fatter.
     ;; se = sqrt(1 + min(stroke,1.5)·coh·(0.25+0.75·D)) maxes at sqrt(2.5) ≈ 1.58.
     (is (> (double selong) (Math/sqrt 2.5))
         "forced elongation exceeds anything the coherence-derived formula can reach")))
+
+(deftest band-push-is-bounded-by-the-dark-line-measurement
+  ;; Regression guard for the dark-line artifact (SPEC-d37). The band tier's one-sided
+  ;; side-push (sideo) is bounded: at the shipped 1.4 the push overshoots — band strokes
+  ;; stack on the dark side of ridges into thin dark lines through smooth areas (bokeh,
+  ;; fingers, nose) while buying NO edge sharpness (measured sharp-whole 0.7293 at sideo
+  ;; 1.4 vs 0.7386 at 0.7; sharpness only collapses at sideo 0, which is also the only
+  ;; value that removes the lines — the coupling is fundamental). sideo stays at the
+  ;; sharpness-optimal Pareto point. The curvature/focusing hypothesis (large pushes
+  ;; focus the inner parallel curve) was REFUTED: capping the push tail at 2.5σ left dark
+  ;; lines unchanged (263 vs 264) and piling strokes at 1.2σ made them worse (324).
+  ;; Restoring sideo to 1.4 reintroduces the artifact (measured bokeh dark-lines 264 at
+  ;; 1.4 vs 185 at 0.7) — that mutation is what this test catches.
+  (let [img   (band-img)
+        dmap  (wavelet/placement-map img (structure/analyze img))
+        {:keys [sideo]} (band-of dmap 1.0 512 512)]
+    (is (<= (double sideo) 0.8)
+        (str "band side-push " sideo " is bounded below the dark-line overshoot; "
+             "restoring sideo to 1.4 reintroduces the one-sided stacking artifact"))))
 
 (deftest edge-band-tier-needs-edges-and-the-cutin-dial
   (let [flat  (gray-img 512 512 (fn [_ _] 0.5))
