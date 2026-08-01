@@ -13,9 +13,11 @@
   format, so a generated buffer feeds the renderers with no readback or repack):
     texel 3·i   = (mean_x, mean_y, c00, c01)
     texel 3·i+1 = (c11,    color_r, color_g, color_b)
-    texel 3·i+2 = (alpha,  0, 0, 0)
-  where the covariance is symmetric [c00 c01; c01 c11] in (row, col) space and alpha is the
-  per-splat paint alpha (brush strokes taper it toward the stroke tail).
+    texel 3·i+2 = (alpha,  detail, 0, 0)
+  where the covariance is symmetric [c00 c01; c01 c11] in (row, col) space, alpha is the
+  per-splat paint alpha (brush strokes taper it toward the stroke tail), and detail is
+  absolute subjectness at the stroke mean — 0 flat, 1 detailed — which scales how much
+  of the Hardness dial the stroke receives (see detail-hardness-scale). Two slots free.
 
   build-program-quad is the production renderer (one blended quad per splat);
   build-program-buf is the same math as a pixels×splats loop, kept for A/B compares
@@ -60,6 +62,35 @@ float noise2(float x, float y){ return noise3(x, y, 0.0); }")
 
 (def max-splats "shader splat ceiling + transform-feedback buffer capacity" 786432)
 
+(def hard-detail-floor
+  "Share of the dialled hardness a stroke in a COMPLETELY flat region still gets.
+   1.0 would restore the pre-w4w behaviour (hardness keyed on size alone)."
+  0.35)
+
+(defn detail-hardness-scale
+  "How much of the dialled hardness a stroke with detail `d` receives — THE SPEC the
+   render shaders mirror (GLSL: HARD_DETAIL_FLOOR + (1.0 - HARD_DETAIL_FLOOR) * detail).
+
+   Hardness used to key on stroke SIZE alone, so a fat stroke in a detailed
+   foreground and a fat one in smooth background got the same treatment and the dial
+   read as a global crispness change. `d` is ABSOLUTE SUBJECTNESS at the stroke mean
+   (0 flat bokeh, 1 detailed subject), packed into texel 3i+2.y.
+
+   Why subjectness and not the generator's per-stroke D: D is min(1, Detail·dv·2.2)
+   and pins to 1.0 for 72.9% of splats on img/Lenin.jpg, which leaves this term
+   inert. Measured at splat positions there, FG(face) − BG(flat corner) is 0.667 for
+   subjectness against 0.263 for the locally-normalized detail map. Subjectness also
+   saturates at 1.0 in the foreground, which is the harmless direction — the detail
+   map would cap even the sharpest foreground at ~0.78 of the dial and so make every
+   painting softer than before.
+
+   Applied as hard' = 1 + (hard-1)·scale. u_hard_soft is fixed at 1.0 and the slider
+   floors at 1.0, so (hard-1) ≥ 0 and this can only ever soften toward a pure
+   gaussian — it cannot invert a stroke to softer-than-gaussian."
+  [d]
+  (let [d (max 0.0 (min 1.0 (double d)))]
+    (+ hard-detail-floor (* (- 1.0 hard-detail-floor) d))))
+
 (def ^:private vs-src
   "#version 330 core
 in vec2 a_pos;                 // fullscreen quad, -1..1
@@ -86,6 +117,7 @@ uniform float u_hard_soft;
 uniform float u_sig_min;
 uniform float u_sig_max;
 const int MAX_SPLATS = " max-splats ";
+const float HARD_DETAIL_FLOOR = " hard-detail-floor ";
 
 void main(){
   float pw = u_viewport.x, ph = u_viewport.y;
@@ -116,6 +148,9 @@ void main(){
     float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
     ts = ts * ts * (3.0 - 2.0 * ts);
     float hardness = mix(u_hard_sharp, u_hard_soft, ts);
+    // DETAIL: spend the dial on foreground detail, not smooth background — t2.y is
+    // the generator D (mirror of shader/detail-hardness-scale).
+    hardness = 1.0 + (hardness - 1.0) * (HARD_DETAIL_FLOOR + (1.0 - HARD_DETAIL_FLOOR) * t2.y);
     // ANTIALIAS: below ~2.5px stdev a hard-edged profile spans less than a pixel and
     // shimmers as jaggies — tiny marks ease back to a pure gaussian (soft dab).
     hardness = 1.0 + (hardness - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
@@ -146,7 +181,8 @@ void main(){
 ;;   the quad bounds the 3.5σ contour; at the softest hardness (1.0) the truncated
 ;;   tail is exp(-6.1)·opacity ≈ 0.2% ≈ half an 8-bit step — invisible.
 (def ^:private vs-src-quad
-  "#version 330 core
+  (str "#version 330 core
+const float HARD_DETAIL_FLOOR = " hard-detail-floor ";
 uniform samplerBuffer u_splats;  // RGBA32F, 2 texels per splat (finest-first)
 uniform int   u_count;
 uniform vec2  u_viewport;        // pane pixels (pw, ph)
@@ -172,7 +208,8 @@ void main(){
   int corner = gl_VertexID - 6 * (gl_VertexID / 6);
   vec4 t0 = texelFetch(u_splats, 3 * splat);
   vec4 t1 = texelFetch(u_splats, 3 * splat + 1);
-  v_alpha = texelFetch(u_splats, 3 * splat + 2).x;
+  vec4 t2 = texelFetch(u_splats, 3 * splat + 2);
+  v_alpha = t2.x;
   float c00 = t0.z, c01 = t0.w, c11 = t1.x;
   float det = max(c00 * c11 - c01 * c01, 1e-8);
   v_prec  = vec3(c11 / det, c00 / det, -2.0 * c01 / det);
@@ -194,6 +231,12 @@ void main(){
   float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
   ts = ts * ts * (3.0 - 2.0 * ts);
   v_hard = mix(u_hard_sharp, u_hard_soft, ts);
+  // DETAIL: spend the dial on foreground detail, not on smooth background. t2.y is
+  // the generator D (0 flat .. 1 detailed), so two strokes of the SAME size in a
+  // face and in a wall now get different crispness — mirror of
+  // shader/detail-hardness-scale. Runs BEFORE the antialias so the sub-pixel floor
+  // stays the last word on tiny marks.
+  v_hard = 1.0 + (v_hard - 1.0) * (HARD_DETAIL_FLOOR + (1.0 - HARD_DETAIL_FLOOR) * t2.y);
   // ANTIALIAS: tiny marks ease back to a pure gaussian (see the loop shaders)
   v_hard = 1.0 + (v_hard - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
   // edge raggedness rides the SMALLER strokes only: the base/large coverage layer
@@ -221,7 +264,7 @@ void main(){
   vec2 org = 0.5 * (u_viewport - u_image * scale);
   vec2 pane = vec2(ip.y * scale + org.x, (u_image.y - ip.x) * scale + org.y);
   gl_Position = vec4(pane / u_viewport * 2.0 - 1.0, 0.0, 1.0);
-}")
+}"))
 
 (def ^:private fs-src-quad
   "#version 330 core
@@ -600,15 +643,19 @@ void main(){
 
 (defn pack-splats
   "Flatten a seq of splats into the RGBA32F texture payload (length 3*N*4): splat i
-  is [mean_x mean_y c00 c01  c11 r g b  alpha 0 0 0]. Pure, no GL."
+  is [mean_x mean_y c00 c01  c11 r g b  alpha detail 0 0]. Pure, no GL.
+
+  `:detail` defaults to 1.0 (the whole hardness dial), so a hand-built splat with
+  no detail field renders exactly as it did before w4w rather than softening."
   [splats]
   (loop [out (transient [])
          s   splats]
     (if-not s
       (persistent! out)
-      (let [{[mx my] :mean [c00 c01 _ c11] :cov [r g b] :color a :alpha} (first s)]
+      (let [{[mx my] :mean [c00 c01 _ c11] :cov [r g b] :color a :alpha d :detail}
+            (first s)]
         (recur (-> out
                    (conj! mx) (conj! my) (conj! c00) (conj! c01)
                    (conj! c11) (conj! r) (conj! g) (conj! b)
-                   (conj! (or a 1.0)) (conj! 0.0) (conj! 0.0) (conj! 0.0))
+                   (conj! (or a 1.0)) (conj! (or d 1.0)) (conj! 0.0) (conj! 0.0))
                (next s))))))

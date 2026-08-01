@@ -390,7 +390,11 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   vec3 color = clamp(colorAc * tone * vec3(1.0 + temp, 1.0, 1.0 - temp), 0.0, 1.0);
   o_a = vec4(px, py, c00, c01);
   o_b = vec4(c11, color.r, color.g, color.b);
-  o_c = vec4(alpha, 0.0, 0.0, 0.0);
+  // .y carries ABSOLUTE SUBJECTNESS at the stroke mean through to the render
+  // shader, which keys hardness on it (mirror of the :detail assoc in
+  // seed/splat-field). NOT the per-stroke D: that is min(1, Detail*dv*2.2) and
+  // pins to 1.0 for most splats, which makes the hardness term inert.
+  o_c = vec4(alpha, clamp(subjAbsAt(px, py), 0.0, 1.0), 0.0, 0.0);
   EmitVertex();
   EndPrimitive();
 }

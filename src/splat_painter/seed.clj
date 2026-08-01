@@ -1908,7 +1908,18 @@
                                               (edge-run efull x y (Math/cos theta) (Math/sin theta)
                                                         (* 6.0 (double csz)))
                                               0.0))
-                              :alpha (double alpha))))
+                              :alpha (double alpha)
+                              ;; ABSOLUTE subjectness at the stroke's own mean, carried to
+                              ;; the render shader (texel 3i+2.y) so Hardness can spend
+                              ;; itself on detailed foreground instead of smooth
+                              ;; background — see shader/detail-hardness-scale. Sampled
+                              ;; HERE rather than inside splat-record because that fn is
+                              ;; pure arithmetic and every field sample is the caller's
+                              ;; job; the GS mirror calls subjAbsAt(px, py) at the twin
+                              ;; point. The per-stroke dlev is NOT usable for this: it is
+                              ;; min(1, Detail*dv*2.2), which pins to 1.0 for 72.9% of
+                              ;; splats on img/Lenin.jpg and makes the term inert.
+                              :detail (wavelet/subject-abs-at dmap x y))))
         ;; PAINT ORDER needs NO sort: `layered-means` emits finest level first, so the field is
         ;; already small→large. The shader composites front-to-back (index 0 = topmost), so the
         ;; small crisp detail strokes sit at the front over the big soft underpainting. Dropping
