@@ -584,7 +584,7 @@
         liner   (let [cands (filter #(and (>= (:lvl %) 2) (< (:ssz %) 3.5))
                                     (:levels lp))]
                   (when (seq cands) (apply max-key :segs cands)))
-        {:keys [lvl ssz segs stepf bendf th map-kind traw]} liner
+        {:keys [lvl ssz segs stepf bendf th map-kind]} liner
         bmul    (double (nth tier-muls 0))                ; 0.4 → bgate is identically 1 below Broad 1
         deff    (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
         ;; var-quote the private wiring helpers layered-means uses (no invented values)
@@ -592,6 +592,9 @@
         subject-at #'splat-painter.seed/subject-at
         map-at  #'splat-painter.seed/map-at
         stroke-segments #'splat-painter.seed/stroke-segments
+        ;; traw is no longer carried on the level map — layered-means derives it from
+        ;; the PER-STROKE size at the call site, so mirror that here (bd 6zj)
+        raw-floor #'splat-painter.seed/raw-floor
         ;; one liner chain's emitted-segment count for a chosen seed (cx,cy).
         ;; seeds are placed at chosen positions (warp is inert here: aw<0.2 at this
         ;; liner tier), mirroring layered-means' per-candidate wiring for the rest.
@@ -610,6 +613,7 @@
                           ds     (if (< (hash01 (+ (* i 41) lvl) 0 17) 0.5) 1.0 -1.0)
                           bph    (hash01 (+ (* i 67) lvl) 0 53)
                           hb     (if (<= lvl 1) 1.0 0.0)
+                          traw   (raw-floor lvl cssz)
                           traw*  (if (>= lvl 4) (* traw (+ 0.6 (* 0.4 sgate))) traw)]
                       (count (first (stroke-segments nf dmap lvl cx cy cssz D 0.0 tn ds curvature stroke
                                               hd wd segs stepf bendf hb traw* sgate blur-px iw ih
@@ -792,7 +796,10 @@
       (is (== 0.45 (raw-floor 2 ssz)))
       (is (== 0.7 (spec-cap 2 ssz)))
       (is (== 0.85 (level-alpha 2 ssz))))
-    (testing "layer-params wires the role gate: a base level under 8px still gets traw 0.0"
+    ;; the role gate used to be wired by layer-params storing :traw; it now lives at
+    ;; the layered-means call site, keyed on the per-stroke size (bd 6zj), so assert
+    ;; the gate against the admitted level rather than a stored value.
+    (testing "the role gate holds for an admitted base level under 8px"
       (let [img   (ladder-img)
             dmap  (wavelet/placement-map img (structure/analyze img))
             levels (:levels (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.5 [1.0 1.0 1.0] 72000 512 512))
@@ -800,7 +807,8 @@
         (is (some? base) "a base level (lvl 0) is admitted")
         (when (some? base)
           (is (< (double (:ssz base)) 8.0) (str "base ssz " (:ssz base) " is under the 8px threshold"))
-          (is (zero? (:traw base))         "base :traw is 0.0 (coverage constant, not size-keyed)"))))))
+          (is (zero? (raw-floor (:lvl base) (:ssz base)))
+              "base traw is 0.0 (coverage constant, not size-keyed)"))))))
 
 (deftest glaze-alpha-has-one-threshold-at-every-paintable-size
   ;; level-alpha carried a third arm below dab-max (1.2) for a DAB tier that min-phys
