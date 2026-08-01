@@ -100,7 +100,37 @@ already rotted: `abl-nolayer?` matches `float tcap = (lvl <= 1) ? 0.35 : ...`, w
 trusting a rendered comparison. If this gets revived, anchor the replacements on
 something that fails loudly when it misses.
 
+## Can the dial even reach here? (`test/splat_painter/subjprobe.clj`)
+
+    jolt -A:test -m splat-painter.subjprobe img/Lenin.jpg
+
+Prints the absolute-subjectness histogram plus per-region means. **Run this before
+attributing anything to the Broad dial.** The coverage growth is
+`mloc = 1 + (Broad−1)·(1−subjAbs)`, so wherever `subjAbs` saturates to 1.0 the dial
+is a mathematical no-op and no sweep of it means anything. Saturation is heavily
+image-dependent — fraction of frame fully inert: Lenin 64.8%, A7A01535 39.2%,
+collapse-watch 27.5%, crow 26.4%. On Lenin the whole subject AND the wall map read
+≥0.94, so Broad only acts in one corner. A day of olb work went into sweeping a
+control that could not affect the region under investigation.
+
 ## Metrics
+
+**Check what your ROI actually contains before you trust a number from it.** The
+olb ROI was labelled "a narrow jacket strip by the map" and sat on the collar and
+tie; every wash/chroma number taken through it measured the wrong part of the
+frame. Crop the box and look at it once — `scratchpad/sheet.py` tiles a labelled
+ROI from the source beside each render for exactly this.
+
+`distbleed.py` — colour/luma error inside a silhouette BINNED BY DISTANCE from the
+boundary. A bleed confined to 2–4px at an edge is invisible in a whole-ROI mean and
+obvious as a decay profile; it is also the only way to tell a real bleed from a
+uniform offset. It found that Cut-in and Sharpen both *suppress* the silhouette
+halo (Cut-in by 2.5×, Sharpen 1.2 nearly to zero) — the opposite of the standing
+hypothesis.
+
+`worst.py` — ranks 64×64 blocks by mean|d| against a registered source, so the
+regions that actually deviate pick themselves instead of being guessed at.
+
 
 `score.py` — fidelity vs the source: ROI and whole-image mean|d|, plus "holes"
 (source-bright pixels the render made much darker).
