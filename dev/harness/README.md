@@ -56,6 +56,15 @@ image load, in both the CPU and GPU paths.
 **`ab.sh` KILLS the nREPL server on exit.** Do not mix it with a persistent-REPL
 sweep in the same run; that mistake silently cost one whole sweep.
 
+**Apply controls AFTER the image loads, not before.** `on-image-loaded`
+(`core.clj:214`) does `(reset! size-atom (max 4.0 (/ height 50.0)))`, and images load
+at maxside 1024 — so it clobbers Size to **20.48** on every load, whatever you set
+first. A REPL sweep that applies `controls-user.clj` and then loads the image renders
+every frame at Size 20.48 instead of the user's 7.5, silently, and every number from it
+is worthless. The env-var `jolt -M:run` path is immune (`cur-size` reads
+`GA_PAINTER_SIZE` ahead of the atom). This is what the md5-vs-baseline control catches,
+which is why you run it first.
+
 ## CPU/GPU parity, headless (`test/splat_painter/parity.clj`)
 
     jolt -A:test -m splat-painter.parity <image> <maxside|0> <shipped|off> [chains]
