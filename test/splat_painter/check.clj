@@ -143,7 +143,7 @@
     (assert-contains gs-src "float hb = (lvl <= 1) ? 1.0 : 0.0;" "broad strokes use heavy blur")
     (assert-contains gs-src "o_a = vec4(px, py, c00, c01);" "gen output o_a layout")
     (assert-contains gs-src "o_b = vec4(c11, color.r, color.g, color.b);" "gen output o_b layout")
-    (assert-contains gs-src "o_c = vec4(alpha, 0.0, 0.0, 0.0);" "gen output o_c (stroke-taper alpha)")
+    (assert-contains gs-src "o_c = vec4(alpha, clamp(subjAbsAt(px, py), 0.0, 1.0), 0.0, 0.0);" "gen output o_c (stroke-taper alpha + subjectness)")
     ;; region-consistency clamp (mirror seed/splat-field): the bilateral defines the
     ;; region; raw specificity trusted only when consistent with it — an
     ;; edge-straddling raw sample is pulled to the region colour, not bled across.
@@ -219,12 +219,12 @@
     (assert-contains gs-src "float sgn = (q == 0) ? dirsign : ((dx0*dxp + dy0*dyp) < 0.0 ? -1.0 : 1.0);" "sign-continuous tangent"))
 
   (println "pack-splats:")
-  (let [splats [{:mean [1.0 2.0] :cov [4.0 0.5 0.5 9.0] :color [0.1 0.2 0.3] :alpha 0.7}]
+  (let [splats [{:mean [1.0 2.0] :cov [4.0 0.5 0.5 9.0] :color [0.1 0.2 0.3] :alpha 0.7 :detail 0.25}]
         packed (shader/pack-splats splats)]
     (println "  1 splat ->" (count packed) "floats (want 12)")
     (assert (= 12 (count packed)))
-    (assert (= [1.0 2.0 4.0 0.5 9.0 0.1 0.2 0.3 0.7 0.0 0.0 0.0] packed))
-    (println "  layout [mean_x mean_y c00 c01  c11 r g b  alpha 0 0 0]: OK"))
+    (assert (= [1.0 2.0 4.0 0.5 9.0 0.1 0.2 0.3 0.7 0.25 0.0 0.0] packed))
+    (println "  layout [mean_x mean_y c00 c01  c11 r g b  alpha detail 0 0]: OK"))
 
   (println "pipeline (load eye.jpeg -> seed -> pack):")
   (let [img   (image/load-image "test/splat_painter/fixtures/eye.jpeg" 64)
