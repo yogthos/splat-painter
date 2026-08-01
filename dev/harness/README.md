@@ -73,6 +73,23 @@ convention, not a gate (nothing asserts it — `gpu-verify!` only prints, and
 `gpu-fields-test` compares FIELDS, never the splat field). See 9wx for the
 tolerated band.
 
+## Blog ablations (`blog-ablations-NOT-SHIPPED.patch`)
+
+Recovered from a scratch worktree, never merged. Adds `SP_ABL_ROUND` / `SP_ABL_GRID` /
+`SP_ABL_NOWAV` / `SP_ABL_NOLAYER` / `SP_ABL_NOCHAIN` env flags that rewind ONE idea out
+of the generation shader each — round dabs instead of tensor-oriented, a stratified
+lattice instead of hashed placement, flat density instead of the wavelet detail map, no
+glaze ladder, one dab per seed instead of a traced chain. Off by default, so the shipped
+shader stays byte-identical.
+
+**It is stale and will half-apply if used as-is.** The flags work by
+`clojure.string/replace` against exact shader source lines, and a non-matching anchor is
+a SILENT no-op — the flag looks like it ran and changed nothing. At least one anchor has
+already rotted: `abl-nolayer?` matches `float tcap = (lvl <= 1) ? 0.35 : ...`, which is
+`0.60` on main since 5fd17fa. Re-check every anchor against the current `gen.clj` before
+trusting a rendered comparison. If this gets revived, anchor the replacements on
+something that fails loudly when it misses.
+
 ## Metrics
 
 `score.py` — fidelity vs the source: ROI and whole-image mean|d|, plus "holes"
