@@ -36,9 +36,10 @@ Levels at a typical Size 7.5: `7` = edge band, `2` = fine, `1` = broad, `0` = ba
 `iso-tweak.clj` adds `lvl-override`, which merges arbitrary fields into a kept
 level (`{2 {:segs 8}}`), so one tier's spec can be varied with everything else
 fixed. CAVEAT: only fields the GS actually reads as uniforms take effect — `:segs`,
-`:th`, `:sideo`, `:selong`, `:nx` do; `:traw` does NOT (gen.clj recomputes it from
-the per-stroke size). If an override changes nothing, check that before concluding
-the parameter is irrelevant.
+`:th`, `:sideo`, `:selong`, `:nx` do. If an override changes nothing, check that
+before concluding the parameter is irrelevant. (`:traw` used to be the standing
+example of this and is gone from the level map entirely as of bd 6zj — both paths
+now derive it from the per-stroke size at the call site.)
 
 `reload.clj` hot-reloads the generation shader after editing `gen.clj`, guarded on
 `(:program prog)` so a compile failure cannot silently render with the stale

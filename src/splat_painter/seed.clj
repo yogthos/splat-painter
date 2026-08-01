@@ -298,7 +298,13 @@
    keep. Keyed on size, NOT the level index: once the monotone ladder ends at level
    2-3 the index-keyed form handed the FINEST strokes mid-tier averaged colour
    (t capped at 0.7 — 30% blur at exactly the scale that wants fidelity), which is
-   why small details read as unclear."
+   why small details read as unclear.
+
+   Call this with the PER-STROKE size (cssz — after the szf jitter and the near-edge
+   shrink), never the level's nominal ssz. The GS keys its mirror on ssz2, which is
+   the per-stroke size, so passing the nominal one put the two paths in different
+   buckets of the 1.5/3.5/8.0 ladder for the same stroke and they painted measurably
+   different colour. That is why the value is no longer carried on the level map."
   [lvl ssz]
   (if (<= (long lvl) 1)
     0.0                          ; coverage tiers: faithful colour, by role
@@ -507,7 +513,7 @@
             {:lvl band-lvl :ssz ssz :sp sp :th band-th
              :nx nx :ny 1 :offset 0
              :segs max-segs :stepf (step-frac band-lvl) :bendf 0.0
-             :map-kind :edge :traw (raw-floor band-lvl ssz)
+             :map-kind :edge
              :sideo band-sideo :selong band-se :band true
              ;; charge the REALIZED paint (nx·ppc), not the nominal band-segs model —
              ;; the tier comes out of the detail slice for exactly what it emits.
@@ -888,7 +894,6 @@
                                        :nx nx :ny 1 :offset off
                                        :segs segs :stepf stepf
                                        :bendf (bend-frac lvl) :map-kind (level-map-kind lvl ssz)
-                                       :traw (raw-floor lvl ssz)
                                        ;; ladder levels keep the liner side push and take
                                        ;; their elongation from local coherence (selong 0)
                                        :sideo 0.55 :selong 0.0 :band false})))))
@@ -1377,7 +1382,7 @@
                              D     (min 1.0 (* dv 2.2))
                              tn    (* 0.15 (- (hash01 (+ (* i 37) band-lvl) 0 13) 0.5))
                              ds    (if (< (hash01 (+ (* i 41) band-lvl) 0 17) 0.5) 1.0 -1.0)
-                             traw  (density-scaled-traw band-lvl (raw-floor band-lvl ssz)
+                             traw  (density-scaled-traw band-lvl (raw-floor band-lvl cssz)
                                                         (wavelet/sharp-at dmap cx cy))
                              [rows _] (stroke-segments
                                        nf dmap band-lvl
@@ -1415,7 +1420,7 @@
         {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke tier-muls count H W)]
     (persistent!
       (reduce
-        (fn [acc [idx {:keys [lvl ssz sp th nx ny segs stepf bendf map-kind traw sideo selong]}]]
+        (fn [acc [idx {:keys [lvl ssz sp th nx ny segs stepf bendf map-kind sideo selong]}]]
           (loop [i 0 acc acc]
             (if (>= i nx)
               acc
@@ -1613,8 +1618,13 @@
                                                        (if (<= (long lvl) 1) 1.0 0.0)
                                                          ;; fine colour rawness follows the LOCAL FINE-DETAIL
                                                          ;; DENSITY (:sharp) — in a crowded region a single
-                                                         ;; raw sample is unreliable, so trust the region more
-                                                         (density-scaled-traw lvl traw (wavelet/sharp-at dmap cx cy))
+                                                         ;; raw sample is unreliable, so trust the region more.
+                                                         ;; Keyed on cssz, the PER-STROKE size, because that is
+                                                         ;; what the GS uses (ssz2); the level's nominal ssz put
+                                                         ;; the two paths in different buckets of the 1.5/3.5/8.0
+                                                         ;; ladder for the same stroke.
+                                                         (density-scaled-traw lvl (raw-floor lvl cssz)
+                                                                              (wavelet/sharp-at dmap cx cy))
                                                        sgate blur-px iw ih th melt
                                                        map-kind gain blurd-px (hash01 (+ (* i 67) lvl) j 53)
                                                        (double sideo) (double selong))]
