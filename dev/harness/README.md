@@ -56,6 +56,23 @@ image load, in both the CPU and GPU paths.
 **`ab.sh` KILLS the nREPL server on exit.** Do not mix it with a persistent-REPL
 sweep in the same run; that mistake silently cost one whole sweep.
 
+## CPU/GPU parity, headless (`test/splat_painter/parity.clj`)
+
+    jolt -A:test -m splat-painter.parity <image> <maxside|0> <shipped|off> [chains]
+
+Replicates `core/gpu-verify!` — count ratio plus first-divergence index — without
+launching the GTK app, so it runs in seconds at any resolution. `maxside 0` is
+native. The third argument overrides the band tier's side push (`off` removes it),
+which is what exposes the on-ridge tracer divergence documented in
+splat-painter-9wx; `chains` also prints the CPU band chain-length and stop-reason
+distribution. `precision.clj` alongside it replays a single chain in float32 to
+separate a precision difference from a formula difference.
+
+Note that a non-100% ratio here is not automatically a bug: tracer parity is a
+convention, not a gate (nothing asserts it — `gpu-verify!` only prints, and
+`gpu-fields-test` compares FIELDS, never the splat field). See 9wx for the
+tolerated band.
+
 ## Metrics
 
 `score.py` — fidelity vs the source: ROI and whole-image mean|d|, plus "holes"
