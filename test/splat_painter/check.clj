@@ -93,7 +93,8 @@
     (assert-contains gs-src "out vec4 o_b;" "gen TF varying o_b")
     ;; placement (layered-means): threshold discard + jitter + Perlin warp gate
     (assert-contains gs-src "float thd = th * (0.75 + 0.5 * hash01(i*43 + lvl, j, 19));" "dithered placement threshold")
-    (assert-contains gs-src "if (lvl > 0 && dv * gain < thd) return;" "subject-gated threshold discard")
+    (assert-contains gs-src "if (lvl > 0 && dv * gain < thd && !thinAdmit) return;" "subject-gated threshold discard (thin-bright admission bypass)")
+    (assert-contains gs-src "float thp = THIN_GAIN * (dot(sampleRGB(u_blurTex, cx, cy), LUMA)" "thin-bright admission signal (mirror seed/thin-gain)")
     (assert-contains gs-src "float sgate = subjectAt(cx, cy);" "wavelet subjectness gate")
     (assert-contains gs-src "if (hash01(i*61 + lvl, j, 43) >= bminp*bminp) return;" "bokeh-adaptive broad thinning")
     (assert-contains gs-src "if (ev < 0.10) { reason = RSN_RIDGE; break; }" "feature-following: ridge died -> clean break (:ridge)")

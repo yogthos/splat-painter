@@ -1482,7 +1482,7 @@
         cnt  72000  H 256 W 256  area (* H W)
         layered-means #'splat-painter.seed/layered-means
         band-level    #'splat-painter.seed/band-level
-        segs (layered-means dmap nf 0.6 6.0 0.5 0.5 2.5 1.0 [1.0 1.0 1.0 1.0] cnt H W px px)
+        segs (layered-means dmap nf 0.6 6.0 0.5 0.5 2.5 1.0 [1.0 1.0 1.0 1.0] cnt H W px px px)
         pure (count (filter (fn [s] (pos? (double (nth s 14)))) segs))
         lp   (seed/layer-params dmap 0.6 6.0 0.5 0.5 2.5 [1.0 1.0 1.0 1.0] cnt H W)
         finest (->> lp :levels (remove :band) (map :ssz) (reduce min))
@@ -1534,7 +1534,7 @@
                            lp   (seed/layer-params dmap 1.0 6.0 0.5 0.5 2.0 [1.0 1.0 1.0 1.0] cnt H W)
                            band (first (filter :band (:levels lp)))
                            segs (#'splat-painter.seed/layered-means
-                                 dmap nf 1.0 6.0 0.5 0.5 2.0 1.0 [1.0 1.0 1.0 1.0] cnt H W px px)
+                                 dmap nf 1.0 6.0 0.5 0.5 2.0 1.0 [1.0 1.0 1.0 1.0] cnt H W px px px)
                            pure (count (filter (fn [s] (pos? (double (nth s 14)))) segs))]
                        {:demand (double (:demand band))
                         :pure   pure}))))
@@ -1590,7 +1590,7 @@
                              (let [lvl (long (nth args 2))
                                    [rows reason] (apply orig args)]
                                [(mapv (fn [r] (conj r lvl)) rows) reason]))]
-              (layered-means dmap nf 0.6 6.0 0.5 0.5 2.5 1.0 [1.0 1.0 1.0 1.0] cnt H W px px))
+              (layered-means dmap nf 0.6 6.0 0.5 0.5 2.5 1.0 [1.0 1.0 1.0 1.0] cnt H W px px px))
         emitted (count (filter (fn [s] (and (zero? (double (nth s 14)))
                                             ;; lvl is conj'd onto the record, so its index
                                             ;; tracks the record's width (16 since the
@@ -1781,3 +1781,42 @@
     (is (< (Math/abs (- (count one) (count zero))) (* 0.1 (count one)))
         (str "the dial moves strokes, it does not re-budget them: "
              (count one) " -> " (count zero) " splats"))))
+
+(deftest thin-bright-bar-admits-interior-strokes
+  (testing "a thin bright feature over dark ground admits fine strokes into its
+            interior via the lum(blur)-lum(blurHeavy) thin-bright signal (bd splat-painter-ws1).
+            The feature must be SMOOTH: a hard-edged bar lights the detail maps at its
+            boundary so the fine tier is already admitted there and the signal adds nothing.
+            The real defect is a soft bright interior with low edge/detail energy — the
+            gaussian bump reproduces that, so only the thin-bright admission lets fine
+            strokes in."
+    (let [H 128 W 128 cx 64.0 sigma 4.0
+          bump (fn [col] (max 0.06 (* 0.9 (Math/exp (- (/ (* (- col cx) (- col cx))
+                                                          (* 2.0 sigma sigma)))))))
+          pix (double-array (mapcat (fn [row]
+                                      (mapcat (fn [col]
+                                                (let [g (double (bump col))] [g g g]))
+                                              (range W)))
+                                    (range H)))
+          img (fields/prepare {:height H :width W :channels 3 :pixels pix})
+          lum (fn [arr ^long row ^long col]
+                (let [b (* 3 (+ (* row W) col)) arr ^doubles arr]
+                  (+ (* 0.2126 (aget arr b)) (* 0.7152 (aget arr (inc b))) (* 0.0722 (aget arr (+ b 2))))))
+          opts {:count 8000 :size 7.5 :variation 0.4 :detail 0.5 :stroke 2.0}]
+      ;; the signal: the bilateral stays bright in the bump while the brush-sized
+      ;; dominant blur is pulled toward the dark ground; over open background both agree.
+      (let [hp-on  (double (- (lum (:blur img) 64 64) (lum (:blur-heavy img) 64 64)))
+            hp-off (double (- (lum (:blur img) 64 112) (lum (:blur-heavy img) 64 112)))]
+        (is (and (pos? hp-on) (> hp-on (* 3.0 (max hp-off 1e-4))))
+            (str "thin-bright signal must fire on the bump: hp " hp-on " vs bg " hp-off)))
+      ;; the behaviour: with the signal ON, strictly more strokes land inside the
+      ;; bump's bright column band than with it OFF (thin-gain 0 == pre-fix).
+      (let [in-bump? (fn [s] (<= 60 (long (nth (:mean s) 1)) 68))
+            n-on  (count (filter in-bump? (:splats (seed/splat-field img opts))))
+            n-off (count (filter in-bump?
+                          (:splats (with-redefs-fn {#'seed/thin-gain 0.0}
+                                     (fn [] (seed/splat-field img opts))))))]
+        (is (>= n-on (+ n-off 20))
+            (str "thin-bright admission added only " (- n-on n-off)
+                 " interior strokes (on " n-on ", off " n-off ")"))))))
+
