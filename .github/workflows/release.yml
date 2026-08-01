@@ -18,7 +18,9 @@ env:
   # Avoid 0.5.2 through 0.5.5: they cannot compile 3+ argument long arithmetic
   # (jolt-l+/l-/l* went binary-only), which this codebase uses — seed/hash01 among
   # ~17 sites. Fixed in 0.5.6.
-  JOLT_VERSION: v0.5.12
+  # >= 0.5.13: par/threads trusts (.availableProcessors), which reported 1 before
+  # that. On an older compiler the field builders would silently run serially.
+  JOLT_VERSION: v0.5.13
 
 jobs:
   build:

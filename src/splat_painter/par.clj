@@ -8,15 +8,18 @@
    band reads shared source arrays and writes only its own slice, so the result is
    identical to the serial loop, byte for byte. splat-painter.fields-test pins that.
 
-   NOTE: (.availableProcessors (Runtime/getRuntime)) reports 1 under jolt even on a
-   10-core machine, so it cannot size the pool — futures really are parallel (a 4×
-   workload measured 303ms across futures vs 683ms serially), the count is just
-   wrong. Hence the fallback below.")
+   (.availableProcessors (Runtime/getRuntime)) used to report 1 under jolt even on a
+   10-core machine, so it could not size the pool and this namespace hard-coded 8
+   bands whenever it saw 1. Fixed in jolt 0.5.13 — it now reports the real count —
+   so the value is trusted again. Keeping the old fallback would have become the
+   bug: on a genuine single-core box it forced 8 bands, oversubscribing the one
+   core it had.")
 
 (def threads
-  "Bands to split a parallel loop into. Rebindable (alter-var-root) for benchmarking."
-  (let [n (try (.availableProcessors (Runtime/getRuntime)) (catch Throwable _ 0))]
-    (if (> (long n) 1) (long n) 8)))
+  "Bands to split a parallel loop into. Rebindable (alter-var-root) for benchmarking.
+  Needs jolt >= 0.5.13 for a truthful count; on older builds this reports 1 and the
+  loops run serially — slower, never wrong."
+  (max 1 (long (try (.availableProcessors (Runtime/getRuntime)) (catch Throwable _ 1)))))
 
 (def ^:private min-work
   "Total elements below which the loop runs serially: thread hand-off costs more than
