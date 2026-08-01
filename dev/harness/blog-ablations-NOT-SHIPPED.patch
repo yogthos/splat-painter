@@ -1,0 +1,141 @@
+src/splat_painter/core.clj --- 1/3 --- Clojure
+159 159 (defn- cur-fine   [] (or (some-> (System/getenv "GA_PAINTER_FINE")   Double/parseDouble)      @fine-atom))
+160 160 (defn- cur-cutin  [] (or (some-> (System/getenv "GA_PAINTER_CUTIN")  Double/parseDouble)      @cutin-atom))
+161 161 (defn- cur-swirl  [] (or (some-> (System/getenv "GA_PAINTER_SWIRL")  Double/parseDouble)      @swirl-atom))
+... 162 (defn- cur-curv   [] (or (some-> (System/getenv "GA_PAINTER_CURV")   Double/parseDouble)      @curvature-atom))
+162 163 (defn- cur-tex-streak [] (or (some-> (System/getenv "GA_PAINTER_TEX_STREAK") Double/parseDouble) @tex-streak-atom))
+163 164 (defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
+164 165 (defn- cur-tex-edge   [] (or (some-> (System/getenv "GA_PAINTER_TEX_EDGE")   Double/parseDouble) @tex-edge-atom))
+
+src/splat_painter/core.clj --- 2/3 --- Clojure
+171                            :stroke   172                            :stroke 
+...    (cur-stroke)                      ...    (cur-stroke)
+172                            :detail   173                            :detail 
+...    (cur-detail)                      ...    (cur-detail)
+173                            :variati  174                            :variati
+... on (cur-var)                         ... on (cur-var)
+174                            :curvatu  175                            :curvatu
+... re @curvature-atom                   ... re (cur-curv)
+175                            :contras  176                            :contras
+... t  @contrast-atom                    ... t  @contrast-atom
+176                            :size-br  177                            :size-br
+... oad (cur-broad)                      ... oad (cur-broad)
+177                            :size-mi  178                            :size-mi
+... d   (cur-mid)                        ... d   (cur-mid)
+
+src/splat_painter/core.clj --- 3/3 --- Clojure
+398                                      399 
+399 (defn- gpu-controls []               400 (defn- gpu-controls []
+400   {:count (cur-count) :size (cur-si  401   {:count (cur-count) :size (cur-si
+... ze) :stroke (cur-stroke) :detail (c  ... ze) :stroke (cur-stroke) :detail (c
+... ur-detail)                           ... ur-detail)
+401    :variation (cur-var) :curvature   402    :variation (cur-var) :curvature 
+... @curvature-atom :contrast @contrast  ... (cur-curv) :contrast @contrast-atom
+... -atom                                ... 
+402    :size-broad (cur-broad) :size-mi  403    :size-broad (cur-broad) :size-mi
+... d (cur-mid) :size-fine (cur-fine)    ... d (cur-mid) :size-fine (cur-fine)
+403    :edge-band (cur-cutin) :swirl (c  404    :edge-band (cur-cutin) :swirl (c
+... ur-swirl)})                          ... ur-swirl)})
+404                                      405 
+
+src/splat_painter/gen.clj --- 1/3 --- Clojure
+ 23   23      u_perm    512×1    .r = Perlin permutation (0..255)
+ 24   24    Reduced-res maps (detail/noise) carry their src dims so the shader maps a full-image
+ 25   25    (x,y) into them exactly like the CPU (round(x·dim/src))."
+ 26   26   (:require [clojure.string]
+ ..   27             [glimmer-gl.gl :as gl]
+ 27   28             [splat-painter.seed :as seed]
+ 28   29             [splat-painter.noise :as noise]
+
+src/splat_painter/gen.clj --- 2/3 --- Clojure
+785  786    "u_detailTex" "u_subjTex" "u_dmax" "u_detailDim" "u_detailSrc"
+786  787    "u_noiseTex" "u_noiseSTex" "u_noiseDim" "u_noiseSrc" "u_blurTex" "u_blurDTex" "u_blurHTex" "u_rawTex" "u_permTex"])
+...  788 
+...  789 ;; --- BLOG ABLATIONS (scratch worktree only, not for merge) -------------------
+...  790 ;; Each flag rewinds ONE idea out of the shader so the blog post can show what the
+...  791 ;; painting looks like without it. Off by default = the shipped shader, byte-identical.
+...  792 (def ^:private abl-round?   (some? (System/getenv "SP_ABL_ROUND")))   ; no structure tensor: round, axis-aligned dabs
+...  793 (def ^:private abl-grid?    (some? (System/getenv "SP_ABL_GRID")))    ; stratified lattice instead of hashed positions
+...  794 (def ^:private abl-nowav?   (some? (System/getenv "SP_ABL_NOWAV")))   ; density ignores the wavelet detail map
+...  795 (def ^:private abl-nolayer? (some? (System/getenv "SP_ABL_NOLAYER"))) ; no underpainting/glaze ladder: every stroke opaque, own colour
+...  796 
+...  797 (def ^:private grid-src
+...  798   "  // ABLATION: regular stratified lattice (the thing hashing replaced). The level
+...  799   // carries nx candidates (ny = 1), so lay them out as an aspect-matched grid.
+...  800   int NTOT = max(1, u_nx[k] * u_ny[k]);
+...  801   int gw = max(1, int(floor(sqrt(float(NTOT) * float(u_W) / float(u_H)) + 0.5)));
+...  802   int gh = max(1, (NTOT + gw - 1) / gw);
+...  803   int gi = local / gw, gj = local - gi * gw;
+...  804   float cx = (float(gi) + 0.5) * float(u_H) / float(gh);
+...  805   float cy = (float(gj) + 0.5) * float(u_W) / float(gw);")
+...  806 
+...  807 (defn- ablate [src]
+...  808   (cond-> src
+...  809     abl-round?
+...  810     (-> (clojure.string/replace "float se  = (selong > 0.0) ? selong : sqrt(e);"
+...  811                                 "float se  = 1.0;   // ABLATION: no tensor elongation")
+...  812         (clojure.string/replace "float c = cos(theta), s = sin(theta);"
+...  813                                 "float c = 1.0, s = 0.0;   // ABLATION: no tensor orientation"))
+...  814     abl-grid?
+...  815     (clojure.string/replace
+...  816       (str "  float cx = float(u_H) * poshash(i, lvl, 29);\n"
+...  817            "  float cy = float(u_W) * poshash(i, lvl, 31);")
+...  818       grid-src)
+...  819     ;; the level ladder, budget and sizes stay exactly as they are — only the
+...  820     ;; question "does a stroke go HERE?" stops consulting the detail map: every
+...  821     ;; level paints its whole candidate set, so density is flat across the canvas
+...  822     ;; instead of following the texture.
+...  823     abl-nowav?
+...  824     (-> (clojure.string/replace
+...  825           "float dv = mapAt(u_sharp[k], cx, cy);"
+...  826           "float dv = 1.0;   // ABLATION: no detail map — every level paints everywhere")
+...  827         (clojure.string/replace
+...  828           "float fdv = mapAt(u_sharp[k-1], cx, cy) * (0.25 + 0.75 * sgate) * bgate;"
+...  829           "float fdv = 0.0;   // ABLATION: no subdivision handoff")
+...  830         (clojure.string/replace
+...  831           "float gain = (lvl >= 2) ? (0.25 + 0.75 * sgate) * bgate : (lvl == 1) ? bgate : 1.0;"
+...  832           "float gain = 1.0;   // ABLATION: no subjectness gate"))
+...  833     ;; before the layering idea there was no underpainting and no glaze ladder:
+...  834     ;; every stroke was opaque and painted the colour under its own position.
+...  835     abl-nolayer?
+...  836     (-> (clojure.string/replace
+...  837           "float hb = (lvl <= 1) ? 1.0 : 0.0;"
+...  838           "float hb = 0.0;   // ABLATION: no heavy-blur underpainting")
+...  839         (clojure.string/replace
+...  840           "float traw = (lvl <= 1) ? 0.0 : (ssz2 < 1.5) ? 0.85 : (ssz2 < 3.5) ? 0.7 : (ssz2 < 8.0) ? 0.45 : 0.0;"
+...  841           "float traw = 0.7;   // ABLATION: same colour fidelity at every scale")
+...  842         (clojure.string/replace
+...  843           "float tcap = (lvl <= 1) ? 0.35 : (ssz2 < 3.5) ? 1.0 : (ssz2 < 8.0) ? 0.7 : 0.35;"
+...  844           "float tcap = 1.0;   // ABLATION")
+...  845         (clojure.string/replace
+...  846           "float tcap2 = min(tcap, 0.3 + 0.7 * min(1.0, 3.0 / max(csz, 1e-6)));"
+...  847           "float tcap2 = tcap;   // ABLATION")
+...  848         (clojure.string/replace
+...  849           "float lal = (band || lvl <= 1) ? 1.0 : (ssz2 >= 8.0) ? 1.0 : 0.85;"
+...  850           "float lal = 1.0;   // ABLATION: no glazing, every layer opaque"))))
+787  851 
+788  852 (defn sources
+789  853   "Return {:vs-src :gs-src} — pure, no GL context (for headless inspection/tests)."
+790  854   []
+791  855   {:vs-src vs-src :gs-src (ablate gs-src)})
+792  856 
+793  857 (defn build-gen-program
+794  858   "Compile + link the VS+GS transform-feedback generation program, capturing
+795  859    o_a,o_b interleaved (8 floats/splat). Returns {:program :locs} or nil."
+796  860   []
+797  861   (when-let [prog (gl/make-tf-program vs-src (ablate gs-src) ["o_a" "o_b" "o_c"])]
+798  862     {:program prog
+799  863      :locs (into {} (map (fn [n] [(keyword n) (gl/gl-get-uniform-location prog n)]))
+800  864                  gen-uniform-names)}))
+
+src/splat_painter/gen.clj --- 3/3 --- Clojure
+946 1010         ny  (pad (map :ny levels) 1)
+947 1011         off (pad (map :offset levels) 0)
+948 1012         lvl (pad (map :lvl levels) 0)
+... 1013         ;; ABLATION SP_ABL_NOCHAIN: one dab per seed instead of a traced chain.
+949 1014         sgs (let [s (pad (map :segs levels) 1)]
+... 1015               (if (System/getenv "SP_ABL_NOCHAIN") (vec (repeat max-levels 1)) s))
+950 1016         stf (pad (map :stepf levels) 1.0)
+951 1017         bnf (pad (map :bendf levels) 1.0)
+952 1018         shp (pad (map (fn [l] (case (:map-kind l) :sharp 2 :mid 1 :edge 3 0)) levels) 0)
+
