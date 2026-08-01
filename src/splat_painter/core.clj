@@ -40,7 +40,7 @@
 (defonce swirl-atom    (r/atom 1.0))   ; share of the image-INDEPENDENT Perlin field in the flow
                                        ; orientation + position warp; 0 = structure only
 (defonce hardness-atom (r/atom 1.7))   ; edge crispness of detail strokes; large strokes always
-(defonce aa-atom       (r/atom 2.5))   ; ANTIALIAS: stdev below which hard edges ease to a gaussian
+(defonce aa-atom       (r/atom 0.0))   ; ANTIALIAS present pass: edge-directed smoothing, runs after Sharpen
                                        ; soften to a round gaussian (u_hard_soft fixed at 1.0)
 (defonce sharpen-atom  (r/atom 0.0))   ; final-output edge-gated unsharp on the composite; 0 = off
 ;; paint-texture experiment (render-time, quad shader only): pigment-like variance
@@ -450,6 +450,7 @@
                  :quad    (shader/build-program-quad)
                  :blit    (shader/build-program-blit)
                  :sharpen (shader/build-program-sharpen)
+                 :aa      (shader/build-program-aa)
                  :perm    (gen/upload-perm!)
                  :tf-buf  tf-buf
                  :query   (gl/gen-one gl/gl-gen-queries)
@@ -556,7 +557,6 @@
                           (+ 1.0 (* (- (double (cur-hardness)) 1.0)
                                     (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
-        (gl/gl-uniform-1f (:u_aa locs) (double (cur-aa)))
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
         (gl/gl-bind-vertex-array quad-vao)
@@ -583,7 +583,6 @@
                           (+ 1.0 (* (- (double (cur-hardness)) 1.0)
                                     (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
-        (gl/gl-uniform-1f (:u_aa locs) (double (cur-aa)))
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
         (gl/gl-uniform-1f (:u_tex_streak locs) (double (cur-tex-streak)))
@@ -612,19 +611,22 @@
         (gl/gl-disable gl/GL-BLEND)))
     {:count count :total total :n n}))
 
-(defn- post-sharpen!
-  "Draw the edge-gated unsharp pass (shader/build-program-sharpen) from `src-tex`
+(defn- present-pass!
+  "Draw one full-frame present pass (`prog-key` = :sharpen or :aa) from `src-tex`
    into the currently-bound framebuffer, at iw*ih. The target IS the image here —
    the letterbox exists only in the pane blit — so the clamp rect is the whole
-   texture."
-  [area iw ih src-tex amount]
-  (let [{:keys [sharpen gen-vao]} (ensure-gpu! area)
-        locs (:locs sharpen)]
+   texture. Both passes share vs-src-sharpen's geometry and uniform names, so this
+   is one body rather than two that must be kept in step."
+  [area iw ih src-tex amount prog-key]
+  (let [gpu     (ensure-gpu! area)
+        prog    (get gpu prog-key)
+        gen-vao (:gen-vao gpu)
+        locs    (:locs prog)]
     (gl/gl-viewport 0 0 (int iw) (int ih))
     (gl/gl-clear-color 0.0 0.0 0.0 1.0)
     (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
     (gl/gl-disable gl/GL-BLEND)
-    (gl/gl-use-program (:program sharpen))
+    (gl/gl-use-program (:program prog))
     (gl/gl-active-texture gl/GL-TEXTURE0)
     (gl/gl-bind-texture gl/GL-TEXTURE-2D src-tex)
     (gl/gl-uniform-1i (:u_src locs) 0)
@@ -646,15 +648,29 @@
    physical radius, so nothing judged on screen was the thing written to disk."
   [area iw ih]
   (let [{[cfbo ctex] :composite [pfbo ptex] :post} (ensure-render-targets! area iw ih)
-        amount (double (cur-sharpen))]
+        sharpen (double (cur-sharpen))
+        aa      (double (cur-aa))]
     (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER cfbo)
     (gl/gl-viewport 0 0 (int iw) (int ih))
-    (let [result (gpu-draw! area iw ih iw ih)]
-      (if (pos? amount)
-        (do (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER pfbo)
-            (post-sharpen! area iw ih ctex amount)
-            [ptex result])
-        [ctex result]))))
+    (let [result (gpu-draw! area iw ih iw ih)
+          ;; PRESENT-PASS ORDER: sharpen, then antialias. Sharpen is gated on local
+          ;; gradient so it targets silhouettes, and a painted silhouette is scalloped
+          ;; at sub-pixel scale by construction (overlapping strokes at slightly
+          ;; different angles) — amplifying that is the staircase. Antialias smooths
+          ;; ALONG the edge afterwards, so it cleans up after sharpen instead of being
+          ;; undone by it. The per-splat hardness easing cannot do this job: it runs
+          ;; during rasterization, before the composite exists.
+          ;; Each pass ping-pongs between the two targets, so no third one is needed.
+          [tex fbo] (if (pos? sharpen)
+                      (do (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER pfbo)
+                          (present-pass! area iw ih ctex sharpen :sharpen)
+                          [ptex cfbo])
+                      [ctex pfbo])]
+      (if (pos? aa)
+        (do (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER fbo)
+            (present-pass! area iw ih tex aa :aa)
+            [(if (= fbo cfbo) ctex ptex) result])
+        [tex result]))))
 
 (defn- blit-to-pane!
   "Resample the finished native-resolution texture into the currently-bound
@@ -1063,7 +1079,7 @@
    [slider "Stroke"    1.0  4.0   0.05  stroke-atom]   ; <1 degenerates chains to bead dots
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
    [slider "Hardness"  1.0  4.0   0.05  hardness-atom]   ; detail-stroke crispness (big strokes stay round)
-   [slider "Antialias" 0.0  6.0   0.1   aa-atom]        ; stdev below which hard edges ease to a gaussian; 0 = off
+   [slider "Antialias" 0.0  1.0   0.05  aa-atom]        ; smooths along edges AFTER Sharpen (kills the staircase); 0 = off
    [slider "Sharpen"   0.0  1.5   0.05  sharpen-atom]    ; final-output edge-gated unsharp; 0 = off
    [slider "Cut-in"    0.0  1.5   0.05  cutin-atom]     ; edge-band tier: restate silhouettes from their own sides; 0 = off
    [slider "Swirl"     0.0  1.0   0.02  swirl-atom]    ; Perlin share of the flow + position warp; 0 = image structure only

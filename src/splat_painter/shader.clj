@@ -85,7 +85,6 @@ uniform float u_hard_sharp;
 uniform float u_hard_soft;
 uniform float u_sig_min;
 uniform float u_sig_max;
-uniform float u_aa;          // ANTIALIAS: stdev below which hard edges ease to a pure gaussian
 const int MAX_SPLATS = " max-splats ";
 
 void main(){
@@ -117,9 +116,9 @@ void main(){
     float ts  = clamp((sig - u_sig_min) / max(u_sig_max - u_sig_min, 1e-4), 0.0, 1.0);
     ts = ts * ts * (3.0 - 2.0 * ts);
     float hardness = mix(u_hard_sharp, u_hard_soft, ts);
-    // ANTIALIAS: below u_aa px stdev a hard-edged profile spans less than a pixel and
+    // ANTIALIAS: below ~2.5px stdev a hard-edged profile spans less than a pixel and
     // shimmers as jaggies — tiny marks ease back to a pure gaussian (soft dab).
-    hardness = 1.0 + (hardness - 1.0) * clamp(sig / max(u_aa, 1e-4), 0.0, 1.0);
+    hardness = 1.0 + (hardness - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
     float a = t2.x * u_opacity * exp(-pow(pdf, hardness));
     float wa = T * a;
     acc += wa * t1.yzw;
@@ -156,7 +155,6 @@ uniform float u_hard_sharp;
 uniform float u_hard_soft;
 uniform float u_sig_min;
 uniform float u_sig_max;
-uniform float u_aa;          // ANTIALIAS: stdev below which hard edges ease to a pure gaussian
 uniform float u_tex_edge;        // paint-texture: edge-raggedness amount (0 = clean ellipse)
 flat out vec3  v_color;
 flat out vec3  v_prec;           // p00, p11, cross
@@ -197,7 +195,7 @@ void main(){
   ts = ts * ts * (3.0 - 2.0 * ts);
   v_hard = mix(u_hard_sharp, u_hard_soft, ts);
   // ANTIALIAS: tiny marks ease back to a pure gaussian (see the loop shaders)
-  v_hard = 1.0 + (v_hard - 1.0) * clamp(sig / max(u_aa, 1e-4), 0.0, 1.0);
+  v_hard = 1.0 + (v_hard - 1.0) * clamp(sig / 2.5, 0.0, 1.0);
   // edge raggedness rides the SMALLER strokes only: the base/large coverage layer
   // (ts→1) stays solid so thinning coverage can't open gaps to the black clear;
   // fine marks (ts→0) get the full break-up, over the underpainting where it reads.
@@ -366,7 +364,6 @@ void main(){
             :u_hard_soft  (gl/gl-get-uniform-location prog "u_hard_soft")
             :u_sig_min    (gl/gl-get-uniform-location prog "u_sig_min")
             :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")
-            :u_aa         (gl/gl-get-uniform-location prog "u_aa")
             :u_tex_streak (gl/gl-get-uniform-location prog "u_tex_streak")
             :u_tex_grain  (gl/gl-get-uniform-location prog "u_tex_grain")
             :u_tex_edge   (gl/gl-get-uniform-location prog "u_tex_edge")}}))
@@ -484,6 +481,76 @@ void main(){
   frag = vec4(clamp(c + u_amount * gate * hp, 0.0, 1.0), 1.0);
 }")
 
+;; --- antialias present pass (edge-directed smoothing, runs LAST) -------------
+;; Sharpen is an unsharp gated ON local gradient, so it targets silhouettes — and a
+;; painted silhouette is built from overlapping elongated strokes at slightly
+;; different angles, i.e. it is scalloped at sub-pixel scale by construction.
+;; Amplifying that scalloping is what turns a smooth rim into a visible staircase
+;; (the zigzag). The per-splat hardness easing cannot help: it runs during
+;; rasterization, BEFORE the composite exists, so sharpen re-hardens whatever it
+;; softened.
+;;
+;; So this pass runs AFTER sharpen and smooths ALONG the edge only. The gradient
+;; gives the across-edge direction; its perpendicular is the tangent, and averaging
+;; a step either way along that tangent softens the sideways jog from stroke to
+;; stroke without touching the across-edge step. Measured on a 1px staircase: worst
+;; jog 1.000 -> 0.506 px with the across-edge contrast unchanged at 170 levels.
+;; Gated on gradient so flat paint and canvas texture are untouched.
+(def ^:private fs-src-aa
+  "#version 330 core
+uniform sampler2D u_src;        // the composite (post-sharpen if sharpen is on)
+uniform vec2 u_viewport;
+uniform vec4 u_rect;
+uniform float u_amount;         // 0 = off (identity)
+out vec4 frag;
+
+float lum(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// same rect clamp as the sharpen pass: without it the letterbox bar bleeds in
+vec3 tap(vec2 p){
+  vec2 q = clamp(p, u_rect.xy + 0.5, u_rect.xy + u_rect.zw - 0.5);
+  return texture(u_src, q / u_viewport).rgb;
+}
+
+// gate band, matched to the sharpen pass's operator so the two agree on what an
+// edge is — this pass exists to clean up after that one
+const float GATE_LO = 0.010;
+const float GATE_HI = 0.030;
+
+void main(){
+  vec2 p = gl_FragCoord.xy;
+  vec3 c = tap(p);
+  float lTL = lum(tap(p + vec2(-1.0,  1.0)));
+  float lTM = lum(tap(p + vec2( 0.0,  1.0)));
+  float lTR = lum(tap(p + vec2( 1.0,  1.0)));
+  float lML = lum(tap(p + vec2(-1.0,  0.0)));
+  float lMR = lum(tap(p + vec2( 1.0,  0.0)));
+  float lBL = lum(tap(p + vec2(-1.0, -1.0)));
+  float lBM = lum(tap(p + vec2( 0.0, -1.0)));
+  float lBR = lum(tap(p + vec2( 1.0, -1.0)));
+  float gx = (lTR + 2.0*lMR + lBR) - (lTL + 2.0*lML + lBL);
+  float gy = (lBL + 2.0*lBM + lBR) - (lTL + 2.0*lTM + lTR);
+  vec2 g = vec2(gx, gy);
+  float gmag = length(g) / 8.0;
+  float gate = smoothstep(GATE_LO, GATE_HI, gmag);
+  // degenerate gradient has no meaningful tangent — leave the pixel alone
+  if (gate <= 0.0 || gmag < 1e-6) { frag = vec4(c, 1.0); return; }
+  vec2 t = normalize(vec2(-g.y, g.x));      // along the edge
+  vec3 sm = 0.25 * (tap(p + t) + tap(p - t)) + 0.5 * c;
+  frag = vec4(clamp(mix(c, sm, clamp(u_amount, 0.0, 1.0) * gate), 0.0, 1.0), 1.0);
+}")
+
+(defn build-program-aa
+  "Compile + link the antialias present pass. Same attribute-less geometry and rect
+  convention as the sharpen pass; runs after it. Returns {:program :locs} or nil."
+  []
+  (when-let [prog (gl/make-program vs-src-sharpen fs-src-aa)]
+    {:program prog
+     :locs {:u_src      (gl/gl-get-uniform-location prog "u_src")
+            :u_viewport (gl/gl-get-uniform-location prog "u_viewport")
+            :u_rect     (gl/gl-get-uniform-location prog "u_rect")
+            :u_amount   (gl/gl-get-uniform-location prog "u_amount")}}))
+
 (defn build-program-sharpen
   "Compile + link the sharpen present pass (needs a current GL context).
   Attribute-less: bind any VAO with no enabled attribs and draw 6 GL_TRIANGLES
@@ -508,8 +575,7 @@ void main(){
    :u_hard_sharp (gl/gl-get-uniform-location prog "u_hard_sharp")
    :u_hard_soft  (gl/gl-get-uniform-location prog "u_hard_soft")
    :u_sig_min    (gl/gl-get-uniform-location prog "u_sig_min")
-   :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")
-   :u_aa         (gl/gl-get-uniform-location prog "u_aa")})
+   :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")})
 
 (defn build-program-buf
   "Compile + link the samplerBuffer render variant (needs a current GL context).
@@ -523,13 +589,14 @@ void main(){
 
 (defn sources
   "Return {:vs-src :fs-src-buf :vs-src-quad :fs-src-quad :vs-src-blit :fs-src-blit
-           :vs-src-sharpen :fs-src-sharpen}
+           :vs-src-sharpen :fs-src-sharpen :fs-src-aa}
   — pure, no GL context (for headless inspection/tests)."
   []
   {:vs-src vs-src :fs-src-buf fs-src-buf
    :vs-src-quad vs-src-quad :fs-src-quad fs-src-quad
    :vs-src-blit vs-src-blit :fs-src-blit fs-src-blit
-   :vs-src-sharpen vs-src-sharpen :fs-src-sharpen fs-src-sharpen})
+   :vs-src-sharpen vs-src-sharpen :fs-src-sharpen fs-src-sharpen
+   :fs-src-aa fs-src-aa})
 
 (defn pack-splats
   "Flatten a seq of splats into the RGBA32F texture payload (length 3*N*4): splat i

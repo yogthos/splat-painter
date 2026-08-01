@@ -222,3 +222,113 @@
                     (str "top-right corner pixel rang: " (at 55 55)))
                 (is (zero? (at 4 20))
                     "the bar itself stays black")))))))))
+
+;; --- antialias present pass (shader/build-program-aa) ------------------------
+;; Runs AFTER sharpen, so what it must do is remove the along-edge staircase
+;; sharpen amplifies, WITHOUT softening the across-edge step it just bought.
+;; Those two are the tests: a staircase flattens, a clean step does not move.
+
+(defn- staircase-tex
+  "A near-vertical boundary that jogs one column every 8 rows — long straight runs
+   broken by single-pixel steps, which is the shape a painted silhouette takes
+   (overlapping strokes at slightly different angles) and what sharpen amplifies
+   into a visible zigzag.
+
+   Deliberately NOT a jog every other row: that is a 45-degree sawtooth, where the
+   local gradient really is diagonal, so the along-edge tangent legitimately points
+   across the boundary and the pass has no straight edge to smooth along. The
+   defect being modelled is a mostly-straight edge with occasional steps."
+  [W H]
+  (let [bs (byte-array (* W H))]
+    (dotimes [y H]
+      (let [edge (+ (quot W 2) (if (even? (quot y 8)) 0 1))]
+        (dotimes [x W]
+          (aset bs (+ (* y W) x) (unchecked-byte (if (< x edge) 40 210))))))
+    bs))
+
+(defn- worst-jog
+  "The most ABRUPT row-to-row step in the boundary's SUB-PIXEL position.
+
+   Position per row comes from coverage: for a dark-left/light-right edge,
+   sum((L-min)/(max-min)) over the row counts the light pixels, so W minus that is
+   where the boundary sits, fractionally. A hard 1-px jog gives a step of 1.0; once
+   the pass spreads that jog across several rows each step is a fraction of it, and
+   that spreading is exactly what stops the eye reading a staircase.
+
+   Two metrics were tried first and both are wrong, recorded so they are not retried:
+   MEAN |dL/dy| along the edge goes UP, because on a hard edge the pass introduces
+   intermediate values at the jog — which is what antialiasing IS. And mean |d pos/dy|
+   is conserved under smoothing: the edge still travels the same total distance, it
+   just takes more rows to do it. Only the PEAK step falls."
+  [^bytes bs W H]
+  (let [vals (for [y (range H) x (range W)] (ubyte bs (+ (* y W) x)))
+        lo   (double (apply min vals))
+        hi   (double (apply max vals))
+        rng  (max 1.0 (- hi lo))
+        pos  (vec (for [y (range H)]
+                    (- (double W)
+                       (reduce + (for [x (range W)]
+                                   (/ (- (ubyte bs (+ (* y W) x)) lo) rng))))))]
+    (apply max (for [y (range (dec H))]
+                 (Math/abs (- (pos (inc y)) (pos y)))))))
+
+(deftest aa-amount-zero-is-identity
+  (testing "the antialias pass at amount 0 reproduces the source byte-for-byte"
+    (with-gl
+      (fn []
+        (let [W 64 H 64
+              src (byte-array (map unchecked-byte (lcg-bytes (* W H) 11)))
+              tex (upload-grey-texture W H src)
+              _   (make-target! W H)
+              vao (gl/gen-one gl/gl-gen-vertex-arrays)
+              prog (shader/build-program-aa)]
+          (is (some? prog) "aa program links")
+          (when prog
+            (let [got (run-pass! prog vao tex W H [0 0 W H] 0.0)
+                  bad (reduce (fn [n i] (if (= (ubyte src i) (ubyte got i)) n (inc n)))
+                              0 (range (* W H)))]
+              (is (zero? bad) (str bad " pixels changed at amount 0")))))))))
+
+(deftest aa-flattens-a-staircase
+  (testing "the along-edge jog shrinks — this is the zigzag the pass exists to remove"
+    (with-gl
+      (fn []
+        (let [W 64 H 64
+              src (staircase-tex W H)
+              tex (upload-grey-texture W H src)
+              _   (make-target! W H)
+              vao (gl/gen-one gl/gl-gen-vertex-arrays)
+              prog (shader/build-program-aa)]
+          (when prog
+            (let [before (worst-jog src W H)
+                  got    (run-pass! prog vao tex W H [0 0 W H] 1.0)
+                  after  (worst-jog got W H)]
+              (println (format "aa-test: worst jog %.3f -> %.3f px" before after))
+              (is (>= before 0.9) "the fixture actually has a hard 1px jog")
+              (is (< after (* 0.75 before))
+                  (str "worst jog " before " -> " after " px, not softened")))))))))
+
+(deftest aa-keeps-the-across-edge-step
+  (testing "a CLEAN step keeps its contrast — the pass smooths along edges, not across"
+    (with-gl
+      (fn []
+        (let [W 64 H 64
+              src (let [bs (byte-array (* W H))]
+                    (dotimes [y H] (dotimes [x W]
+                      (aset bs (+ (* y W) x) (unchecked-byte (if (< x 32) 40 210)))))
+                    bs)
+              tex (upload-grey-texture W H src)
+              _   (make-target! W H)
+              vao (gl/gen-one gl/gl-gen-vertex-arrays)
+              prog (shader/build-program-aa)
+              jump (fn [^bytes bs]
+                     (apply max (for [y (range H) x (range (dec W))]
+                                  (Math/abs (- (ubyte bs (+ (* y W) x 1))
+                                               (ubyte bs (+ (* y W) x)))))))]
+          (when prog
+            (let [before (jump src)
+                  after  (jump (run-pass! prog vao tex W H [0 0 W H] 1.0))]
+              (println (format "aa-test: across-edge step %d -> %d" before after))
+              (is (>= after (* 0.95 before))
+                  (str "across-edge step fell " before " -> " after
+                       " — the pass is blurring across the edge, not along it")))))))))
