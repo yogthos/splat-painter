@@ -1828,3 +1828,26 @@
             (str "thin-bright admission added only " (- n-on n-off)
                  " interior strokes (on " n-on ", off " n-off ")"))))))
 
+(deftest dominant-blur-stays-region-faithful-inside-dark-region
+  ;; SPEC-olb-colour-bleed guard. The coverage tiers colour from the dominant
+  ;; (heavy) blur; that blur must stay faithful to its OWN region inside a large
+  ;; dark area — not average in the light neighbour across the silhouette (the
+  ;; colour bleed). We sample the prepared :blur-heavy directly and assert it
+  ;; stays dark deep inside the dark region and just inside the boundary.
+  ;; Sensitive to heavy-radius: cranking it so the window covers the whole frame
+  ;; drives the dominant to the global mean and fails both assertions.
+  (let [H 200 W 200
+        img (gray-img H W (fn [_x y] (if (< (long y) 100) 0.10 0.90)))
+        prep (fields/prepare img)
+        ^doubles heavy (:blur-heavy prep)
+        sample (fn [x y]
+                 (let [b (* 3 (+ (* (long x) W) (long y)))]
+                   (+ (* 0.2126 (aget heavy b))
+                      (* 0.7152 (aget heavy (inc b)))
+                      (* 0.0722 (aget heavy (+ b 2))))))]
+    (is (< (sample 100 30) 0.20)        ; deep interior: dominant stays dark
+        (str "dominant lightened in dark interior to " (format "%.3f" (sample 100 30))))
+    (is (< (sample 100 94) 0.35)        ; just inside the boundary: no light pull-across
+        (str "dominant pulled light near boundary to " (format "%.3f" (sample 100 94))))))
+
+
