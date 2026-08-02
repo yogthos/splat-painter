@@ -265,3 +265,40 @@
         (str "no bleed IN from the light side just inside the mass: got " (at dom (+ bl 6))))
     (is (> (at dom (- bl 6)) 0.85)
         (str "no bleed OUT onto the light side just outside it: got " (at dom (- bl 6))))))
+
+;; edge-width-field: total_variation / peak_gradient. Must separate a crisp
+;; low-contrast edge from a soft high-contrast one — the property :edge/:sharp
+;; lack. Amplitude-invariant: doubling the step contrast does not move width.
+(deftest edge-width-separates-crisp-from-soft
+  (testing "a 1px step is narrower than a ramped transition, regardless of contrast"
+    ;; crisp 1px vertical step: left half 0.2, right half 0.9
+    (let [crisp (gradient-img 32 32 (fn [x y] (if (< y 16) 0.2 0.9)))
+          ;; soft 8px ramp across the same boundary
+          soft  (gradient-img 32 32 (fn [x y]
+                                       (cond (< y 12) 0.2
+                                             (< y 20) (+ 0.2 (* 0.0875 (- y 12)))
+                                             :else 0.9)))
+          cw (s/edge-width-field crisp)
+          sw (s/edge-width-field soft)
+          ^doubles cwa (:width cw)
+          ^doubles swa (:width sw)
+          W (long (:w cw))
+          c-at (fn [x y] (aget cwa (+ (* (long x) W) (long y))))
+          s-at (fn [x y] (aget swa (+ (* (long x) W) (long y))))]
+      ;; both fields cover the full image
+      (is (= (* 32 32) (alength cwa)))
+      (is (= (* 32 32) (alength swa)))
+      ;; at the boundary the SOFT ramp reads WIDER than the crisp step
+      (is (< (c-at 16 15) (s-at 16 15))
+          (str "crisp edge width " (c-at 16 15) " must be < soft ramp width " (s-at 16 15))))))
+
+(deftest edge-width-is-amplitude-invariant
+  (testing "doubling the step contrast does not change the measured width"
+    (let [weak (gradient-img 32 32 (fn [x y] (if (< y 16) 0.3 0.5)))   ; 0.2 contrast
+          strong (gradient-img 32 32 (fn [x y] (if (< y 16) 0.1 0.9))); 0.8 contrast
+          ^doubles wwa (:width (s/edge-width-field weak))
+          ^doubles swa (:width (s/edge-width-field strong))
+          W 32
+          w-at (fn [a x y] (aget a (+ (* (long x) W) (long y))))]
+      (is (approx= 0.05 (w-at wwa 16 15) (w-at swa 16 15))
+          "width must not depend on contrast amplitude"))))

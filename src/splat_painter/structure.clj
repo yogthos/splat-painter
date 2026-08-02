@@ -200,6 +200,77 @@
       (dotimes [i n] (aset e i (Math/sqrt (* (aget e i) inv))))
       {:h H :w W :edge e})))
 
+(defn edge-width-field
+  "EDGE WIDTH at each pixel — total variation / peak gradient measured 1D ALONG
+   the gradient (across-edge) direction, the per-pixel analogue of the
+   translation-invariant measure in dev/harness/edgewidth.py. The contrast/
+   energy fields (:edge, :sharp) cannot tell a crisp low-contrast boundary from a
+   soft high-contrast one. A 2D square window cannot either: it catches the
+   gradient along the whole edge LENGTH, so every real edge reads ~(2R+1)
+   regardless of crispness and texture inflates it further. Measuring along the
+   gradient direction only removes the along-edge extent, and the ratio becomes
+   the transition SPREAD — ~1 for a 1px step, ~N for a ramp over N px, invariant
+   to the step's amplitude.
+
+   mag = sqrt(jxx+jyy), the Di Zenzo gradient magnitude (same source as full-edge);
+   direction phi = 0.5*atan2(2*jxy, jxx-jyy) (tensor major eigenvector = across-edge).
+   width = sum(mag)/max(mag) over +/-R taps along (cos phi, sin phi), nearest-sampled.
+   Flat regions (max below EPS) read 0.0.
+
+   fields.clj hangs this on the image as :edge-width. NOTHING IN THE RENDER PATH
+   CONSUMES IT YET — it exists because it is the only field that can answer whether a
+   boundary is soft or crisp IN THE SOURCE, which is the question behind the band
+   tier's drawn-outline artifact (splat-painter-olb). A gate built on it was measured
+   and NOT shipped: scaling the band side-push by softness moved edge width only
+   0.949 -> 0.962 at the ear and left the artifact visibly unchanged, while simply
+   lowering Cut-in to 0.75 reached 0.981 and removed it. Read
+   test/splat_painter/edgeprobe.clj for how to sample it."
+  [image]
+  (let [gf (gradient-field image)
+        H  (:h gf)  W (:w gf)
+        ^doubles jxx (:jxx gf) ^doubles jyy (:jyy gf) ^doubles jxy (:jxy gf)
+        n  (* H W)
+        R  8
+        ^doubles mag (double-array n)
+        ^doubles gcs (double-array n)
+        ^doubles gsn (double-array n)
+        ^doubles out (double-array n)
+        acc (double-array 2)
+        ^doubles taps (double-array (unchecked-inc (unchecked-multiply 2 R)))]
+    (dotimes [i n]
+      (let [g (Math/sqrt (+ (aget jxx i) (aget jyy i)))]
+        (aset mag i g)
+        (let [phi (* 0.5 (Math/atan2 (* 2.0 (aget jxy i)) (- (aget jxx i) (aget jyy i))))]
+          (aset gcs i (Math/cos phi))
+          (aset gsn i (Math/sin phi)))))
+    (dotimes [x H]
+      (dotimes [y W]
+        (let [ci (unchecked-add (unchecked-multiply x W) y)
+              cph (aget gcs ci) sph (aget gsn ci)
+              nt  (unchecked-inc (unchecked-multiply 2 R))]
+          (aset acc 1 0.0)
+          (dotimes [ti nt]
+            (let [d  (- (long ti) R)
+                  rr (long (max 0 (min (dec H) (Math/round (+ x (* d cph))))))
+                  cc (long (max 0 (min (dec W) (Math/round (+ y (* d sph))))))
+                  v  (double (aget mag (unchecked-add (unchecked-multiply rr W) cc)))]
+              (aset taps ti v)
+              (aset acc 1 (Math/max (aget acc 1) v))))
+          (let [mx (aget acc 1)]
+            (if (< mx 1.0e-8)
+              (aset out ci 0.0)
+              (let [half (* 0.5 mx)]
+                ;; FWHM along the across-edge direction: how many taps stay above
+                ;; half the peak. Contrast-invariant AND robust to neighbouring lines
+                ;; (a line 5px away sits below half-peak at this ridge, so it is not
+                ;; counted) — unlike sum/peak, which added every line in the window
+                ;; and read packed-but-crisp texture as soft.
+                (aset acc 0 0.0)
+                (dotimes [ti nt] (when (>= (aget taps ti) half)
+                                   (aset acc 0 (unchecked-inc (aget acc 0)))))
+                (aset out ci (aget acc 0))))))))
+    {:h H :w W :width out}))
+
 (defn bilateral-blur
   "EDGE-AWARE smooth colour field: a box window averaged with RANGE weights —
    each neighbour weighted by how close its raw luma is to the centre pixel's,
