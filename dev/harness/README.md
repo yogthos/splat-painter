@@ -131,6 +131,19 @@ hypothesis.
 `worst.py` — ranks 64×64 blocks by mean|d| against a registered source, so the
 regions that actually deviate pick themselves instead of being guessed at.
 
+`edgewidth.py` — **use this, not `distbleed.py`, to judge a silhouette.** Width is
+`total_variation / peak_gradient` per scanline, which is TRANSLATION-INVARIANT, and
+reported relative to the source. `distbleed` bins error by distance from the
+boundary, so a SUB-PIXEL difference in where a render puts its edge moves signal
+between bins — and renders do not share a sub-pixel edge position (integer
+registration measured (1,1), (1,0) and (0,1) across a single Cut-in sweep). Its
+1–2px bin is therefore dominated by registration rather than by the painter: it
+produced a non-monotonic Cut-in curve whose jumps line up exactly with the offset
+changes, and a byte-identical file read +0.0119 or +0.0831 depending only on which
+file was listed first. Registering every file against the first one is the specific
+trap; `distbleed` now registers each independently, but the 1–2px bin is still not
+evidence at sub-pixel scale.
+
 
 `score.py` — fidelity vs the source: ROI and whole-image mean|d|, plus "holes"
 (source-bright pixels the render made much darker).

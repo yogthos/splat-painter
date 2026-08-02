@@ -62,13 +62,24 @@ def luma(a):
 
 def main():
     r0, r1, c0, c1 = (int(v) for v in sys.argv[1:5])
-    paths = sys.argv[5:]
+    paths = [q for q in sys.argv[5:] if q != '--light']
+    LIGHT = '--light' in sys.argv
     ref = Image.open(paths[0])
     src = load(SRC, ref.size)
+    # REGISTER EACH FILE INDEPENDENTLY. The render sits ~1px off a Lanczos downscale
+    # of the source and at a strong boundary an uncompensated shift is a dipole that
+    # reads as a bleed. Renders do NOT all sit at the same offset -- measured (1,1),
+    # (1,0) and (0,1) across one Cut-in sweep -- so registering every file against the
+    # FIRST one silently injects a 1px error into the rest. That produced a bogus
+    # Cut-in halo curve once; do not go back to a shared offset.
     sl, so = luma(src), opp(src)
 
     S = sl[r0:r1, c0:c1]
-    dark = S < DARK
+    # --light measures the LIGHT side of the boundary instead of the dark side.
+    # A rim BRIGHTER than the light side is an overshoot/ringing signature and is
+    # invisible to the dark-side profile -- which is how it went unnoticed for
+    # several rounds of this investigation.
+    dark = (S >= DARK) if LIGHT else (S < DARK)
     dist = distance_transform_edt(dark)
     light = ~dark
     # the bleeding tone: mean chroma of the LIGHT side within 6px of the boundary
@@ -82,12 +93,21 @@ def main():
     Sopp = so[r0:r1, c0:c1]
     for p in paths:
         R = load(p)
+        best = None
+        for dx in (-2, -1, 0, 1, 2):
+            for dy in (-2, -1, 0, 1, 2):
+                t = np.roll(np.roll(R, dx, 0), dy, 1)[4:-4, 4:-4]
+                m = np.abs(t - src[4:-4, 4:-4]).mean()
+                if best is None or m < best[0]:
+                    best = (m, dx, dy)
+        _, dx, dy = best
+        R = np.roll(np.roll(R, dx, 0), dy, 1)
         rl = luma(R)[r0:r1, c0:c1]
         ro = opp(R)[r0:r1, c0:c1]
         dl = rl - S
         dc = np.linalg.norm(ro, axis=-1) - np.linalg.norm(Sopp, axis=-1)
         dh = (ro - Sopp) @ mdir
-        print(f'\n{p.split("/")[-1]}')
+        print(f'\n{p.split("/")[-1]}  [registered ({dx}, {dy})]')
         print(f'  {"dist(px)":>9s} {"n":>7s} {"dLuma":>9s} {"dC":>9s} {"dHue":>9s}')
         for lo, hi in BINS:
             m = dark & (dist >= lo) & (dist < hi)
