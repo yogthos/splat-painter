@@ -13,8 +13,7 @@
             [splat-painter.fields-test]
             [splat-painter.gpu-fields-test]
             [splat-painter.sharpen-test]
-            [splat-painter.hardness-test]
-            [splat-painter.edgeclip-test]))
+            [splat-painter.hardness-test]))
 
 (defmethod t/report :error [m]
   (t/with-test-out
@@ -40,8 +39,7 @@
                              ;; display (glimmer-gl.offscreen reports why)
                              'splat-painter.gpu-fields-test
                              'splat-painter.sharpen-test
-                             'splat-painter.hardness-test
-                             'splat-painter.edgeclip-test)
+                             'splat-painter.hardness-test)
         failed (+ (:fail results 0) (:error results 0))]
     (println (format "\n%d tests, %d passed, %d failed"
                      (:test results 0) (:pass results 0) failed))

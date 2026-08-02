@@ -87,59 +87,6 @@ vec4 fieldBilerp(sampler2D tex, float x, float y, vec2 dim, vec2 src){
   return mix(r0, r1, fy);                         // along the COL axis (y0->y1)
 }")
 
-;; --- per-fragment edge clip (splat-painter-c8e) -------------------------------
-;; Gaussian splats are symmetric and know nothing about boundaries. Every guard
-;; upstream — the Ev near-edge shrink, the sfoot footprint gate, the region
-;; consistency colour clamp — limits a stroke's SIZE or COLOUR near an edge, and
-;; none of them stops its BODY painting through. Measured at a head silhouette the
-;; result is a symmetric smear: the dark side reads +0.058 lighter at 1-2px while
-;; the light side reads -0.030 darker at 2-4px, i.e. the transition is simply wider
-;; than the source's. Cut-in is the only mechanism that fights it and it is spent —
-;; past its 1.5 ceiling the dark-line count triples.
-
-(def clip-tail
-  "pdf range over which the clip fades in, as [lo hi]. pdf is 0 at the stroke centre
-   and 0.5 at 1 sigma, so this leaves the core untouched and acts from ~1 to ~2
-   sigma outward. Clipping the CORE would let a mark placed on a boundary erase
-   itself; only the feathering tail is the problem."
-  [0.5 2.0])
-
-(def clip-lo
-  "Colour disagreement below which nothing is clipped. Must sit ABOVE the per-stroke
-   jitter the generator applies on purpose — tone is variation*0.15 and temperature
-   variation*0.10, and the region-consistency clamp already tolerates raw within
-   0.12 of the bilateral. Under that floor every stroke everywhere would be clipped."
-  0.18)
-
-(def clip-hi
-  "Colour disagreement at which the tail is fully clipped. Skin (~0.6) against a dark
-   ground (~0.05) is 0.55, so a real silhouette clears this comfortably."
-  0.45)
-
-(defn- smoothstep [lo hi x]
-  (let [t (max 0.0 (min 1.0 (/ (- (double x) (double lo)) (- (double hi) (double lo)))))]
-    (* t t (- 3.0 (* 2.0 t)))))
-
-(defn edge-clip-factor
-  "Alpha multiplier for one fragment — THE SPEC the quad fragment shader mirrors.
-
-   `amount` is the dial (0 = off, and 0 must be exact identity so the render stays
-   byte-identical to before this existed), `pdf` the fragment's squared Mahalanobis
-   distance from the stroke centre, `dc` the max per-channel disagreement between the
-   stroke's own colour and the bilateral of the ground it is painting over.
-
-   A stroke thus stops at a silhouette rather than feathering through it: a
-   skin-coloured stroke cannot paint into a dark background, and a map-coloured one
-   cannot paint into a jacket — one mechanism for both the ghosting and the bleed."
-  [amount pdf dc]
-  (let [amount (double amount)]
-    (if (<= amount 0.0)
-      1.0
-      (let [[tlo thi] clip-tail
-            tail (smoothstep tlo thi pdf)
-            cross (smoothstep clip-lo clip-hi dc)]
-        (max 0.0 (min 1.0 (- 1.0 (* amount tail cross))))))))
-
 (def detail-knee
   "Subjectness range over which a dial hands over from its floor to full strength,
    as [lo hi]. A LINEAR ramp is the wrong shape here: absolute subjectness is
@@ -386,10 +333,7 @@ void main(){
 }"))
 
 (def ^:private fs-src-quad
-  (str "#version 330 core
-const vec2  CLIP_TAIL = vec2(" (first clip-tail) ", " (second clip-tail) ");
-const float CLIP_LO   = " clip-lo ";
-const float CLIP_HI   = " clip-hi ";
+  "#version 330 core
 flat in vec3  v_color;
 flat in vec3  v_prec;
 flat in float v_hard;
@@ -404,12 +348,6 @@ uniform float u_opacity;
 uniform float u_tex_streak;      // bristle tonal-streak amount (0 = off)
 uniform float u_tex_grain;       // canvas-grain brightness+chroma amount (0 = off)
 uniform float u_tex_edge;        // edge-raggedness amount (0 = clean ellipse)
-uniform sampler2D u_blurTex;     // bilateral blur, full image res — the ground a
-                                 // stroke is painting over (see edge-clip-factor)
-uniform vec2  u_hw;              // image (H, W), for the texelFetch above. vec2 not
-                                 // ivec2: glimmer-gl has no glUniform2i binding, and a
-                                 // missing FFI var surfaces as Unknown class gl.
-uniform float u_clip;            // edge-clip amount (0 = off, exact identity)
 out vec4 frag;
 
 // hash-without-sine (Dave Hoskins) + bilinear value noise — no trig, no loops, no
@@ -460,19 +398,6 @@ void main(){
   float esf = (streak < 0.0) ? streak : streak * 0.35;
   float pdf = max(pdf0 * (1.0 + v_edge * 2.0 * esf), 0.0);
   float a = v_alpha * u_opacity * exp(-pow(pdf, v_hard));
-  // EDGE CLIP (mirror of shader/edge-clip-factor): stop the stroke at a silhouette
-  // instead of feathering through it. Only the TAIL is attenuated -- clipping the
-  // core would let a mark placed ON a boundary erase itself -- and only where the
-  // ground disagrees with the stroke's own colour by more than the per-stroke
-  // jitter. u_clip 0 skips the fetch entirely and is exact identity.
-  if (u_clip > 0.0) {
-    ivec2 px = clamp(ivec2(int(v_mean.y + v_d.y), int(v_mean.x + v_d.x)),
-                     ivec2(0), ivec2(int(u_hw.y) - 1, int(u_hw.x) - 1));
-    vec3 dv = abs(texelFetch(u_blurTex, px, 0).rgb - v_color);
-    float dc = max(dv.r, max(dv.g, dv.b));
-    a *= clamp(1.0 - u_clip * smoothstep(CLIP_TAIL.x, CLIP_TAIL.y, pdf0)
-                             * smoothstep(CLIP_LO, CLIP_HI, dc), 0.0, 1.0);
-  }
 
   // texture catches the LIGHT: bristle marks and tooth show in lit passages, not the
   // dark underlayers — gate by the stroke's own luminance so shadows stay smooth.
@@ -489,7 +414,7 @@ void main(){
   vec3  base = mix(vec3(lum), v_color, sat);   // same hue, varied richness
    vec3  col = clamp(base * bright, 0.0, 1.0);
    frag = vec4(col * a, a);        // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
-}"))
+}")
 
 ;; --- layer blit (layered repainting) ------------------------------------------
 ;; Attribute-less, like vs-src-quad: 6 GL_TRIANGLES from gl_VertexID cover the
@@ -550,11 +475,7 @@ void main(){
             :u_sig_max    (gl/gl-get-uniform-location prog "u_sig_max")
             :u_tex_streak (gl/gl-get-uniform-location prog "u_tex_streak")
             :u_tex_grain  (gl/gl-get-uniform-location prog "u_tex_grain")
-            :u_tex_edge   (gl/gl-get-uniform-location prog "u_tex_edge")
-            ;; edge clip: the ground a stroke paints over, plus its dimensions
-            :u_blurTex    (gl/gl-get-uniform-location prog "u_blurTex")
-            :u_hw         (gl/gl-get-uniform-location prog "u_hw")
-            :u_clip       (gl/gl-get-uniform-location prog "u_clip")}}))
+            :u_tex_edge   (gl/gl-get-uniform-location prog "u_tex_edge")}}))
 
 (defn build-program-blit
   "Compile + link the attribute-less layer blit (needs a current GL context).

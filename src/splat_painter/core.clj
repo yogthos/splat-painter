@@ -41,7 +41,6 @@
                                        ; orientation + position warp; 0 = structure only
 (defonce hardness-atom (r/atom 1.7))   ; edge crispness of detail strokes; large strokes always
 (defonce aa-atom       (r/atom 0.0))   ; ANTIALIAS present pass: edge-directed smoothing, runs after Sharpen
-(defonce clip-atom     (r/atom 0.0))   ; EDGE CLIP: stroke tails stop at a silhouette; 0 = off, byte-identical
                                        ; soften to a round gaussian (u_hard_soft fixed at 1.0)
 (defonce sharpen-atom  (r/atom 0.0))   ; final-output edge-gated unsharp on the composite; 0 = off
 ;; paint-texture experiment (render-time, quad shader only): pigment-like variance
@@ -165,7 +164,6 @@
 (defn- cur-contrast [] (or (some-> (System/getenv "GA_PAINTER_CONTRAST") Double/parseDouble)  @contrast-atom))
 (defn- cur-hardness [] (or (some-> (System/getenv "GA_PAINTER_HARDNESS") Double/parseDouble)  @hardness-atom))
 (defn- cur-aa       [] (or (some-> (System/getenv "GA_PAINTER_AA")       Double/parseDouble)  @aa-atom))
-(defn- cur-clip     [] (or (some-> (System/getenv "GA_PAINTER_CLIP")     Double/parseDouble)  @clip-atom))
 (defn- cur-sharpen [] (or (some-> (System/getenv "GA_PAINTER_SHARPEN") Double/parseDouble)  @sharpen-atom))
 (defn- cur-tex-streak [] (or (some-> (System/getenv "GA_PAINTER_TEX_STREAK") Double/parseDouble) @tex-streak-atom))
 (defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
@@ -590,21 +588,6 @@
         (gl/gl-uniform-1f (:u_tex_streak locs) (double (cur-tex-streak)))
         (gl/gl-uniform-1f (:u_tex_grain locs)  (double (cur-tex-grain)))
         (gl/gl-uniform-1f (:u_tex_edge locs)   (double (cur-tex-edge)))
-        ;; EDGE CLIP: bind the bilateral (the ground each stroke paints over) so the
-        ;; fragment shader can stop a stroke at a silhouette instead of feathering it
-        ;; through — see shader/edge-clip-factor. Unit 0 is the splat buffer, so this
-        ;; takes unit 2; restore the active unit afterwards like blit-to-pane! does.
-        (gl/gl-uniform-1f (:u_clip locs) (double (cur-clip)))
-        (gl/gl-uniform-2f (:u_hw locs) (double ih) (double iw))
-        ;; ALWAYS point u_blurTex at unit 2 and bind there, even when the clip is off.
-        ;; Leaving it at its default 0 puts a sampler2D and u_splats (a samplerBuffer)
-        ;; on the SAME unit, which is invalid: the draw is dropped and the frame comes
-        ;; out black. The shader still skips the fetch when u_clip is 0, so this costs
-        ;; one bind per draw and nothing per fragment.
-        (gl/gl-active-texture (+ gl/GL-TEXTURE0 2))
-        (gl/gl-bind-texture gl/GL-TEXTURE-2D (:blur fields))
-        (gl/gl-uniform-1i (:u_blurTex locs) 2)
-        (gl/gl-active-texture gl/GL-TEXTURE0)
         (gl/gl-enable gl/GL-SCISSOR-TEST)
         (gl/gl-scissor (int ox) (int oy) (int dw) (int dh))
         ;; COMPOSITING ORDER — all src-over, premultiplied, one scissor block so no
@@ -855,9 +838,9 @@
   "The slider atoms a committed layer must snapshot so re-selecting it reproduces the
    pass deterministically. Positional — snapshot-settings / restore-settings! use the
    same order. (count size broad mid fine detail variation curvature stroke contrast
-   hardness aa cutin clip swirl tex-streak tex-grain tex-edge.)"
+   hardness aa cutin swirl tex-streak tex-grain tex-edge.)"
   [count-atom size-atom broad-atom mid-atom fine-atom detail-atom variation-atom
-   curvature-atom stroke-atom contrast-atom hardness-atom aa-atom cutin-atom clip-atom swirl-atom
+   curvature-atom stroke-atom contrast-atom hardness-atom aa-atom cutin-atom swirl-atom
    tex-streak-atom tex-grain-atom tex-edge-atom])
 
 (defn snapshot-settings
@@ -1116,7 +1099,6 @@
    [slider "Antialias" 0.0  1.0   0.05  aa-atom]        ; smooths along edges AFTER Sharpen (kills the staircase); 0 = off
    [slider "Sharpen"   0.0  1.5   0.05  sharpen-atom]    ; final-output edge-gated unsharp; 0 = off
    [slider "Cut-in"    0.0  1.5   0.05  cutin-atom]     ; edge-band tier: restate silhouettes from their own sides; 0 = off
-   [slider "EdgeClip"  0.0  1.0   0.05  clip-atom]     ; stroke tails stop at a silhouette instead of feathering through; 0 = off
    [slider "Swirl"     0.0  1.0   0.02  swirl-atom]    ; Perlin share of the flow + position warp; 0 = image structure only
    [:separator {}]
    [slider "Streak"    0.0  0.6   0.02  tex-streak-atom]  ; bristle tonal grooves along the drag

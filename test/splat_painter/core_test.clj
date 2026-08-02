@@ -30,7 +30,6 @@
    ["GA_PAINTER_CONTRAST"   #'core/cur-contrast   #'core/contrast-atom   "1.4"   1.4]
    ["GA_PAINTER_HARDNESS"   #'core/cur-hardness   #'core/hardness-atom   "1.2"   1.2]
    ["GA_PAINTER_AA"         #'core/cur-aa         #'core/aa-atom         "1.0"   1.0]
-   ["GA_PAINTER_CLIP"       #'core/cur-clip       #'core/clip-atom       "0.6"   0.6]
    ["GA_PAINTER_TEX_STREAK" #'core/cur-tex-streak #'core/tex-streak-atom "0.3"   0.3]
    ["GA_PAINTER_TEX_GRAIN"  #'core/cur-tex-grain  #'core/tex-grain-atom  "0.2"   0.2]
    ["GA_PAINTER_TEX_EDGE"   #'core/cur-tex-edge   #'core/tex-edge-atom   "0.05"  0.05]])
