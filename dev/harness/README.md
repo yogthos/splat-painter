@@ -113,6 +113,21 @@ collapse-watch 27.5%, crow 26.4%. On Lenin the whole subject AND the wall map re
 ≥0.94, so Broad only acts in one corner. A day of olb work went into sweeping a
 control that could not affect the region under investigation.
 
+## Cold compile without destroying your cache
+
+    JOLT_CACHE_DIR=/tmp/coldcheck jolt -M:check     # 4.3s cold, 0.3s warm on re-run
+    JOLT_AOT_CACHE=OFF            jolt -M:check     # 3.2s, writes no cache
+
+Use one of these — NOT `rm -rf ~/.jolt/aot-cache` — for the `stroke-segments`
+compiler-pathology check (~4s healthy, >10s is the pathology). Both are
+non-destructive, keep the developer's warm cache, and work under a sandbox; the
+`rm` form is a destructive write to a home-directory path and gets DENIED for
+headless agents, which stalled one delegated run.
+
+Note the separate, already-fixed issue: AOT cache invalidation on file SIZE was a
+real bug up to jolt 0.5.11 and is gone as of 0.5.12 (re-confirmed on 0.5.17). Do
+not clear the cache before a red/green check on its account.
+
 ## Metrics
 
 **Check what your ROI actually contains before you trust a number from it.** The
