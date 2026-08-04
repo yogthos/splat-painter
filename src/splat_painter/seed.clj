@@ -454,6 +454,47 @@
 ;; tier painted — 120 charged vs 549 emitted at Splats 1000, the uncharged paint landing
 ;; on top of the budget. That is why the charge is measured per image now.
 
+;; --- the paint-per-candidate probe, shared by both measurement paths -----------
+;; band-paint-per-candidate runs these on the CPU with stroke-segments;
+;; gen/probe-band-ppc! runs the SAME level through the geometry shader as a
+;; band-only generation pass and divides the transform-feedback count by `probes`.
+;; They agree because the GS places candidate i of a level at poshash(i, lvl, 29/31),
+;; which is the stream the CPU probes draw from — see band-probe-spec.
+(def ^:private band-probes 128)
+;; mid-range for the tier (its ssz is min(band-ssz-max, finest), so 1.0–1.6 in
+;; practice); ppc is per-candidate, so it does not scale with the budget
+(def ^:private band-probe-ssz 1.5)
+
+(defn band-probe-spec
+  "The one description of what a paint-per-candidate probe IS, so the CPU
+   measurement and the GPU pass cannot measure different things.
+
+   `:levels` is a single band level in layer-params' own shape, with nx = the probe
+   count and ny 1 so the geometry shader's candidate index IS the probe index.
+   `:controls` are the reference settings the CPU measurement bakes in, expressed as
+   the generation uniforms that reproduce them: detail 1.0 (so D = min(1, dv·2.2)),
+   variation 0.5 (so szf = 1 + 0.5·(hash − 0.5)), broad 1.0 (so bgate = 1 and the
+   gate is 0.25 + 0.75·sgate), swirl 1.0 (the CPU pre-blends with with-swirl 1.0).
+   stroke only sets the coherence elongation and contrast only the colour, so
+   neither can change the emitted COUNT; they carry the CPU's values anyway.
+   Curvature is inert because the band's bendf is 0.
+
+   nx does not have to be the tier's real candidate count: ppc is per-candidate, so
+   the probe is self-consistent at any nx — which is what lets it bootstrap the
+   number that sizes nx."
+  []
+  {:probes band-probes
+   :controls {:detail 1.0 :variation 0.5 :stroke 2.0 :curvature 0.5 :contrast 1.0
+              :size-broad 1.0 :size-mid 1.0 :size-fine 1.0 :edge-band 1.0 :swirl 1.0}
+   :nlev 1
+   :warp 0.0                            ; inert: no Perlin warp at liner scale
+   :total band-probes
+   :levels [{:lvl band-lvl :ssz band-probe-ssz
+             :sp (* band-ovl (Math/sqrt (double band-segs)) band-probe-ssz)
+             :th band-th :nx band-probes :ny 1 :offset 0
+             :segs max-segs :stepf (step-frac band-lvl) :bendf 0.0
+             :map-kind :edge :sideo band-sideo :selong band-se :band true}]})
+
 (defn- band-level
   "The edge-band level map, or nil when the tier should not exist. `finest` is the
    finest admitted LADDER stdev — the band sits at or below it so it reads as a line
@@ -1356,10 +1397,14 @@
    broad 1 so bgate = 1): ppc is per-candidate, so it is independent of the budget
    and the strength dial; the remaining control dependence is second-order. Callers
    pass the orientation field pre-blended (with-swirl prep-noise 1.0) so every
-   caller measures the same number. Deterministic: same image, same probes."
+   caller measures the same number. Deterministic: same image, same probes.
+
+   The probe count, the probe stdev and those reference controls are band-probe-spec's
+   — gen/probe-band-ppc! runs the same spec through the geometry shader for the GPU
+   field path, and a second copy of any of them would silently measure something else."
   [dmap nf blur-px blurd-px H W]
-  (let [probes 128
-        ssz    1.5
+  (let [probes band-probes
+        ssz    band-probe-ssz
         rr     (/ (double H) 24.0)
         hd     (double (dec H))
         wd     (double (dec W))

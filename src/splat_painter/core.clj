@@ -463,7 +463,20 @@
         gpu (if (identical? img (:fields-img gpu))
               gpu
               (do (delete-field-textures! (:fields gpu))   ; free outgoing per-image textures
-                  (assoc gpu :fields (build-image-fields! img (:perm gpu)) :fields-img img)))]
+                  ;; with-band-ppc! measures the edge-band tier's realized paint per
+                  ;; candidate with one 128-candidate generation pass, but ONLY when the
+                  ;; field builder could not: gpu-fields/build-fields! leaves every field
+                  ;; in VRAM and so has no CPU arrays for seed/band-paint-per-candidate
+                  ;; to trace against, and without the measurement band-level's nx cap
+                  ;; falls back to a term that can never bind it (splat-painter-g1p).
+                  ;; The CPU fallback path arrives already measured and is passed through.
+                  ;; Safe here: every ensure-gpu! caller is mid-render with a complete
+                  ;; framebuffer bound, which the pass needs even under rasterizer
+                  ;; discard, and it runs once per image load rather than per drag.
+                  (let [f (build-image-fields! img (:perm gpu))]
+                    (assoc gpu :fields (gen/with-band-ppc! (:gen gpu) f (:tf-buf gpu)
+                                                           (:query gpu) (:gen-vao gpu))
+                               :fields-img img))))]
     (swap! gl-state assoc-in [area :gpu] gpu)
     gpu))
 

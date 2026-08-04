@@ -947,21 +947,18 @@ void main(){
                  :alpha (nth fl (+ b 8))}))
             (range n)))))
 
-(defn generate!
-  "Run the generation pass into `tf-buf` (a GL buffer bound to binding point 0). Sets
-   all uniforms from `controls` + `fields`, draws `total` candidate points through the
-   VS+GS with rasterizer discard, and returns {:count n :sig-min :sig-max}. Needs a
-   current context, a bound (complete) framebuffer, the gen program, a bound VAO, and
-   a query object `q`."
-  [gen fields controls tf-buf q vao {:keys [height width]}]
+(defn- run-gen!
+  "Set every uniform from `params` (layer-params' shape) + `controls` + `fields`, draw
+   `total` candidates through the VS+GS with rasterizer discard, and return the
+   transform-feedback count.
+
+   The shared body of generate! and probe-band-ppc!. The probe hand-builds a one-level
+   params map rather than solving a budget — it exists to MEASURE the number that
+   sizes the budget — but every other thing about the pass has to be identical, or it
+   is not measuring the tier the app paints with."
+  [gen fields controls params H W tf-buf q vao]
   (let [{:keys [program locs]} gen
-        {:keys [count size stroke detail variation curvature contrast
-                size-broad size-mid size-fine edge-band swirl]} controls
-        H (long height) W (long width)
-        params (seed/layer-params (:dmap fields) detail size variation curvature stroke
-                                  [(double (or size-broad 1.0)) (double (or size-mid 1.0))
-                                   (double (or size-fine 1.0)) (double (or edge-band 1.0))]
-                                  count H W)
+        {:keys [stroke detail variation curvature contrast size-broad swirl]} controls
         {:keys [nlev warp levels total]} params
         ;; finest-first level arrays, padded to max-levels
         pad (fn [xs d] (vec (take max-levels (concat xs (repeat d)))))
@@ -979,8 +976,7 @@ void main(){
         ;; side push / forced elongation per slot (mirror seed/layer-params). Padding
         ;; defaults match an ordinary liner: 0.55 sigma push, no forced elongation.
         sdo (pad (map (fn [l] (double (or (:sideo l) 0.55))) levels) 0.55)
-        sel (pad (map (fn [l] (double (or (:selong l) 0.0))) levels) 0.0)
-        [sig-min sig-max] (sig-range levels variation (or size-broad 1.0))]
+        sel (pad (map (fn [l] (double (or (:selong l) 0.0))) levels) 0.0)]
     (gl/gl-use-program program)
     ;; per-level + controls
     (gl/gl-uniform-1i (:u_nlev locs) (int nlev))
@@ -1032,5 +1028,61 @@ void main(){
     (gl/gl-end-transform-feedback)
     (gl/gl-end-query gl/GL-TRANSFORM-FEEDBACK-PRIMITIVES-WRITTEN)
     (gl/gl-disable gl/GL-RASTERIZER-DISCARD)
-    (let [n (gl/get-query-object-uiv q gl/GL-QUERY-RESULT)]
-      {:count n :sig-min sig-min :sig-max sig-max :total total})))
+    (gl/get-query-object-uiv q gl/GL-QUERY-RESULT)))
+
+(defn generate!
+  "Run the generation pass into `tf-buf` (a GL buffer bound to binding point 0). Sets
+   all uniforms from `controls` + `fields`, draws `total` candidate points through the
+   VS+GS with rasterizer discard, and returns {:count n :sig-min :sig-max}. Needs a
+   current context, a bound (complete) framebuffer, the gen program, a bound VAO, and
+   a query object `q`."
+  [gen fields controls tf-buf q vao {:keys [height width]}]
+  (let [{:keys [count size stroke detail variation curvature
+                size-broad size-mid size-fine edge-band]} controls
+        H (long height) W (long width)
+        params (seed/layer-params (:dmap fields) detail size variation curvature stroke
+                                  [(double (or size-broad 1.0)) (double (or size-mid 1.0))
+                                   (double (or size-fine 1.0)) (double (or edge-band 1.0))]
+                                  count H W)
+        {:keys [levels total]} params
+        [sig-min sig-max] (sig-range levels variation (or size-broad 1.0))
+        n (run-gen! gen fields controls params H W tf-buf q vao)]
+    {:count n :sig-min sig-min :sig-max sig-max :total total}))
+
+(defn probe-band-ppc!
+  "Measure the edge-band tier's realized paint per candidate on the fields currently
+   in VRAM, and return it as a double.
+
+   This is seed/band-paint-per-candidate's measurement taken with the geometry shader
+   instead of stroke-segments: a band-only pass over seed/band-probe-spec's probe
+   count, whose transform-feedback query already reports the emitted segments exactly.
+   The two agree because the GS places candidate i of a level at poshash(i, lvl,
+   29/31) — the stream the CPU probes draw from — and band-probe-spec is the single
+   description of the probe both paths run.
+
+   Why this exists: gpu-fields/build-fields! leaves every field in VRAM, so it has no
+   CPU nf/blur/blurd arrays for the CPU measurement to trace against. Without a
+   measurement band-level falls back to frac·band-trace, which is frac·6 against a
+   nominal frac·band-segs = frac·12 and so can never bind the nx cap — on ridge-dense
+   images the tier over-admits by up to 44% (splat-painter-g1p).
+
+   Costs one extra generation pass (128 candidates) and a one-integer readback, once
+   per image load. Leaves `tf-buf` holding the probe's splats, so callers must run
+   their own generate! before reading the buffer — which the render path does anyway."
+  [gen fields tf-buf q vao]
+  (let [{:keys [probes controls] :as spec} (seed/band-probe-spec)
+        n (run-gen! gen fields controls spec
+                    (long (:H fields)) (long (:W fields)) tf-buf q vao)]
+    (/ (double n) (double probes))))
+
+(defn with-band-ppc!
+  "`fields` with a measured :band-ppc on its :dmap, probing for it only when the dmap
+   does not already carry one.
+
+   The guard is what keeps the CPU field path (fields/prepare → upload-fields!, which
+   passes its own measured dmap straight through) from paying for a second pass and
+   from having its reference measurement replaced by the GPU's."
+  [gen fields tf-buf q vao]
+  (if (contains? (:dmap fields) :band-ppc)
+    fields
+    (assoc-in fields [:dmap :band-ppc] (probe-band-ppc! gen fields tf-buf q vao))))
