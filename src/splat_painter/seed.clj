@@ -1033,7 +1033,12 @@
      ;; demands are the UNTHINNED pools' charge, emission comes from the thinned ones.
      :det-demand det-demand :cand-thin cand-thin
      :cov-demand cov-demand :det-budget det-budget
-     :mid-demand mid-demand :fine-demand fine-demand :fine-thin fine-thin}))
+     :mid-demand mid-demand :fine-demand fine-demand :fine-thin fine-thin
+     ;; the mid/fine tier boundary (lvl < broad-end is mid, >= is fine). Returned so a
+     ;; consumer splitting emission by tier reads the SAME split the charge used —
+     ;; -M:yield kept its own copy of the old nlev formula and silently misattributed
+     ;; every tier the moment Detail stopped mapping onto 1+round(detail*6).
+     :broad-end broad-end}))
 
 ;; forward references: these are defined below but used by the placement pass above.
 ;; A cold AOT compile resolves a file top-down, so without the declare `jolt -M:check`

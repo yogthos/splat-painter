@@ -58,9 +58,20 @@
                 size-broad size-mid size-fine]} (merge base (when ctl-edn (read-string ctl-edn)))
         muls [size-broad size-mid size-fine edge-band]
         lp (seed/layer-params dmap detail size variation curvature stroke muls count H W)
-        ;; the tier split layer-params itself uses: broad-end = min(requested levels, 4)
-        broad-end (min 4 (max 1 (min 7 (inc (Math/round (* (double detail) 6.0))))))
-        px (:pixels img0)
+        ;; the tier split layer-params itself used, read back from it rather than
+        ;; recomputed here — this was a copy of the old nlev formula and went stale the
+        ;; moment Detail started mapping onto the achievable ladder depth instead
+        ;; (splat-painter-a65), which misattributed every mid/fine row below.
+        broad-end (long (:broad-end lp))
+        ;; the REAL colour fields, not the raw pixels. layered-means takes
+        ;; blur/blur-drift/blur-heavy, and the tracer's chroma-runaway stop reads them —
+        ;; it is a chain's dominant stop reason, so feeding raw pixels changes the very
+        ;; chain lengths this tool exists to report. It passed `px px` (and one arg short
+        ;; of the current arity, so it threw outright) — fields/prepare has already built
+        ;; all three above.
+        blur-px  (:blur img0)
+        blurd-px (:blur-drift img0)
+        blurh-px (:blur-heavy img0)
         layered-means #'splat-painter.seed/layered-means
         orig @#'splat-painter.seed/stroke-segments
         chains (atom [])
@@ -72,7 +83,7 @@
                                  (swap! chains conj [lvl (clojure.core/count rows) reason]))
                                [(mapv (fn [r] (conj r lvl)) rows) reason]))]
                (layered-means dmap nf detail size variation curvature stroke 1.0
-                              muls count H W px px))
+                              muls count H W blur-px blurd-px blurh-px))
         band?   (fn [s] (pos? (double (nth s 14))))
         ;; rows are 16-element vectors (idx 0-15) with lvl CONJ'd at index 16 above;
         ;; reading 15 (rcapf) misattributed every non-band segment
