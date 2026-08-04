@@ -20,7 +20,16 @@ env:
   # ~17 sites. Fixed in 0.5.6.
   # >= 0.5.13: par/threads trusts (.availableProcessors), which reported 1 before
   # that. On an older compiler the field builders would silently run serially.
-  JOLT_VERSION: v0.5.13
+  # Do NOT go back to 0.5.13: its dependency resolver shells out to
+  # `git checkout <sha> -`, and current git rejects that bare `-` as a pathspec, so
+  # it cannot fetch the pinned glimmer-gl/glimmer deps at all — warm cache or cold,
+  # on an unchanged deps.edn. v0.1.8 built with it on 2026-07-31, so this is a
+  # git-version-dependent latent failure in that compiler, not something in the tree;
+  # it would strand a release the day a runner image bumps git.
+  # v0.6.1 verified locally on aarch64-macos against a FRESH JOLT_CACHE_DIR (the
+  # cold path CI always takes): -M:test 156 tests / 1267 assertions green, -M:check
+  # green, --opt build green. Both target tarballs exist and still unpack to `jolt`.
+  JOLT_VERSION: v0.6.1
 
 jobs:
   build:
