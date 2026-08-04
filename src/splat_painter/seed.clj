@@ -594,6 +594,86 @@
     (let [n (long (:nx band))]
       (into [band] (mapv (fn [l] (update l :offset + n)) levels)))))
 
+;; --- detail-tier yield probe (splat-painter-zig) ---------------------------
+(declare emit-levels)
+;; The budget charges the mid/fine tiers a FITTED per-candidate constant (mid-yield
+;; 1.8, fine-yield 1.0). The real per-candidate yield is image-dependent — measured
+;; 0.53–2.20 across photos at one level — so budget spend varies ~2.5x per image and
+;; the Splats slider does not mean the same thing from one photo to the next. These
+;; fns replace the constants with a per-image MEASUREMENT at the tier's ADMITTED level
+;; geometry — the fallback ladder's own levels: yield is per-candidate, so the probe
+;; count is arbitrary but the level is the one the tier actually paints at — keeping
+;; the constants as the fallback. It is a PROBE, not a feedback loop: the two-pass
+;; lives inside layer-params (the ladder and scales are yield-free, so there is no
+;; second solve), and the probe itself is INJECTED per path — the CPU closure reuses
+;; emit-levels (the SAME emission reduce layered-means runs), the GPU closure reuses
+;; the geometry shader via gen/run-gen! — so the two can only disagree by the float
+;; precision parity.clj already bounds.
+(def tier-probe-count
+  "Probe candidates per tier pass. Matches band-paint-per-candidate's 128-probe sample:
+   per-candidate trace lengths are heavy-tailed 0..32, and 128 probes landed the band's
+   CPU/GPU pair EXACT on this hardware. The count does not change the MEASURED mean —
+   the yield is per-candidate — only its Monte-Carlo error."
+  128)
+
+(defn tier-probe-passes
+  "The probe's generation passes, in layer-params' own shape: the FALLBACK ladder's
+   levels, with one tier's detail levels at probe-nx — allocated proportional to each
+   level's real candidate pool (area/sp²), so the pass total is the nx-weighted tier
+   mean the demand charges — and every other level at nx 0. The WHOLE ladder rides in
+   the pass so the subdivision claims (lvl ≤ 2 hands cells to the finer rung) and the
+   band admission gate run exactly as they do in the real generation pass. Offsets are
+   cumulative over the probed levels, finest-first, as the GS decodes them. Returns
+   {:mid {:levels [...] :total n} :fine {:levels [...] :total n}}."
+  [geom broad-end probes]
+  (let [tier? (fn [l] (cond (:band l) nil
+                            (>= (:lvl l) broad-end) :fine
+                            (>= (:lvl l) 2) :mid
+                            :else nil))
+        pass (fn [tier]
+               (let [own (filter #(= tier (tier? %)) geom)
+                     total-nx (reduce + (map :nx own))
+                     nxs (when (pos? total-nx)
+                           (into {} (map (fn [l]
+                                           [l (long (Math/ceil (* (double probes)
+                                                                  (/ (double (:nx l))
+                                                                     (double total-nx)))))])
+                                         own)))]
+                 ;; :total is the PROBE's candidate count — the yield's divisor and the
+                 ;; GPU draw count — so it has to come off the PROBED levels, not `geom`'s
+                 ;; real pools. Bound once rather than recomputing the same loop verbatim:
+                 ;; two copies of the allocation is two places for it to drift.
+                 (let [probed (loop [rem geom off 0 out []]
+                                (if (empty? rem)
+                                  out
+                                  (let [l (first rem)
+                                        n (if nxs (or (nxs l) 0) 0)]
+                                    (recur (rest rem) (+ off n)
+                                           (conj out (assoc l :nx n :offset off))))))]
+                   {:levels probed :total (reduce + 0 (map :nx probed))})))]
+    {:mid (pass :mid) :fine (pass :fine)}))
+
+(defn tier-probe-yields
+  "CPU measurement of the detail tiers' realized paint-per-candidate at the fallback
+   ladder's geometry: two emission passes through emit-levels — the SAME reduce
+   layered-means runs, so the gate (subject/broad/thin-admit/claim), the warp, the
+   jitter and the tracer cannot drift from the shipping pass — mid levels at probe-nx
+   (band/coverage/fine at 0) and fine levels at probe-nx, each divided by its probe
+   pool. `geom` is layer-params' probe-ready geometry (raw :nx), `warp` the fallback's
+   warp gain. Returns {:mid-ppc m :fine-ppc f}; an absent tier reads 0."
+  [dmap nf blur-px blurd-px blurh-px geom broad-end probes warp
+   detail variation curvature stroke swirl tier-muls H W]
+  (let [passes (tier-probe-passes geom broad-end probes)
+        emit (fn [pass]
+               (if (zero? (:total pass))
+                 0.0
+                 (/ (double (count (emit-levels dmap nf (:levels pass)
+                                                detail variation curvature stroke
+                                                swirl tier-muls warp H W
+                                                blur-px blurd-px blurh-px)))
+                    (double (:total pass)))))]
+    {:mid-ppc (emit (:mid passes)) :fine-ppc (emit (:fine passes))}))
+
 (defn layer-params
   "Pure per-level placement parameters — THE SHARED SPEC for the CPU loop
    (layered-means) and the GPU generation pass, so both enumerate the same cells.
@@ -606,8 +686,16 @@
    threshold (−1 keeps all, base), nx·ny = candidate grid, offset = cumulative
    candidate-cell start (finest-first). :total = Σ nx·ny (candidate count the GPU
    draws as GL_POINTS). :warp = flat-region Perlin warp gain, :scale = the uniform
-   size-up that keeps the field under budget."
-  [dmap detail size variation curvature stroke tier-muls count H W]
+   size-up that keeps the field under budget.
+
+   A variadic `probe` (fn [probe-ready broad-end H W] → {:mid-ppc :fine-ppc}) measures
+   the detail tiers' realized per-candidate paint at the fallback ladder's own geometry
+   before the budget is solved; the measured yields replace the fitted constants in
+   `demand` (the constants remain the fallback). The probe is injected per path — the
+   CPU closure reuses emit-levels, the GPU closure reuses the geometry shader — so
+   layer-params stays pure and both paths charge the same numbers. No probe (all
+   existing callers) keeps the constants."
+  [dmap detail size variation curvature stroke tier-muls count H W & [probe]]
   (let [smax    (double size)
         slen    (stroke-len-frac stroke)
         budget  (min (double splat-budget) (max 500.0 (double count)))
@@ -924,6 +1012,47 @@
         ;; [broad mid fine] callers that predate the tier keep working unchanged.
         band (band-level dmap (nth tier-muls 3 1.0) area budget
                          (reduce min (map (fn [[_ ssz]] (double ssz)) admitted)))
+        ;; the YIELD PROBE (splat-painter-zig): the ladder and scales are yield-free —
+        ;; demand only sizes nx — so the detail tiers' per-candidate paint can be
+        ;; measured HERE, before the budget is charged: option-2 bootstrap, no feedback
+        ;; loop, no second solve. probe-ready mirrors the levels loop's per-level fields
+        ;; (tier-ppc-test pins that) with RAW nx (area/sp²) so the probe counts allocate
+        ;; proportional to the real candidate pools. The probe is INJECTED by the caller
+        ;; (CPU: layered-means runs emit-levels; GPU: gen/generate! runs the geometry
+        ;; shader) — layer-params stays pure and both paths share this geometry. The
+        ;; measured yields replace the fitted constants in demand below; a bare dmap or
+        ;; an absent probe keeps the constants.
+        probe-ready (when probe
+                      {:warp warp
+                       ;; band-prepend's nil guard, not (into [band] …): the band tier is
+                       ;; absent whenever Cut-in is 0 or the ladder is coarser than
+                       ;; liner-threshold, and a nil in the levels vector NPEs the moment
+                       ;; tier-probe-passes reads (:lvl l).
+                       :levels (band-prepend
+                                     (loop [rem (rseq admitted) out []]
+                                       (if (empty? rem)
+                                         out
+                                         (let [[lvl ssz] (first rem)
+                                               lvl (long lvl)
+                                               {:keys [segs stepf sp]} (phys-spec lvl ssz)]
+                                           (recur (rest rem)
+                                                  (conj out {:lvl lvl :ssz ssz :sp sp
+                                                             :th (thresh lvl)
+                                                             :nx (long (Math/ceil (/ area (* sp sp))))
+                                                             :ny 1 :offset 0
+                                                             :segs segs :stepf stepf
+                                                             :bendf (bend-frac lvl)
+                                                             :map-kind (level-map-kind lvl ssz)
+                                                             :sideo 0.55 :selong 0.0
+                                                             :band false})))))
+                                     band)})
+        measured (when (and probe (not (or (contains? dmap :mid-ppc)
+                                           (contains? dmap :fine-ppc))))
+                   (probe probe-ready broad-end H W))
+        dmap (if measured
+               (assoc dmap :mid-ppc (:mid-ppc measured)
+                            :fine-ppc (:fine-ppc measured))
+               dmap)
         ;; build FINEST-FIRST with cumulative candidate offsets, so GPU gl_VertexID
         ;; order == CPU emission order == paint order. :lvl stays the ORIGINAL index so
         ;; both paths' tiering (liner?, map-kind, raw-floor, …) still keys on it; :nlev
@@ -973,9 +1102,24 @@
                           ;; detail tiers carry their own measured yields: the fine tier
                           ;; sits on the min-phys floor and paints ~78% of what a mid
                           ;; candidate does, and one shared constant charged it the mid
-                          ;; rate and thinned its slice away again.
-                          segs-per-seed (cond (and detail? (>= (long lvl) broad-end)) (double fine-yield)
-                                              detail? (double mid-yield)
+                          ;; rate and thinned its slice away again. A per-image probe
+                          ;; (:mid-ppc/:fine-ppc on the dmap, measured at the fallback
+                          ;; ladder's own geometry) replaces the fitted constants —
+                          ;; they stay as the fallback for a bare dmap.
+                          ;; POSITIVE measurements only. `or` is wrong here: 0.0 is truthy
+                          ;; in Clojure, and tier-probe-yields returns 0.0 for a tier with
+                          ;; no levels in the probe (and would for a failed probe), so `or`
+                          ;; replaced the constant with a ZERO charge — demand collapses,
+                          ;; cand-thin pins at 1.0, the low-count cap stops firing and the
+                          ;; field blows its guard (2581 against a 1500 bound on the
+                          ;; admitted-levels-fit-the-budget fixture). A tier that measures
+                          ;; no paint must fall back, not charge nothing.
+                          yield-of (fn [measured fitted]
+                                     (let [m (double (or measured 0.0))]
+                                       (if (pos? m) m (double fitted))))
+                          segs-per-seed (cond (and detail? (>= (long lvl) broad-end))
+                                              (yield-of (:fine-ppc dmap) fine-yield)
+                                              detail? (yield-of (:mid-ppc dmap) mid-yield)
                                               :else   (double (seg-count lvl)))]
                       (* (double nx) (double surv) segs-per-seed)))
         cov-demand (reduce + 0.0 (map (fn [[lvl ssz]] (if (< (long lvl) 2) (demand lvl ssz) 0.0)) admitted))
@@ -1043,7 +1187,7 @@
 ;; forward references: these are defined below but used by the placement pass above.
 ;; A cold AOT compile resolves a file top-down, so without the declare `jolt -M:check`
 ;; on a clean checkout fails to resolve them (a warm ~/.jolt/aot-cache hides it).
-(declare sample-fields sample-arr)
+(declare sample-fields sample-arr emit-levels)
 
 (defn- edge-snap
   "Move a fine-stroke position onto the local EDGE RIDGE: sample edge strength at
@@ -1532,28 +1676,26 @@
                          (recur (inc i) (+ acc (count rows))))))))]
     (/ (double total) (double probes))))
 
-(defn- layered-means
+(defn- emit-levels
   "COARSE-TO-FINE placement: a base layer of large splats that FULLY COVERS the image —
    spacing < stdev ⇒ heavy overlap, so the (black) background can never show through — then
    progressively finer layers, each placed only where the wavelet detail is high enough, so
    detail accumulates ON TOP of an unbroken underpainting. There is no cell grid, so no cell
    facets; each splat's orientation/colour come from the flow + detail fields.
 
-   Per-level geometry (ssz/sp/th/nx/ny, budget scale, finest-first order) comes from
-   `layer-params` — the same spec the GPU generation pass consumes, so the two paths place
-   identical cells. Here we walk it on the CPU: threshold-test each cell, jitter + Perlin-warp
-   the surviving seed, then hand it to `stroke-segments` (base fill vs traced brush stroke).
-   Emits [x y size D sn tn alpha theta coherence] per SEGMENT (D = effective detail 0..1;
-   sn/tn = per-seed size/tone jitter hashes in [-0.5,0.5])."
-  [dmap nf detail size variation curvature stroke swirl tier-muls count H W blur-px blurd-px blurh-px]
+   Takes an EXPLICIT levels vector — the emission reduce split out of layered-means so the
+   yield probe (tier-probe-yields) can run the SAME gate + tracer over a small sample:
+   the probe feeds it the fallback ladder with the detail tiers' nx reduced to probe
+   counts and counts the emitted segments per tier. layered-means is layer-params followed
+   by this, with the caller's levels."
+  [dmap nf levels detail variation curvature stroke swirl tier-muls warp H W blur-px blurd-px blurh-px]
   (let [hd   (double (dec (long H))) wd (double (dec (long W)))
         iw   (long W) ih (long H)
         swirl (double swirl)
         deff (fn [D] (min 1.0 (* (double detail) (double D) 2.2)))
         rr   (/ (double H) 24.0)                    ; subjectness tap radius
         bmul (double (nth tier-muls 0))
-        bmin (min 1.0 bmul)
-        {:keys [warp levels]} (layer-params dmap detail size variation curvature stroke tier-muls count H W)]
+        bmin (min 1.0 bmul)]
     (persistent!
       (reduce
         (fn [acc [idx {:keys [lvl ssz sp th nx ny segs stepf bendf map-kind sideo selong]}]]
@@ -1768,6 +1910,31 @@
                         (recur (inc j) (reduce conj! acc emitted))))))))))))
         (transient [])
         (map-indexed vector levels)))))
+
+(defn- layered-means
+  "Per-level geometry (ssz/sp/th/nx/ny, budget scale, finest-first order) comes from
+   `layer-params` — the same spec the GPU generation pass consumes, so the two paths place
+   identical cells — then emit-levels walks them on the CPU: threshold-test each cell,
+   jitter + Perlin-warp the surviving seed, then hand it to `stroke-segments` (base fill vs
+   traced brush stroke). Emits [x y size D sn tn alpha theta coherence] per SEGMENT.
+   The variadic probe (see layer-params) measures the detail tiers' realized
+   paint-per-candidate at the fallback ladder's own geometry before the budget is solved,
+   so the demand charges the emission instead of the fitted constants."
+  [dmap nf detail size variation curvature stroke swirl tier-muls count H W blur-px blurd-px blurh-px]
+  (let [{:keys [warp levels]} (layer-params dmap detail size variation curvature stroke tier-muls count H W
+                                            (fn [probe-ready broad-end H W]
+                                              ;; (:levels …), not the whole map — geom is a
+                                              ;; levels SEQUENCE (tier-probe-passes filters
+                                              ;; it and reads :lvl per entry). The GPU
+                                              ;; closure in gen/generate! already does this.
+                                              (tier-probe-yields dmap nf blur-px blurd-px blurh-px
+                                                                 (:levels probe-ready)
+                                                                 broad-end tier-probe-count
+                                                                 (:warp probe-ready)
+                                                                 detail variation curvature stroke swirl
+                                                                 tier-muls H W)))]
+    (emit-levels dmap nf levels detail variation curvature stroke swirl tier-muls warp H W
+                 blur-px blurd-px blurh-px)))
 
 ;; --- precomputed smooth Perlin fields (flow angle, size, tone) ---------------
 ;; noise2 is ~30 ops; calling it 4× per splat over ~14k splats dominated the render.

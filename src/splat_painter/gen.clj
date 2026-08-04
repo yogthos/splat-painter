@@ -1030,6 +1030,28 @@ void main(){
     (gl/gl-disable gl/GL-RASTERIZER-DISCARD)
     (gl/get-query-object-uiv q gl/GL-QUERY-RESULT)))
 
+(defn tier-probe-yields!
+  "GPU measurement of the detail tiers' realized paint-per-candidate: the probe passes
+   (seed/tier-probe-passes) run through the geometry shader — the SAME gate+tracer the
+   shipping pass runs — each divided by its probe pool. Mirrors seed/tier-probe-yields;
+   the CPU/GPU agreement is pinned by tier-ppc-test. `geom` is layer-params'
+   probe-ready geometry (raw :nx), `warp` the fallback's warp gain. Costs two tiny
+   generation passes (128 candidates each) plus two one-integer readbacks, per render.
+   Leaves `tf-buf` holding the last probe's splats, so callers must run their own
+   generate! before reading the buffer — the render path does anyway."
+  [gen fields controls tf-buf q vao geom broad-end warp H W]
+  (let [passes (seed/tier-probe-passes geom broad-end seed/tier-probe-count)
+        run (fn [pass]
+              (if (zero? (:total pass))
+                0.0
+                (/ (double (run-gen! gen fields controls
+                                     {:nlev (clojure.core/count (:levels pass))
+                                      :warp warp
+                                      :levels (:levels pass) :total (:total pass)}
+                                     H W tf-buf q vao))
+                   (double (:total pass)))))]
+    {:mid-ppc (run (:mid passes)) :fine-ppc (run (:fine passes))}))
+
 (defn generate!
   "Run the generation pass into `tf-buf` (a GL buffer bound to binding point 0). Sets
    all uniforms from `controls` + `fields`, draws `total` candidate points through the
@@ -1043,7 +1065,20 @@ void main(){
         params (seed/layer-params (:dmap fields) detail size variation curvature stroke
                                   [(double (or size-broad 1.0)) (double (or size-mid 1.0))
                                    (double (or size-fine 1.0)) (double (or edge-band 1.0))]
-                                  count H W)
+                                  count H W
+                                  ;; the detail-tier yield probe (splat-painter-zig):
+                                  ;; measure the tiers' realized paint-per-candidate at
+                                  ;; the fallback ladder's own geometry through the
+                                  ;; geometry shader (the CPU closure reuses
+                                  ;; emit-levels; seed/tier-probe-yields and this agree
+                                  ;; to float precision, pinned by tier-ppc-test). The
+                                  ;; measured yields replace the fitted constants in
+                                  ;; demand; layer-params stays pure — the probe is a
+                                  ;; deterministic function of the geometry + fields.
+                                  (fn [probe-ready broad-end H W]
+                                    (tier-probe-yields! gen fields controls tf-buf q vao
+                                                        (:levels probe-ready) broad-end
+                                                        (:warp probe-ready) H W)))
         {:keys [levels total]} params
         [sig-min sig-max] (sig-range levels variation (or size-broad 1.0))
         n (run-gen! gen fields controls params H W tf-buf q vao)]
