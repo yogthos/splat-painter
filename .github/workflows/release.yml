@@ -11,25 +11,32 @@ on:
 permissions:
   contents: write   # create the release and upload assets
 
-env:
-  # Pinned to the version the suite is actually validated against locally. Upstream
-  # renamed both the binary and the release asset at 0.5.0, so moving this pin across
-  # that boundary means updating the asset name and every invocation below with it.
-  # Avoid 0.5.2 through 0.5.5: they cannot compile 3+ argument long arithmetic
-  # (jolt-l+/l-/l* went binary-only), which this codebase uses — seed/hash01 among
-  # ~17 sites. Fixed in 0.5.6.
-  # >= 0.5.13: par/threads trusts (.availableProcessors), which reported 1 before
-  # that. On an older compiler the field builders would silently run serially.
-  # Do NOT go back to 0.5.13: its dependency resolver shells out to
-  # `git checkout <sha> -`, and current git rejects that bare `-` as a pathspec, so
-  # it cannot fetch the pinned glimmer-gl/glimmer deps at all — warm cache or cold,
-  # on an unchanged deps.edn. v0.1.8 built with it on 2026-07-31, so this is a
-  # git-version-dependent latent failure in that compiler, not something in the tree;
-  # it would strand a release the day a runner image bumps git.
-  # v0.6.1 verified locally on aarch64-macos against a FRESH JOLT_CACHE_DIR (the
-  # cold path CI always takes): -M:test 156 tests / 1267 assertions green, -M:check
-  # green, --opt build green. Both target tarballs exist and still unpack to `jolt`.
-  JOLT_VERSION: v0.6.1
+# The compiler version is resolved at build time (see "Resolve jolt version"), not
+# pinned here: a release should ship a binary built by the current compiler, not by
+# whatever was current the last time someone edited this file.
+#
+# What makes that safe is ORDER: Test, Check and the --opt build all run BEFORE the
+# publish step, so a jolt release that cannot build this tree fails the job and uploads
+# nothing. The tag survives and the run can be retried. What it is NOT safe against is
+# a compiler that builds cleanly and paints differently — the gates would have to catch
+# that, and -M:check plus the seed goldens are what stand there.
+#
+# To pin during an incident, set the JOLT_PIN repository variable (Settings → Variables)
+# to a tag like v0.6.1. No workflow edit, no commit.
+#
+# History worth keeping, because every one of these was a real release-day failure:
+#  - Upstream renamed both the binary and the release asset at 0.5.0, so a pin below
+#    that boundary also needs the asset name and every invocation changed with it.
+#  - 0.5.2 through 0.5.5 cannot compile 3+ argument long arithmetic (jolt-l+/l-/l* went
+#    binary-only), which this codebase uses in ~17 sites including seed/hash01. Fixed
+#    in 0.5.6.
+#  - Below 0.5.13, par/threads saw (.availableProcessors) report 1, so the field
+#    builders silently ran serially.
+#  - 0.5.13's dependency resolver shells out to `git checkout <sha> -`, and current git
+#    rejects that bare `-` as a pathspec, so it cannot fetch the pinned glimmer-gl /
+#    glimmer deps at all — warm cache or cold, on an unchanged deps.edn. v0.1.8 built
+#    with it on 2026-07-31, so it is a git-version-dependent latent failure in that
+#    compiler rather than anything in the tree.
 
 jobs:
   build:
@@ -66,6 +73,25 @@ jobs:
           sudo "$ql" --update-cache
           cache=$(find /usr/lib -path '*gdk-pixbuf*' -name loaders.cache 2>/dev/null | head -1)
           echo "GDK_PIXBUF_MODULE_FILE=$cache" >> "$GITHUB_ENV"
+
+      # Latest release by default; JOLT_PIN (repo variable) overrides without a commit.
+      # Resolved once per job and echoed, so the build log always records which compiler
+      # produced the binary that got published — the pin used to be readable from the
+      # workflow file, and with "latest" the log is the only place that survives.
+      - name: Resolve jolt version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOLT_PIN: ${{ vars.JOLT_PIN }}
+        run: |
+          if [ -n "$JOLT_PIN" ]; then
+            ver="$JOLT_PIN"
+            echo "jolt: PINNED to $ver via the JOLT_PIN repository variable"
+          else
+            ver=$(gh api repos/jolt-lang/jolt/releases/latest --jq .tag_name)
+            [ -n "$ver" ] && [ "$ver" != "null" ] || { echo "could not resolve latest jolt"; exit 1; }
+            echo "jolt: latest release is $ver"
+          fi
+          echo "JOLT_VERSION=$ver" >> "$GITHUB_ENV"
 
       - name: Install jolt
         run: |
