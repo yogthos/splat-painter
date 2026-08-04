@@ -282,9 +282,21 @@
     ;; overshoot — measured above ~0.7 it stacked into the dark-line artifact with no
     ;; sharpness gain. Cutting it relocates band strokes (smaller perpendicular push),
     ;; so count + both means + Σcolour move; Σdet barely moves (same cov shapes).
-    (is (= 1218 (count splats)))
-    (is (approx= 0.5  27450.820  sx) "Σ mean-x")
-    (is (approx= 0.5  37457.686  sy) "Σ mean-y")
+    ;; (1218→992) Detail now maps onto the ACHIEVABLE ladder depth instead of a nominal
+    ;; 1+round(detail*6) rungs (splat-painter-a65), so this fixture's 0.6 is a partly
+    ;; faded-in rung part way down the ladder rather than the full one it used to reach.
+    ;; The dial's TOP is unchanged in what it can reach and slightly deeper in what it
+    ;; delivers (1.0 gives 1309 here against the old 1217, because requesting rungs the
+    ;; floor then drops no longer charges the two-tier split for them) — Σdet at 1.0 is
+    ;; 220306.053 against the old 220306.708, i.e. the same size classes. This value
+    ;; pins the FADE-IN rung: 0.6 admits levels 0-2 full plus a partial 3rd, so the
+    ;; interpolated size and its derived spacing are both under the guard here.
+    ;; (992→989) the edge-band tier's density now FADES IN over the rung below its
+    ;; liner-threshold precondition instead of switching on whole (band-fade-to); this
+    ;; fixture's 0.6 finest rung sits inside that window, so it gets slightly less band.
+    (is (= 989 (count splats)))
+    (is (approx= 0.5  23170.728  sx) "Σ mean-x")
+    (is (approx= 0.5  29339.062  sy) "Σ mean-y")
     ;; (219958.654→219919.378) the RIDGE CROP: a stroke's long axis is capped at
     ;; half the distance its ridge stays alive along its own tangent, so strokes
     ;; that would have painted past the end of their feature get shorter. Σdet
@@ -294,8 +306,13 @@
     ;; HERE because this fixture is a photograph: the crop bites where features
     ;; are a few px apart, and on img/collapse-watch.jpg it cuts inter-letter gap
     ;; ink 40.75→36.49. Anything that also moved the means would NOT be this.
-    (is (approx= 1.0  220306.708 sd) "Σ det(cov)")
-    (is (approx= 0.05 1425.018    sc) "Σ colour")))
+    ;; (220306.708→220561.981) the a65 remap again: a shallower ladder at this Detail
+    ;; trades fine rungs for coarser ones, so Σdet moves UP 0.12% while the count falls
+    ;; — fewer, larger strokes. Σdet barely moving while the count drops by a fifth is
+    ;; the signature of a ladder-depth change; a count change with Σdet held exactly
+    ;; would be a placement change and should be investigated instead.
+    (is (approx= 1.0  220560.133 sd) "Σ det(cov)")
+    (is (approx= 0.05 1097.259    sc) "Σ colour")))
 
 (deftest fine-seeds-trace-tapered-brush-strokes
   ;; the brush-stroke contract: a textured image yields fine-level chains whose segments
@@ -557,7 +574,12 @@
   ;; Before the gate the box field cannot see the 3px checker, so texture chains
   ;; run their full 32-seg span (median >> 8); after the gate they dry out fast.
   (let [H 160 W 160
-        detail 0.3 size 6.0 stroke 2.2 variation 0.5 curvature 0.5
+        ;; Detail 1.0, not 0.3: this test needs a LINER level to exist at all, and Detail
+        ;; is now the fraction of the achievable ladder depth rather than a request for
+        ;; 1+round(detail*6) nominal rungs (splat-painter-a65), so the deepest ladder — the
+        ;; one that reaches liner scale — is at the top of the dial. 0.3 now stops the
+        ;; ladder a rung or two short and there is no lvl>=2 level under 3.5px to test.
+        detail 1.0 size 6.0 stroke 2.2 variation 0.5 curvature 0.5
         tier-muls [0.4 0.4 0.4] cnt 600000
         img (attach-precomputed-fields
              {:height H :width W :channels 3
@@ -659,6 +681,7 @@
         seg-count #'splat-painter.seed/seg-count
         step-frac #'splat-painter.seed/step-frac
         stroke-len-frac #'splat-painter.seed/stroke-len-frac
+        max-segs @#'splat-painter.seed/max-segs
         stroke 2.05
         slen  (double (stroke-len-frac stroke))
         check (fn [cnt]
@@ -667,9 +690,22 @@
                           :let [lvl (long lvl) ssz (double ssz)
                                 liner? (or (>= lvl 4) (and (>= lvl 2) (< ssz 3.5)))]]
                     (when (and (>= lvl 2) (not liner?))
-                      (is (= (long (seg-count lvl)) (long segs))
+                      ;; "No liner span without liner discipline" lives in the STEP now, not
+                      ;; the segment cap: phys-spec gives every detail tier max-segs and lets
+                      ;; the geometry stop it (the FEATURE TRACER note there), and only the
+                      ;; coverage tiers 0-1 use the short seg-count table — which is what the
+                      ;; fat-liner case below already asserts. What a level without liner
+                      ;; discipline must not get is the liner STEP: it keeps the Stroke factor
+                      ;; (slen), so its chain is a coverage stroke, not a traced line.
+                      ;; The old assertion here demanded seg-count for a lvl>=2 non-liner,
+                      ;; which phys-spec has never done; it passed only because no such level
+                      ;; existed until Detail's fade-in rung could land above 3.5px.
+                      (is (approx= 1e-9 (* (double (step-frac lvl)) slen) (double stepf))
+                          (str "budget " cnt " lvl " lvl " ssz " ssz " stepf " stepf
+                               ": no liner step without liner discipline"))
+                      (is (= (long max-segs) (long segs))
                           (str "budget " cnt " lvl " lvl " ssz " ssz
-                               ": no liner span without liner discipline")))
+                               ": detail tiers run the feature tracer regardless of liner-ness")))
                     (when (and (>= lvl 2) liner? (>= ssz 2.6))
                       ;; a fat detail-level liner (ssz 2.6-3.5) runs the feature-tracer
                       ;; span too (the round-5a aspect cap is gone) — it is NOT on the
@@ -899,23 +935,29 @@
 (deftest ladder-depth-is-bounded-by-the-floor-not-by-detail
   ;; Redundancy is the only drop left, and it is also what TERMINATES the ladder: the level
   ;; after the one landing on min-phys is always within keep-ratio of it, so the ladder ends
-  ;; one rung past the floor however high Detail goes. Where an image's detail runs out at
-  ;; the floor (ladder-img, the DSC_8428 case) Detail above 0.6 therefore adds no rungs —
-  ;; the slider's advertised seven levels are bounded by Size and min-phys, not by Detail.
-  ;; Pins the bound so a future change to the drop rules cannot reopen the ladder into
-  ;; sub-paintable dust. (On dense-img, where detail survives past the floor, Detail DOES
-  ;; still add rungs — see fine-tier-is-admitted-and-thinned-not-dropped, 7 of them.)
+  ;; one rung past the floor however high Detail goes. The floor, not Detail, is the bound —
+  ;; pinned here so a future change to the drop rules cannot reopen the ladder into
+  ;; sub-paintable dust.
+  ;;
+  ;; This used to assert that Detail 0.6, 0.8 and 1.0 admit the SAME ladder, which was true
+  ;; and was the defect: Detail mapped onto a nominal seven rungs while the floor allowed
+  ;; four or five, so the top of the dial asked for rungs that were dropped as redundant and
+  ;; changed nothing (splat-painter-a65). Detail now maps onto the ACHIEVABLE depth, so the
+  ;; bound shows up as "1.0 reaches the floor and nothing goes below it" rather than as dead
+  ;; travel. The dial's own progression is pinned by detail-dial-* below.
   (let [dmap (wavelet/placement-map (ladder-img) (structure/analyze (ladder-img)))
         ladder-at (fn [det] (->> (seed/layer-params dmap det 6.0 0.5 0.5 2.5 [1.0 1.0 1.0 1.0] 4000 256 256)
-                                 :levels (remove :band) (mapv :ssz)))]
-    (is (= (ladder-at 0.6) (ladder-at 1.0))
-        (str "Detail 0.6 and 1.0 admit the same ladder: " (ladder-at 0.6) " vs " (ladder-at 1.0)))
-    (is (= (ladder-at 0.8) (ladder-at 1.0)) "and every Detail in between")
+                                 :levels (remove :band) (mapv :ssz)))
+        full (ladder-at 1.0)]
+    (is (approx= 1e-9 1.4 (reduce min full))
+        (str "Detail 1.0 reaches the min-phys floor and stops there: " full))
+    (is (every? (fn [l] (>= (double l) 1.4)) (mapcat ladder-at [0.0 0.2 0.4 0.6 0.8 1.0]))
+        "no rung anywhere on the dial goes below the floor")
     ;; strictly finer per rung, so no two rungs are the duplicate pass the redundancy rule
     ;; is there to drop (:levels is finest-first, so the sigmas run increasing)
-    (is (apply < (ladder-at 1.0)) "rungs stay strictly finer, finest-first")
+    (is (apply < full) "rungs stay strictly finer, finest-first")
     (is (every? (fn [[fine coarse]] (< fine (* 0.95 coarse)))
-                (partition 2 1 (ladder-at 1.0)))
+                (partition 2 1 full))
         "each rung clears keep-ratio against the one above it")))
 
 (deftest budget-cap-holds-at-both-ends-of-the-splats-range
@@ -1667,9 +1709,14 @@
   ;; floor for a single per-candidate constant across images whose yield spans ~1.1-2.0
   ;; (see detail-demand-tracks-what-the-tier-paints): raising the charge to chase 100% on a
   ;; low-yield image under-charges a high-yield one past the budget, which is just as wrong.
+  ;; Detail 1.0, not 0.6: the detail tier has to DOMINATE the field for a charge error to
+  ;; show up in the spend, and Detail is now the fraction of the achievable ladder depth
+  ;; (splat-painter-a65), so the full detail ladder is at the top of the dial rather than
+  ;; from 0.6 up. At 0.6 the ladder stops short and the field underspends for a reason that
+  ;; has nothing to do with the charge this test is about.
   (let [img (gray-img 256 256 (fn [x y] (if (odd? (+ (int (quot x 8)) (int (quot y 8)))) 0.15 0.85)))
         cnt 20000
-        {:keys [splats]} (seed/splat-field img {:count cnt :size 6.0 :detail 0.6 :stroke 2.5})]
+        {:keys [splats]} (seed/splat-field img {:count cnt :size 6.0 :detail 1.0 :stroke 2.5})]
     (is (>= (count splats) (* 0.70 cnt))
         (str "field must spend most of the budget: " (count splats) " of " cnt
              " (" (* 100.0 (/ (double (count splats)) cnt)) "%)"))))
@@ -1851,3 +1898,74 @@
         (str "dominant pulled light near boundary to " (format "%.3f" (sample 100 94))))))
 
 
+
+;; --- the Detail dial's travel (splat-painter-a65) -----------------------------
+
+(defn- detail-ladders
+  "The admitted ladder at each 0.05 step of the Detail dial, coarse→fine, on a
+   textured fixture at the settings the a65 staircase was measured at."
+  [H W size]
+  (let [img    (gray-img H W (fn [x y]
+                               (let [coarse (* 0.3 (+ 1.0 (Math/sin (* 0.03 (+ x (* 2 y))))))
+                                     mid    (* 0.12 (Math/sin (* 0.17 x)))
+                                     fine   (if (odd? (+ (quot x 2) (quot y 3))) 0.08 -0.08)]
+                                 (max 0.0 (min 1.0 (+ 0.25 coarse mid fine))))))
+        sfield (structure/analyze img)
+        dmap   (wavelet/placement-map img sfield)]
+    (mapv (fn [i]
+            (let [d  (/ (double i) 20.0)
+                  lp (seed/layer-params dmap d size 0.5 0.5 2.0 [0.4 2.2 2.2 1.4]
+                                        570000 H W)
+                  ladder (remove :band (:levels lp))]
+              {:detail d
+               :finest (reduce min (map :ssz ladder))
+               :rungs  (count ladder)
+               :total  (long (:total lp))
+               :sizes  (mapv (fn [l] (double (:ssz l))) (sort-by :lvl ladder))}))
+          (range 0 21))))
+
+(deftest detail-dial-progresses-over-its-whole-travel
+  ;; The dial was a 4-step staircase: nlev = 1+round(detail*6) asks for up to 7 rungs
+  ;; while the ladder saturates at 4-5 (the rest clamp to min-phys and drop as
+  ;; redundant), so Detail above ~0.6 changed NOTHING — measured 11 of 20 steps dead,
+  ;; 55% of the dial, and only 5 distinct ladders over the travel.
+  (let [rows (detail-ladders 192 192 6.0)
+        fin  (mapv :finest rows)
+        dead (count (filter (fn [[a b]] (== (double a) (double b)))
+                            (mapv vector fin (rest fin))))]
+    (is (< (double (last fin)) (double (nth fin 10)))
+        (str "the top half of the dial must still refine: Detail 0.5 finest "
+             (nth fin 10) " vs Detail 1.0 finest " (last fin)))
+    (is (<= dead 4)
+        (str "at most a few steps may repeat; " dead " of " (dec (count fin))
+             " changed nothing. finest: " (mapv (fn [f] (format "%.2f" f)) fin)))))
+
+(deftest detail-dial-is-monotone
+  ;; Raising Detail must never coarsen the ladder and must never spend LESS: at
+  ;; nlev 5 the two-tier budget split engaged and thinned the mid rungs, so Detail
+  ;; 0.60 painted FEWER candidates than 0.55 (454760 -> 422919 on the Lenin frame)
+  ;; — the opposite of what the dial says it does.
+  (let [rows (detail-ladders 192 192 6.0)]
+    (doseq [[a b] (mapv vector rows (rest rows))]
+      (is (<= (double (:finest b)) (double (:finest a)))
+          (str "finest size grew from Detail " (:detail a) " to " (:detail b)
+               ": " (:finest a) " -> " (:finest b)))
+      (is (>= (:rungs b) (:rungs a))
+          (str "rung count fell from Detail " (:detail a) " to " (:detail b)
+               ": " (:rungs a) " -> " (:rungs b)))
+      (is (>= (double (:total b)) (* 0.98 (double (:total a))))
+          (str "candidate total fell from Detail " (:detail a) " to " (:detail b)
+               ": " (:total a) " -> " (:total b))))))
+
+(deftest detail-dial-has-no-cliff
+  ;; The finest ladder size halved in ONE step (6.00 -> 3.00 at Detail 0.05->0.10),
+  ;; which is also where the edge-band tier's precondition (finest < liner-threshold)
+  ;; flips — so the bottom of the dial went from no contours at all to fully drawn
+  ;; ones between two adjacent notches. A 0.05 notch may refine, but not by half.
+  (let [rows (detail-ladders 192 192 6.0)
+        fin  (mapv :finest rows)
+        step (fn [[a b]] (/ (- (double a) (double b)) (double a)))
+        worst (reduce max (mapv step (mapv vector fin (rest fin))))]
+    (is (< worst 0.30)
+        (str "largest single-notch refinement is " (format "%.1f%%" (* 100.0 worst))
+             " of the finest size; finest: " (mapv (fn [f] (format "%.2f" f)) fin)))))

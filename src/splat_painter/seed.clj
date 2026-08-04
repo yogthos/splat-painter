@@ -407,6 +407,14 @@
                                       ; measured overshoot — above ~0.7 dark lines rise sharply with no sharpness gain
                                       ; (the band's dark-line stacking is coupled to this push; see band-dark-lines test)
 (def ^:private band-ssz-max 1.6)      ; the band paints a LINE; above this it would read as a daub
+;; finest-rung stdev at which the tier reaches FULL density (see band-level's fade).
+;; band-ssz-max, because that is exactly where the band stops being squeezed by the
+;; ladder: its own stdev is max(1, min(band-ssz-max, finest)), so below this the tier is
+;; fully itself and has no reason to be held back, and above it the band is still wearing
+;; the ladder's size. Not a tuned number — the range over which the geometry is partial
+;; is the range over which the density should be. Nothing at or below it moves, which
+;; covers every default-ish render (finest lands on the 1.4 min-phys floor).
+(def ^:private band-fade-to band-ssz-max)
 (def ^:private band-lvl 7)            ; outside the ladder's 0..6, so poshash streams can never collide
 (def ^:private band-share 0.25)       ; hard ceiling on the band tier's slice of the working budget
 ;; The Cut-in dial scales this tier's density. Measured sweep on the test portrait
@@ -507,7 +515,14 @@
    LADDER rungs get painted, and a control that silently did nothing below some other
    slider's threshold would be a worse dial than no dial. The one structural
    precondition stays — the ladder must itself be painting lines (finest below
-   liner-threshold), because a band drawn at daub scale is not a band.
+   liner-threshold), because a band drawn at daub scale is not a band. It FADES IN
+   across the rung below that threshold rather than switching on at full density:
+   the precondition is a statement about scale, and scale is continuous, so a step
+   there is an artifact of writing it as a boolean. Measured at default Size, the
+   switch cost 31288 -> 109677 candidates across one Detail notch — the largest
+   remaining discontinuity on that dial once its ladder was made continuous
+   (splat-painter-a65). Full strength by band-fade-to, so every default-ish render
+   (finest lands at the 1.4 min-phys floor) is unaffected.
 
    Budget: candidates are gated on the EDGE-map fraction, so a tier that only ever
    paints a thin band cannot charge the budget as though it covered the image; the
@@ -517,7 +532,14 @@
   [dmap strength area budget finest]
   (when (and (pos? (double strength))
              (< (double finest) liner-threshold))
-    (let [frac (detail-fraction dmap :edge band-th)]
+    (let [;; smoothstep on the tier's DENSITY (the Cut-in dial's own axis), 0 at the
+          ;; precondition and 1 by band-fade-to. Rides `strength`, so all three places
+          ;; the dial acts — the off switch, the seed spacing and the nx cap — fade
+          ;; together and the tier grows in from zero seeds instead of appearing whole.
+          u        (min 1.0 (max 0.0 (/ (- liner-threshold (double finest))
+                                        (- liner-threshold band-fade-to))))
+          strength (* (double strength) u u (- 3.0 (* 2.0 u)))
+          frac (detail-fraction dmap :edge band-th)]
       (when (pos? frac)
         (let [ssz    (max 1.0 (min band-ssz-max (double finest)))
               ;; the dial scales DENSITY, so it divides the spacing by √strength
@@ -591,7 +613,11 @@
         budget  (min (double splat-budget) (max 500.0 (double count)))
         warp    (* 0.95 (double curvature))
         area    (double (* (long H) (long W)))
-        nlev    (long (max 1 (min 7 (inc (Math/round (* (double detail) 6.0))))))
+        ;; the ladder's hard ceiling. Detail no longer maps onto it directly — it maps
+        ;; onto however much of it the min-phys floor actually leaves reachable (nmax
+        ;; below), because the top of this range is unreachable at most Sizes and the
+        ;; dial spent its last third asking for rungs that were dropped as redundant.
+        nlev-max 7
         thresh  (fn [lvl] (if (zero? (long lvl)) -1.0 (min 0.9 (* 0.26 (double lvl)))))
         ;; level size ladder: halves per level down to level 4, then decays gently
         ;; (×0.7 per level) with a ~pixel floor — the finest detail lands at a
@@ -680,7 +706,11 @@
         ;; so their term is multiplied accordingly — the budget counts splats, not seeds.
         ;; Each fine level estimates its survivor fraction on ITS OWN map (aggregate vs
         ;; sharp fine-band — the same map it thresholds against when placing).
-        lvl-frac (fn [lvl] (detail-fraction dmap (level-map-kind lvl (nsize lvl)) (thresh lvl)))  ; nominal size here — the whole budget pass is nominal-keyed
+        ;; MEMOIZED: each frac is an O(H·W) scan of a placement map, and the budget is
+        ;; now solved more than once per call (the achievable-depth probe below), so an
+        ;; unmemoized one would multiply the cost of every slider drag by the probe.
+        lvl-frac (memoize
+                  (fn [lvl] (detail-fraction dmap (level-map-kind lvl (nsize lvl)) (thresh lvl))))  ; nominal size here — the whole budget pass is nominal-keyed
         ;; SUBDIVISION within the broad/mid tiers only: levels 1-2 hand cells off to
         ;; the next-finer level (exclusive fractions). From level 3 up the finer
         ;; levels OVERLAP instead of claiming — mid keeps painting under the fine
@@ -695,14 +725,15 @@
         ;; the broad-tier grid runs at bmin spacing, so its budget terms carry bmin²
         ;; (and the base integrates the bokeh thinning via E[1/m²]).
         einv (if (== bmul 1.0) 1.0 (mean-inv-m2 dmap bmul))
-        k-of (fn [lvl]
-               (let [f (cond
+        k-of (fn [n lvl]
+               (let [n (long n)
+                     f (cond
                          (zero? (long lvl))        (* einv bmin bmin)
                          (== (long lvl) 1)         (* bmin bmin
-                                                      (if (< 1 (dec nlev))
+                                                      (if (< 1 (dec n))
                                                         (max 0.0 (- (lvl-frac 1) (lvl-frac 2)))
                                                         (lvl-frac 1)))
-                         (and (<= (long lvl) 2) (< (long lvl) (dec nlev)))
+                         (and (<= (long lvl) 2) (< (long lvl) (dec n)))
                                                    (max 0.0 (- (lvl-frac lvl) (lvl-frac (inc (long lvl)))))
                          :else                     (lvl-frac lvl))
                     sp (sp-of lvl 1.0)]
@@ -710,19 +741,24 @@
                 ;; max-segs cap — actual length is data-dependent (geometry decides), so
                 ;; the estimate is approximate by construction. segs=32 here would blow it up.
                 (/ (* (double expected-segs) f area) (* sp sp))))
-        Kc (reduce + 0.0 (map k-of (range 0 (min nlev 4))))
-        Kf (if (> nlev 4) (reduce + 0.0 (map k-of (range 4 nlev))) 0.0)
-        scale-c (max 1.0 (Math/sqrt (/ Kc budget)))
-        ;; fine-tier remaining budget (the slice left after the broad/mid tier 0–3 has
-        ;; taken its scale-c share). Reused by scale-f and the admission gate.
-        fine-rem (if (> nlev 4)
-                   (max (* 0.15 (double budget)) (- (double budget) (/ Kc (* scale-c scale-c))))
-                   0.0)
-        scale-f (if (<= nlev 4)
-                  scale-c
-                  (max scale-c (Math/sqrt (/ Kf fine-rem))))
-        scale-of (fn [lvl] (if (<= (long lvl) 3) scale-c scale-f))
-        scale scale-c
+        ;; the two-tier budget solve for a REQUESTED rung count. A function of n rather
+        ;; than of the one nlev, so the achievable-depth probe below can ask what a
+        ;; deeper request would cost without committing to it.
+        solve (fn [n]
+                (let [n  (long n)
+                      Kc (reduce + 0.0 (map (fn [l] (k-of n l)) (range 0 (min n 4))))
+                      Kf (if (> n 4) (reduce + 0.0 (map (fn [l] (k-of n l)) (range 4 n))) 0.0)
+                      scale-c (max 1.0 (Math/sqrt (/ Kc budget)))
+                      ;; fine-tier remaining budget (the slice left after the broad/mid tier
+                      ;; 0–3 has taken its scale-c share). Reused by scale-f and the gate.
+                      fine-rem (if (> n 4)
+                                 (max (* 0.15 (double budget))
+                                      (- (double budget) (/ Kc (* scale-c scale-c))))
+                                 0.0)]
+                  {:scale-c scale-c :fine-rem fine-rem
+                   :scale-f (if (<= n 4)
+                              scale-c
+                              (max scale-c (Math/sqrt (/ Kf fine-rem))))}))
         ;; build FINEST level first (lvl nlev-1 → 0), assigning cumulative candidate offsets
         ;; in that same order, so GPU gl_VertexID order == CPU emission order == paint order.
         ;; Each level carries its SCALE-RELATIVE stroke behaviour: segment count, step
@@ -748,6 +784,105 @@
         ;; segs-invariant below the 14-seg spacing cap, so the estimate is robust
         ;; to the final segs differing — shorter final chains spend less than
         ;; estimated, which errs conservative.
+        ;; ADMISSION coarse→fine: keep a level only if it is meaningfully finer than the
+        ;; previous (keep-ratio) AND the budget affords its clamped survivor demand. The
+        ;; physical ssz is clamped to step-ratio×prev so the ladder is strictly monotone,
+        ;; floored at min-phys (never sub-pixel dust). Dropping a level drops every finer
+        ;; one too — a monotone ladder the budget cannot reach simply ends earlier.
+        ;; MIN PAINTABLE STROKE. A stroke below ~1.4px stdev does not read as a mark,
+        ;; it reads as a scratch: the render shader already eases hardness back to a
+        ;; pure gaussian below 2.5px because anything thinner aliases. At Size 6 with
+        ;; the tier dials at 0.4 the nominal ladder asks for 0.6px and 0.3px strokes;
+        ;; floored at 0.6 those became two hairline levels covering just 6% and 14% of
+        ;; the image — sparse, aligned, alpha ~0.6 marks that scratch the underpainting
+        ;; instead of building a surface (the contour thatch). Clamping UP to the
+        ;; minimum paintable size instead keeps the detail and loses the thatch: sp is
+        ;; derived from the clamped ssz (phys-spec below), so seed count falls as
+        ;; (ssz/min-phys)² and the ink is preserved at a paintable scale. This is a
+        ;; no-op wherever the ladder already lands above 1.4px (any default-ish Size).
+        ;; Defect A: lowered 2.2 -> 1.4 so the Mid/Fine dials can MOVE the detail level
+        ;; (at 2.2 it pinned at exactly 2.20 and both dials were dead). The redundancy
+        ;; drop above still prevents two levels piling here (the original thatch), so a
+        ;; single 1.4px detail level reads as a soft glaze, not a scratch-field.
+        min-phys   1.4
+        step-ratio 0.7
+        keep-ratio 0.95
+        ;; THE LADDER, for a requested rung count and a fade-in fraction for its finest
+        ;; rung. `frac` < 1 puts that last rung PART WAY between its parent's size and
+        ;; its own: at frac 0 it equals its parent (so the redundancy drop below removes
+        ;; it) and at frac 1 it is the full rung. That is what makes Detail continuous —
+        ;; a new stroke scale fades in by shrinking and densifying (sp is derived from
+        ;; ssz, so its candidate count grows as it goes), instead of a whole rung
+        ;; appearing at half the parent's size between two adjacent notches.
+        ladder (fn [n frac scale-c scale-f]
+                 (let [n (long n)
+                       frac (double frac)
+                       scale-of (fn [lvl] (if (<= (long lvl) 3) scale-c scale-f))
+                       ssz0 (* (scale-of 0) (nsize 0))]
+                   (loop [lvl 1 prev (double ssz0)
+                          acc [[(long 0) ssz0]]]
+                     (if (>= lvl n)
+                       acc
+                       (let [raw (* (scale-of lvl) (nsize lvl))
+                             full (max min-phys (min raw (* step-ratio prev)))
+                             ssz (if (and (== lvl (dec n)) (< frac 1.0))
+                                   (max min-phys
+                                        (* prev (Math/pow (/ full prev) frac)))
+                                   full)]
+                       ;; REDUNDANCY is now the ONLY drop: once min-phys clamps two levels
+                       ;; to the same physical size (Size 6 + tiers 0.4 puts both 2 and 3 on
+                       ;; the floor) the finer one is a duplicate pass, not extra detail.
+                       ;; Dropping it cannot coarsen anything — it is the same size as its
+                       ;; parent — and it is what terminates the ladder: the level after the
+                       ;; one that lands on min-phys is always redundant, so the ladder ends
+                       ;; a rung past the floor however high Detail goes.
+                       ;;
+                       ;; The fine tier used to be dropped outright when its cost exceeded
+                       ;; the remaining budget, which is why Detail did nothing above 0.6:
+                       ;; at Size 13.66 on a 1MP frame level 4 wants ~182k candidates and
+                       ;; was 41x over its slice, so it was dropped whole and the slider had
+                       ;; no levels left to add. It is now ADMITTED AND THINNED against that
+                       ;; slice like levels 2-3 are against theirs (fine-thin below), so it
+                       ;; contributes detail in proportion to what the budget affords instead
+                       ;; of nothing at all.
+                         (if (>= ssz (* keep-ratio prev))
+                           acc                                ; drop this + every finer
+                           (recur (inc lvl) ssz
+                                  (conj acc [(long lvl) ssz]))))))))
+        ;; ACHIEVABLE DEPTH — how many rungs the min-phys floor actually leaves. The
+        ;; dial used to map onto nlev-max: nlev = 1+round(detail·6) asked for 6 and 7
+        ;; rungs at Detail 0.75 and 1.0 while the ladder saturated at 4, so the top
+        ;; third of the travel changed NOTHING (measured 11 of 20 notches dead on the
+        ;; Lenin frame at Size 6, 55% of the dial) and the whole travel held 4 steps.
+        ;;
+        ;; A fixed point, not one probe: a deeper request raises Kf, hence scale-f,
+        ;; hence the fine rungs' size, hence how many fit above the floor — so asking
+        ;; for 7 can report more than asking for 5 delivers. The map is monotone in n
+        ;; and each round can only shrink it, so iterating from the ceiling converges
+        ;; downward; 4 rounds is far past what any real ladder needs (rungs 0-3 do not
+        ;; move at all once n >= 4, because Kc sums range(0,4) and the subdivision
+        ;; predicates saturate there — only a live fine tier can iterate at all).
+        nmax (loop [n (long nlev-max) i 0]
+               (let [{:keys [scale-c scale-f]} (solve n)
+                     got (clojure.core/count (ladder n 1.0 scale-c scale-f))]
+                 (if (or (>= got n) (>= i 3))
+                   (long (max 1 (min n got)))
+                   (recur (long got) (inc i)))))
+        ;; Detail over the ACHIEVABLE range, continuously. depth is in rungs past the
+        ;; base; its whole part is how many full rungs to admit and its fraction is how
+        ;; far the next one has faded in. Detail 1.0 therefore lands exactly on the
+        ;; deepest ladder this Size and these tier dials can reach, and every notch
+        ;; below it moves something.
+        depth  (* (double detail) (double (dec nmax)))
+        dfull  (long (Math/floor depth))
+        dfrac  (- depth (double dfull))
+        ;; request the partial rung as a real level whenever there is one to fade in
+        nlev   (long (max 1 (min nmax (+ 1 dfull (if (pos? dfrac) 1 0)))))
+        frac   (if (pos? dfrac) dfrac 1.0)
+        {:keys [scale-c scale-f fine-rem]} (solve nlev)
+        scale-of (fn [lvl] (if (<= (long lvl) 3) scale-c scale-f))
+        scale scale-c
+        ssz0  (* (scale-of 0) (nsize 0))
         ;; PHYSICAL per-level stroke spec for a given FINAL (post-clamp) stdev. Factored
         ;; out so the coarse→fine admission pass and the finest-first output pass derive
         ;; identical segs/stepf/ovl/sp from the same ssz. ldisc? is the PHYSICAL liner
@@ -776,61 +911,12 @@
                                (* ovl (scale-of lvl) bmin (lsize lvl))
                                (* ovl ssz))]
                         {:segs segs :stepf stepf :sp sp}))
-        ;; ADMISSION coarse→fine: keep a level only if it is meaningfully finer than the
-        ;; previous (keep-ratio) AND the budget affords its clamped survivor demand. The
-        ;; physical ssz is clamped to step-ratio×prev so the ladder is strictly monotone,
-        ;; floored at min-phys (never sub-pixel dust). Dropping a level drops every finer
-        ;; one too — a monotone ladder the budget cannot reach simply ends earlier.
-        ;; MIN PAINTABLE STROKE. A stroke below ~1.4px stdev does not read as a mark,
-        ;; it reads as a scratch: the render shader already eases hardness back to a
-        ;; pure gaussian below 2.5px because anything thinner aliases. At Size 6 with
-        ;; the tier dials at 0.4 the nominal ladder asks for 0.6px and 0.3px strokes;
-        ;; floored at 0.6 those became two hairline levels covering just 6% and 14% of
-        ;; the image — sparse, aligned, alpha ~0.6 marks that scratch the underpainting
-        ;; instead of building a surface (the contour thatch). Clamping UP to the
-        ;; minimum paintable size instead keeps the detail and loses the thatch: sp is
-        ;; derived from the clamped ssz (phys-spec below), so seed count falls as
-        ;; (ssz/min-phys)² and the ink is preserved at a paintable scale. This is a
-        ;; no-op wherever the ladder already lands above 1.4px (any default-ish Size).
-        ;; Defect A: lowered 2.2 -> 1.4 so the Mid/Fine dials can MOVE the detail level
-        ;; (at 2.2 it pinned at exactly 2.20 and both dials were dead). The redundancy
-        ;; drop above still prevents two levels piling here (the original thatch), so a
-        ;; single 1.4px detail level reads as a soft glaze, not a scratch-field.
-        min-phys   1.4
-        step-ratio 0.7
-        keep-ratio 0.95
-        ssz0  (* (scale-of 0) (nsize 0))
         ;; broad/mid tier 0..broad-end-1 is ALWAYS admitted — scale-c sized it to fit and
         ;; the two-tier budget guarantees raising Detail never coarsens those levels.
         broad-end (long (min nlev 4))
         ;; admitted: coarse→fine vector of [lvl ssz] (ssz already clamped to the monotone
         ;; ladder + min-phys floor during admission).
-        admitted (loop [lvl 1 prev (double ssz0)
-                        acc [[(long 0) ssz0]]]
-                   (if (>= lvl nlev)
-                     acc
-                     (let [raw (* (scale-of lvl) (nsize lvl))
-                           ssz (max min-phys (min raw (* step-ratio prev)))]
-                       ;; REDUNDANCY is now the ONLY drop: once min-phys clamps two levels
-                       ;; to the same physical size (Size 6 + tiers 0.4 puts both 2 and 3 on
-                       ;; the floor) the finer one is a duplicate pass, not extra detail.
-                       ;; Dropping it cannot coarsen anything — it is the same size as its
-                       ;; parent — and it is what terminates the ladder: the level after the
-                       ;; one that lands on min-phys is always redundant, so the ladder ends
-                       ;; a rung past the floor however high Detail goes.
-                       ;;
-                       ;; The fine tier used to be dropped outright when its cost exceeded
-                       ;; the remaining budget, which is why Detail did nothing above 0.6:
-                       ;; at Size 13.66 on a 1MP frame level 4 wants ~182k candidates and
-                       ;; was 41x over its slice, so it was dropped whole and the slider had
-                       ;; no levels left to add. It is now ADMITTED AND THINNED against that
-                       ;; slice like levels 2-3 are against theirs (fine-thin below), so it
-                       ;; contributes detail in proportion to what the budget affords instead
-                       ;; of nothing at all.
-                       (if (>= ssz (* keep-ratio prev))
-                         acc                                  ; drop this + every finer
-                         (recur (inc lvl) ssz
-                                (conj acc [(long lvl) ssz]))))))
+        admitted (ladder nlev frac scale-c scale-f)
         ;; the EDGE-BAND overlay, sized off the finished ladder's finest rung. Computed
         ;; HERE (not at the end) so its demand can be charged against the detail tier's
         ;; slice below — the band comes out of the budget, not on top of it.

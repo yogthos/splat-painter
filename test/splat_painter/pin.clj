@@ -13,10 +13,12 @@
                                            (range W)))
                                  (range H)))})
 
-(defn -main [& _]
+(defn -main [& [detail]]
   (let [img (gray-img 48 64 (fn [x y] (if (and (> x 16) (< x 32) (> y 20) (< y 44))
                                         0.9 (* 0.5 (/ (double (+ x y)) 112.0)))))
-        {:keys [splats]} (seed/splat-field img {:count 4000 :size 6.0 :stroke 2.5 :detail 0.6
+        ;; the golden's own Detail by default; pass one to check another setting against it
+        detail (if detail (Double/parseDouble detail) 0.6)
+        {:keys [splats]} (seed/splat-field img {:count 4000 :size 6.0 :stroke 2.5 :detail detail
                                                 :variation 0.5 :curvature 0.5 :opacity 0.9 :contrast 1.0})
         [sx sy sd sc] (reduce (fn [[sx sy sd sc] {[mx my] :mean [c00 c01 _ c11] :cov [cr cg cb] :color}]
                                 [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc cr cg cb)])

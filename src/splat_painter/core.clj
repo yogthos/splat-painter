@@ -29,7 +29,14 @@
 (defonce count-atom    (r/atom 72000))  ; splat budget (max strokes) — higher = more detail, slower
 (defonce size-atom     (r/atom 16.0))   ; base (coarsest) splat stdev; finer levels halve it
 (defonce stroke-atom   (r/atom 2.5))
-(defonce detail-atom   (r/atom 0.6))    ; how many fine detail levels are added
+;; Detail is the fraction of the ACHIEVABLE ladder depth to paint (seed/layer-params:
+;; the min-phys floor, not the nominal seven levels, sets how deep the ladder can go).
+;; 1.0 is the default because 1.0 is where the old 0.6 landed: under the previous
+;; mapping (nlev = 1+round(detail*6)) 0.6 asked for five rungs, which is the deepest
+;; ladder default Size reaches on every image measured, and every setting from 0.6 up
+;; painted that same ladder. So the default LOOK is unchanged and the dial now spends
+;; its whole travel getting there instead of its first 60%.
+(defonce detail-atom   (r/atom 1.0))    ; how much of the achievable detail ladder to paint
 (defonce variation-atom (r/atom 0.5))   ; per-stroke size/tone jitter
 (defonce curvature-atom (r/atom 0.5))   ; Perlin warp — how much strokes bend/curve off-grid
 (defonce contrast-atom (r/atom 1.0))
