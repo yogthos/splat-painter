@@ -133,31 +133,27 @@ not clear the cache before a red/green check on its account.
 **Check what your ROI actually contains before you trust a number from it.** The
 olb ROI was labelled "a narrow jacket strip by the map" and sat on the collar and
 tie; every wash/chroma number taken through it measured the wrong part of the
-frame. Crop the box and look at it once — `scratchpad/sheet.py` tiles a labelled
+frame. Crop the box and look at it once — `sheet.py` tiles a labelled
 ROI from the source beside each render for exactly this.
-
-`distbleed.py` — colour/luma error inside a silhouette BINNED BY DISTANCE from the
-boundary. A bleed confined to 2–4px at an edge is invisible in a whole-ROI mean and
-obvious as a decay profile; it is also the only way to tell a real bleed from a
-uniform offset. It found that Cut-in and Sharpen both *suppress* the silhouette
-halo (Cut-in by 2.5×, Sharpen 1.2 nearly to zero) — the opposite of the standing
-hypothesis.
 
 `worst.py` — ranks 64×64 blocks by mean|d| against a registered source, so the
 regions that actually deviate pick themselves instead of being guessed at.
 
-`edgewidth.py` — **use this, not `distbleed.py`, to judge a silhouette.** Width is
+`edgewidth.py` — use this to judge a silhouette. Width is
 `total_variation / peak_gradient` per scanline, which is TRANSLATION-INVARIANT, and
-reported relative to the source. `distbleed` bins error by distance from the
-boundary, so a SUB-PIXEL difference in where a render puts its edge moves signal
-between bins — and renders do not share a sub-pixel edge position (integer
-registration measured (1,1), (1,0) and (0,1) across a single Cut-in sweep). Its
-1–2px bin is therefore dominated by registration rather than by the painter: it
-produced a non-monotonic Cut-in curve whose jumps line up exactly with the offset
-changes, and a byte-identical file read +0.0119 or +0.0831 depending only on which
-file was listed first. Registering every file against the first one is the specific
-trap; `distbleed` now registers each independently, but the 1–2px bin is still not
-evidence at sub-pixel scale.
+reported relative to the source.
+
+**Do not judge a silhouette by binning error by DISTANCE from the boundary.** That
+approach had a tool here (`distbleed.py`, removed 2026-08-05) and it cost most of a
+day. A sub-pixel difference in where a render puts its edge moves signal between
+bins, and renders do not share a sub-pixel edge position — integer registration
+measured (1,1), (1,0) and (0,1) across a single Cut-in sweep. The 1–2px bin is
+therefore dominated by registration rather than by the painter: it produced a
+non-monotonic Cut-in curve whose jumps line up exactly with the offset changes, and
+a byte-identical file read +0.0119 or +0.0831 depending only on which file was
+listed first. Registering every file against the first one is the specific trap, but
+registering each independently does not rescue it either — the bin is not evidence
+at sub-pixel scale. Use `edgewidth.py`'s translation-invariant width instead.
 
 
 `score.py` — fidelity vs the source: ROI and whole-image mean|d|, plus "holes"

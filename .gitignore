@@ -30,3 +30,4 @@ splat-painter.build/
 
 # harness scratch
 dev/harness/ab-server.log
+__pycache__/
