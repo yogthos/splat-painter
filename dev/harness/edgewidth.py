@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Edge WIDTH at a silhouette — a translation-invariant measure of the artifact.
 
-Why not distbleed: that bins error by distance from the boundary, so a sub-pixel
+Why not bin error by distance from the boundary (the approach distbleed.py took,
+removed 2026-08-05): binning by distance means a sub-pixel
 shift in where the render puts the edge moves signal between bins. Renders do not
 share a common sub-pixel edge position (integer registration measured (1,1), (1,0)
 and (0,1) across one sweep), so its 1-2px bin is dominated by registration, not by
