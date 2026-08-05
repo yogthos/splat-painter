@@ -13,6 +13,7 @@
             [splat-painter.fields-test]
             [splat-painter.gpu-fields-test]
             [splat-painter.sharpen-test]
+            [splat-painter.score-test]
             [splat-painter.hardness-test]
             [splat-painter.band-ppc-test]
             [splat-painter.tier-ppc-test]))
@@ -41,6 +42,8 @@
                              ;; display (glimmer-gl.offscreen reports why)
                              'splat-painter.gpu-fields-test
                              'splat-painter.sharpen-test
+                             ;; no GL needed — pure numeric scoring
+                             'splat-painter.score-test
                              'splat-painter.hardness-test
                              ;; also needs a GL context; skips itself without one
                              'splat-painter.band-ppc-test
