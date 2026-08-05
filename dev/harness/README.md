@@ -156,8 +156,19 @@ registering each independently does not rescue it either — the bin is not evid
 at sub-pixel scale. Use `edgewidth.py`'s translation-invariant width instead.
 
 
-`score.py` — fidelity vs the source: ROI and whole-image mean|d|, plus "holes"
-(source-bright pixels the render made much darker).
+**Fidelity vs the source is `jolt -M:score`, not a script here.** It reports the
+ROI and whole-image mean|d| and RMS the old `score.py` did (same registration,
+same nose ROI, same definitions), plus the three columns that instrument was
+blind to: Oklab lightness error, Oklab chroma error and luma SSIM.
+
+    jolt -M:score <source> <label> <render> [<label> <render> ...]
+
+Why it moved out of python: a luma-only metric scores a wrong-hue stroke as
+perfect and barely moves when fine structure is averaged away, and the seed.clj
+constants were all tuned against it. In Clojure it also runs inside `-M:test` as
+a regression gate rather than being a script someone remembers to run.
+`score.py` was removed once the port reproduced its numbers exactly
+(18.998 / 609 / -124.9 / 8.533 / 13.715 on loki); `git log` has it.
 
 Edge SHARPNESS, the metric that matches "fine detail looks soft" — inline, since
 it is three lines:

@@ -1,7 +1,9 @@
 (ns splat-painter.score
-  "Perceptual render scoring — the harness dev/harness/score.py never grew into.
+  "Perceptual render scoring, and the successor to dev/harness/score.py — that
+   script was deleted once this reproduced its numbers exactly, so every mention
+   of it below is provenance for a decision, not a live file. `git log` has it.
 
-   score.py reports mean|d| and RMS over BT.709 luma and nothing else. Two blind
+   score.py reported mean|d| and RMS over BT.709 luma and nothing else. Two blind
    spots that matter here, because this codebase is tuned by measurement (the
    seed.clj constants justify their values with numbers from this instrument):
 

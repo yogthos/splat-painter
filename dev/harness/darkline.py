@@ -12,7 +12,7 @@ Regions (render coords):
   whole  — the whole frame (rows 0-1023)
   bokeh  — rows 60-420, cols 0-420
   finger — rows 320-445, cols 260-410   (bd splat-painter-ws1 ROI)
-  nose   — rows 405-455, cols 520-610   (dev/harness/score.py ROI)
+  nose   — rows 405-455, cols 520-610   (the -M:score nose ROI)
 
 Usage: darkline.py render.png [render2.png ...]
 Prints counts per region. Baselines from the spec (shipped /tmp/sharpen-pre.png):
