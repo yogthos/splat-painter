@@ -26,11 +26,13 @@
            :detail {:extra-paths ["test"] :main-opts ["-m" "splat-painter.detail"]}
            :yield {:extra-paths ["test"] :main-opts ["-m" "splat-painter.yield"]}
            :scan {:extra-paths ["test"] :main-opts ["-m" "splat-painter.scan"]}
+           :score {:extra-paths ["test"] :main-opts ["-m" "splat-painter.score"]}
            :test  {:extra-paths ["test"] :main-opts ["-m" "splat-painter.test-runner"]}
            ;; print the actual golden-fixture checksums, for re-pinning seed-test
            :pin   {:extra-paths ["test"] :main-opts ["-m" "splat-painter.pin"]}}
 
  :tasks {run   "jolt -M:run"
          check "jolt -M:check"
+         score "jolt -M:score"
          test  "jolt -M:test"}}
 
