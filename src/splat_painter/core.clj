@@ -25,7 +25,7 @@
             [splat-painter.seed      :as seed]
             [jolt.ffi       :as ffi]))
 
-;; --- reactive controls (the panel re-renders on change) ----------------------
+;; reactive controls (the panel re-renders on change)
 (defonce count-atom    (r/atom 72000))  ; splat budget (max strokes) — higher = more detail, slower
 (defonce size-atom     (r/atom 16.0))   ; base (coarsest) splat stdev; finer levels halve it
 (defonce stroke-atom   (r/atom 2.5))
@@ -69,7 +69,7 @@
 (defonce active-layer-atom   (r/atom 0))    ; live pass index: 0 == bottom (single pass)
 (defonce layer-opacity-atom  (r/atom 0.6)) ; glaze strength of the active pass over its base
 
-;; --- non-reactive image / GL state -------------------------------------------
+;; non-reactive image / GL state
 ;; Need a sized internal-format for macOS core-profile FBO completeness.
 (def ^:private GL-RGBA8 0x8058)
 ;; The splat field is built on the GPU via transform feedback (splat-painter.gen) —
@@ -90,7 +90,7 @@
 (defonce ^:private open-cb-atom (atom nil))
 (defonce ^:private save-cb-atom (atom nil))
 
-;; --- GtkFileDialog (GTK4 async file picker) ----------------------------------
+;; GtkFileDialog (GTK4 async file picker)
 (ffi/defcfn gtk-file-dialog-new        "gtk_file_dialog_new"        [] :pointer)
 (ffi/defcfn gtk-file-dialog-set-title  "gtk_file_dialog_set_title"  [:pointer :string] :void)
 (ffi/defcfn gtk-file-dialog-open       "gtk_file_dialog_open"
@@ -101,7 +101,7 @@
 (ffi/defcfn g-object-unref   "g_object_unref"  [:pointer] :void)
 (ffi/defcfn g-error-free     "g_error_free"    [:pointer] :void)
 
-;; --- GSettings schema guard ----------------------------------------------------
+;; GSettings schema guard
 ;; GtkFileDialog ABORTS the process (GLib-GIO-ERROR -> SIGTRAP, uncatchable) when
 ;; GLib can't find the GSettings schemas. On Homebrew macOS they live under
 ;; /opt/homebrew/share, which a plain shell launch doesn't have in XDG_DATA_DIRS.
@@ -135,7 +135,7 @@
     (prepend! "XDG_DATA_DIRS" schema-dirs)
     (prepend! "GSETTINGS_SCHEMA_DIR" (map #(str % "/glib-2.0/schemas") schema-dirs))))
 
-;; --- GtkFileDialog save variant -----------------------------------------------
+;; GtkFileDialog save variant
 (ffi/defcfn gtk-file-dialog-save        "gtk_file_dialog_save"
   [:pointer :pointer :pointer :pointer :pointer] :void)
 (ffi/defcfn gtk-file-dialog-save-finish "gtk_file_dialog_save_finish"
@@ -146,7 +146,7 @@
 ;; delete-layer-textures! to free committed-layer textures on drop/reset/replace.
 (ffi/defcfn gl-delete-textures "glDeleteTextures" [:int :pointer] :void)
 
-;; --- render requests ---------------------------------------------------------
+;; render requests
 ;; glimmer.ratom atoms aren't IRef-watchable, so we don't add-watch. Each slider's
 ;; :on-value resets its atom and calls request-render!, so the image updates live
 ;; as you drag; loading an image does the same. on-render rebuilds the field from
@@ -260,7 +260,7 @@
         (reset! open-cb-atom cb)   ; retain past the async callback (see the atom's docstring)
         (gtk-file-dialog-open dialog root ffi/null cb ffi/null)))))
 
-;; --- save (offscreen render → glReadPixels → PNG) ----------------------------
+;; save (offscreen render → glReadPixels → PNG)
 (defn- ensure-export-targets!
   "Lazily create an FBO + RGBA8 color texture in gl-state for export, resizing
    the texture to iw*ih on each call (needed when image size changes). Caches
@@ -364,10 +364,10 @@
         (reset! save-cb-atom cb)   ; retain past the async callback (see the atom's docstring)
         (gtk-file-dialog-save dialog root ffi/null cb ffi/null)))))
 
-;; --- GL plumbing -------------------------------------------------------------
+;; GL plumbing
 (def ^:private quad-verts [-1.0 -1.0   1.0 -1.0   -1.0 1.0   1.0 1.0])
 
-;; --- GPU generation path (transform feedback) --------------------------------
+;; GPU generation path (transform feedback)
 (defn- read-fbo-binding []
   (let [p (ffi/alloc (ffi/sizeof :int))]
     (gl/gl-get-integerv gl/GL-FRAMEBUFFER-BINDING p)
@@ -847,7 +847,7 @@
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h)))))
 
-;; --- layer stack: pure helpers (testable, no GL/atoms beyond the slider reset) ---
+;; layer stack: pure helpers (testable, no GL/atoms beyond the slider reset)
 ;; A committed layer is {:tex <GL id> :opacity <double> :settings <14-vector>}. The
 ;; index convention (documented here, the single source of truth): with N committed
 ;; layers and active in [0,N], the LIVE pass sits between layers[active-1] and
@@ -1067,7 +1067,7 @@
             (dotimes [_ (dec passes)] (add-layer!)))
           (gpu-save-png! area p))))))
 
-;; --- reactive control panel --------------------------------------------------
+;; reactive control panel
 ;; Layout rule that keeps the sidebar narrow: NO widget inside the sidebar ever
 ;; sets :hexpand. In GTK a GtkBox reports itself as "wanting to expand" to its
 ;; parent whenever any child expands (gtk_widget_compute_expand propagates up the

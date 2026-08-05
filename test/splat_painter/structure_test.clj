@@ -111,7 +111,7 @@
           sfield (s/analyze img)]
       (is (approx= 1e-12 0.0 (:gmax sfield))))))
 
-;; --- heavy blur bleed: the edge-preserving field must not halo in DARK regions ---
+;; heavy blur bleed: the edge-preserving field must not halo in DARK regions
 
 (defn- disc-on-dark [H W cx cy r bright dark]
   "A filled disc of `bright` (0..1 grey) on a `dark` ground — the silhouette case."
@@ -203,7 +203,7 @@
       (is (< diff 0.02)
           (str "flat-region smoothing preserved: mean |out - box| small; got " diff)))))
 
-;; --- dominant-blur: the COVERAGE tiers' colour source --------------------------
+;; dominant-blur: the COVERAGE tiers' colour source
 ;; The coverage tiers paint with strokes far larger than a fine feature, so their
 ;; colour must be the DOMINANT tone of a brush-sized window. The edge-preserving
 ;; blur they used to sample keeps sub-brush structure by construction: a σ6 stroke

@@ -15,9 +15,7 @@
   a disjoint index range, so the output matches the serial loop exactly."
   (:require [splat-painter.par :as par]))
 
-;; ---------------------------------------------------------------------------
 ;; helpers
-;; ---------------------------------------------------------------------------
 
 (defn- clamp [v lo hi]
   (max lo (min hi v)))
@@ -25,9 +23,7 @@
 (defn- round-int [v]
   (int (Math/round (double v))))
 
-;; ---------------------------------------------------------------------------
 ;; luma
-;; ---------------------------------------------------------------------------
 
 (defn luma
   "Grayscale luminance (0..1) from an RGB image. Returns a ^doubles array
@@ -49,9 +45,7 @@
                   (+ (* 0.299 r) (* 0.587 g) (* 0.114 b)))))))
     L))
 
-;; ---------------------------------------------------------------------------
 ;; gradient-field
-;; ---------------------------------------------------------------------------
 
 (defn gradient-field
   "Di Zenzo COLOUR structure-tensor products from 3×3 Sobel gradients per RGB
@@ -92,9 +86,7 @@
                 (recur (inc c) (+ sxx (* gx gx)) (+ syy (* gy gy)) (+ sxy (* gx gy)))))))))
     {:h H :w W :jxx jxx :jyy jyy :jxy jxy}))
 
-;; ---------------------------------------------------------------------------
 ;; structure-tensor (separable box-blur)
-;; ---------------------------------------------------------------------------
 
 (defn- box-blur-2d
   "Separable 2D box-blur of `src` (H×W) with `radius`, edge-replicate.
@@ -164,9 +156,7 @@
      :jyy (box-blur-2d (:jyy gfield) H W radius)
      :jxy (box-blur-2d (:jxy gfield) H W radius)}))
 
-;; ---------------------------------------------------------------------------
 ;; blur-image — one-time average-colour precompute
-;; ---------------------------------------------------------------------------
 
 (defn box-blur
   "Public separable box-blur of a single-channel H×W ^doubles array (edge-replicate)."
@@ -516,9 +506,7 @@
       (aset out (+ (* 3 i) 2) (aget b i)))
     out))
 
-;; ---------------------------------------------------------------------------
 ;; analyze
-;; ---------------------------------------------------------------------------
 
 (defn luma-of
   "Reduced-resolution luminance: downscale `image` to `sh`×`sw` (nearest) and

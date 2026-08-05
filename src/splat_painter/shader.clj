@@ -162,7 +162,7 @@ void main(){
   gl_Position = vec4(a_pos, 0.0, 1.0);
 }")
 
-;; --- texture-buffer LOOP render variant (GA_PAINTER_LOOP_RENDER only) --------
+;; texture-buffer LOOP render variant (GA_PAINTER_LOOP_RENDER only)
 ;; The splats come from a samplerBuffer (a 1D texture view over a buffer object), so
 ;; there is no GL_MAX_TEXTURE_SIZE ceiling and the transform-feedback buffer feeds
 ;; straight in. Loops every splat per fragment: correct, but Σ(pixels×splats) work,
@@ -228,7 +228,7 @@ void main(){
 }
 "))
 
-;; --- per-splat quad render (fixes the O(pixels × splats) hang) ----------------
+;; per-splat quad render (fixes the O(pixels × splats) hang)
 ;; The loop shaders above evaluate EVERY splat at EVERY pixel — 3.4e10 iterations at
 ;; the 48k slider max, which trips macOS's GPU watchdog. This variant is the standard
 ;; gaussian-splatting renderer instead: one quad per splat covering its ~3.5σ extent,
@@ -416,7 +416,7 @@ void main(){
    frag = vec4(col * a, a);        // premultiplied; blend (ONE, ONE_MINUS_SRC_ALPHA)
 }")
 
-;; --- layer blit (layered repainting) ------------------------------------------
+;; layer blit (layered repainting)
 ;; Attribute-less, like vs-src-quad: 6 GL_TRIANGLES from gl_VertexID cover the
 ;; letterboxed image rect, and the FS samples a committed pass captured by
 ;; glReadPixels (a solo render over a transparent clear = premultiplied RGBA).
@@ -492,7 +492,7 @@ void main(){
             :u_layer    (gl/gl-get-uniform-location prog "u_layer")
             :u_alpha    (gl/gl-get-uniform-location prog "u_alpha")}}))
 
-;; --- sharpen present pass (final-output unsharp, gated) ----------------------
+;; sharpen present pass (final-output unsharp, gated)
 ;; A view/output effect applied ONCE to the finished composite (screen + PNG
 ;; export), never fed back into placement. Geometry is the vs-src-blit approach —
 ;; attribute-less, 6 GL_TRIANGLES from gl_VertexID over the image rect — but
@@ -609,7 +609,7 @@ void main(){
   frag = vec4(clamp(c + u_amount * dscale * gate * hp, 0.0, 1.0), 1.0);
 }"))
 
-;; --- antialias present pass (edge-directed smoothing, runs LAST) -------------
+;; antialias present pass (edge-directed smoothing, runs LAST)
 ;; Sharpen is an unsharp gated ON local gradient, so it targets silhouettes — and a
 ;; painted silhouette is built from overlapping elongated strokes at slightly
 ;; different angles, i.e. it is scalloped at sub-pixel scale by construction.

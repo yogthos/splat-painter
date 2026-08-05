@@ -61,7 +61,7 @@
 ;; THIN_GAIN const in the generation shader (gen.clj); keep them equal.
 (def thin-gain 8.0)
 
-;; --- deterministic per-stroke pseudo-random helpers --------------------------
+;; deterministic per-stroke pseudo-random helpers
 
 (defn- hash01
   "Cheap deterministic per-stroke random in [0,1) from integerish coords + salt."
@@ -120,7 +120,7 @@
         by (+ (* (- 1.0 w) (Math/sin (* 2.0 t1))) (* w (Math/sin (* 2.0 t2))))]
     (* 0.5 (Math/atan2 by bx))))
 
-;; --- coarse-to-fine layered placement ----------------------------------------
+;; coarse-to-fine layered placement
 
 ;; the fragment shader brute-force loops over every splat per pixel, so the field must
 ;; stay under its MAX_SPLATS (16384). When small strokes would exceed that, scale ALL
@@ -208,7 +208,7 @@
             (* (nth muls 1) (nth muls 2))
             (nth muls 2))))
 
-;; --- feature-following tracer tunables (mirror the GLSL literals in gen.clj) ---
+;; feature-following tracer tunables (mirror the GLSL literals in gen.clj)
 ;; Stroke length is guided by the FEATURE, not a count: a trace stops where the ridge
 ;; dies or the tangent bends (a corner). These are the geometric/colour thresholds.
 (def ^:private max-segs 32)        ; the geometry-shader vertex cap; detail levels run to it and let geometry decide
@@ -364,7 +364,7 @@
   [stroke]
   (+ 0.4 (* 0.24 (double stroke))))
 
-;; --- the EDGE-BAND tier -------------------------------------------------------
+;; the EDGE-BAND tier
 ;; A tier that OWNS the silhouette band, laid OVER the coverage tiers. It is NOT part
 ;; of the coarse→fine ladder: it is placed by the raw EDGE channel, born strongly
 ;; elongated ALONG the edge (thin ACROSS it), and pushed CLEAR of the ridge onto one
@@ -462,7 +462,7 @@
 ;; tier painted — 120 charged vs 549 emitted at Splats 1000, the uncharged paint landing
 ;; on top of the budget. That is why the charge is measured per image now.
 
-;; --- the paint-per-candidate probe, shared by both measurement paths -----------
+;; the paint-per-candidate probe, shared by both measurement paths
 ;; band-paint-per-candidate runs these on the CPU with stroke-segments;
 ;; gen/probe-band-ppc! runs the SAME level through the geometry shader as a
 ;; band-only generation pass and divides the transform-feedback count by `probes`.
@@ -594,7 +594,7 @@
     (let [n (long (:nx band))]
       (into [band] (mapv (fn [l] (update l :offset + n)) levels)))))
 
-;; --- detail-tier yield probe (splat-painter-zig) ---------------------------
+;; detail-tier yield probe (splat-painter-zig)
 (declare emit-levels)
 ;; The budget charges the mid/fine tiers a FITTED per-candidate constant (mid-yield
 ;; 1.8, fine-yield 1.0). The real per-candidate yield is image-dependent — measured
@@ -1936,7 +1936,7 @@
     (emit-levels dmap nf levels detail variation curvature stroke swirl tier-muls warp H W
                  blur-px blurd-px blurh-px)))
 
-;; --- precomputed smooth Perlin fields (flow angle, size, tone) ---------------
+;; precomputed smooth Perlin fields (flow angle, size, tone)
 ;; noise2 is ~30 ops; calling it 4× per splat over ~14k splats dominated the render.
 ;; The fields are smooth (low frequency), so precomputing them at the tensor resolution
 ;; once and sampling (a cheap aget) per splat is visually identical and far faster.
@@ -2039,7 +2039,7 @@
     [(* 0.5 (Math/atan2 (bl s2) (bl c2)))
      (min 1.0 (max 0.0 (bl coh)))]))
 
-;; --- helpers (unchanged) ----------------------------------------------------
+;; helpers (unchanged)
 
 (defn- sample-arr
   "Bilinear [r g b] from a flat H*W*3 double-array at grid (x,y) (x=row, y=col),
@@ -2135,7 +2135,7 @@
      :cov   (gauss/covariance sx sy theta)
      :color color}))
 
-;; --- main -------------------------------------------------------------------
+;; main
 
 (defn splat-field
   "Build a splat field from `image` (see ns doc) and `controls` (see ns doc).

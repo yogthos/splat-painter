@@ -23,7 +23,7 @@
             [splat-painter.shader :as shader]
             [jolt.ffi :as ffi]))
 
-;; --- pass plumbing -----------------------------------------------------------
+;; pass plumbing
 
 (def ^:private vs-src
   "#version 330 core
@@ -126,7 +126,7 @@ void main(){
     (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev)
     dst))
 
-;; --- separable box blur ------------------------------------------------------
+;; separable box blur
 ;; The CPU keeps an O(1) sliding sum; a fragment shader cannot carry state across
 ;; pixels, so this is the brute-force 2r+1 taps per pixel. That is the right trade
 ;; here: the radii in play are 2 (tensor), 3 (light blur) and ~8-16 (flow/heavy),
@@ -169,7 +169,7 @@ void main(){
              [["u_dim" :2f w h] ["u_step" :2f 0 1] ["u_radius" :1f radius]])
   dst)
 
-;; --- Di Zenzo colour structure tensor ----------------------------------------
+;; Di Zenzo colour structure tensor
 ;; structure/analyze in three passes: nearest downscale, gamma + per-channel
 ;; Sobel into tensor products, then the eigen decomposition. The radius-2 smooth
 ;; between products and eigen is the box blur above — and because that shader
@@ -288,7 +288,7 @@ void main(){
     (run-pass! ctx (:eigen progs) eigen-f Wt Ht [["u_src" flow]] dims)
     {:h Ht :w Wt :eigen eigen-t :flow eigen-f :tensor tensor}))
 
-;; --- whole-grid reductions ---------------------------------------------------
+;; whole-grid reductions
 ;; placement-map needs six scalars over the whole grid (gmax, and a dmax + mean
 ;; per fused band). A fragment shader can only gather locally, so these come from
 ;; a log-step halving: seed each texel to (v, v), then repeatedly fold 2x2 blocks
@@ -357,7 +357,7 @@ void main(){
                      [["u_src_dim" :2f cw ch] ["u_dst_dim" :2f nw nh]])
           (recur dst nw nh (conj scratch cur)))))))
 
-;; --- Haar placement map ------------------------------------------------------
+;; Haar placement map
 ;; wavelet/placement-map as passes. The CPU SCATTERS: each half-cell at level L
 ;; adds its detail energy to every pixel of its 2^L block. A fragment shader can
 ;; only gather, so this inverts it — output pixel (gr,gc) at level L reads the one
@@ -549,7 +549,7 @@ void main(){
   frag = vec4(m, 0.0, 0.0, 1.0);
 }")
 
-;; --- subject saturating remap (mirrors wavelet.clj's final smoothstep) --------
+;; subject saturating remap (mirrors wavelet.clj's final smoothstep)
 (def ^:private subjsat-fs
   "#version 330 core
 in vec2 v_uv;
@@ -562,7 +562,7 @@ void main(){
   frag = vec4(mix(s, 1.0, smoothstep(0.45, 0.70, s)), 0.0, 0.0, 1.0);
 }")
 
-;; --- binned colour fields (bilateral + dominant) -----------------------------
+;; binned colour fields (bilateral + dominant)
 ;; structure/bilateral-blur and dominant-blur-full share one algorithm: K=9 luma
 ;; bins, each pixel given a hat weight around its bin centre, the weighted colour
 ;; AND the weight box-blurred over the window, then the bins recombined. They
@@ -674,7 +674,7 @@ void main(){
   frag = vec4(mix(top, bot, t.y), 1.0);
 }")
 
-;; --- baked orientation field (seed/prep-noise) -------------------------------
+;; baked orientation field (seed/prep-noise)
 ;; Both ends of the Swirl dial, at tensor resolution: .rg carry cos2θ/sin2θ and
 ;; .b the coherence, which is exactly the layout gen/upload-fields! hands the
 ;; geometry shader — so these two passes ARE the noise textures, not a step
@@ -734,7 +734,7 @@ void main(){
   frag = vec4(cos(2.0*theta), sin(2.0*theta), coherence, 0.0);
 }"))
 
-;; --- full-resolution edge strength -------------------------------------------
+;; full-resolution edge strength
 ;; Rides in the ALPHA channel of the raw image texture, which the generation
 ;; shader has never used — so a pixel-scale edge signal costs no extra texture and
 ;; no extra memory. See structure/full-edge for why it has to exist: every
@@ -1010,7 +1010,7 @@ void main(){
                t))]
     [(mk false) (mk true)]))
 
-;; --- source upload / readback (dev verification) -----------------------------
+;; source upload / readback (dev verification)
 
 (defn upload-rgb!
   "Upload an image map's H*W*3 :pixels as a w×h RGBA32F texture (alpha 1)."
@@ -1073,7 +1073,7 @@ void main(){
 
 (defn new-scratch [w h] (new-target w h))
 
-;; --- the whole chain ---------------------------------------------------------
+;; the whole chain
 
 (defn heavy-radius
   "Window for the coverage tiers' colour source. Mirrors fields/heavy-radius —

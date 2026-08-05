@@ -12,7 +12,7 @@
    full-image coords into it (see detail-at)."
   (:require [splat-painter.structure :as structure]))
 
-;; --- Haar 1D (a faithful port of haar.ts haarFwd1d) --------------------------
+;; Haar 1D (a faithful port of haar.ts haarFwd1d)
 ;; Odd-length: the last element is dropped. Operates on a strided slice of a flat
 ;; ^doubles array so the same code does rows (stride 1) and columns (stride W).
 (defn- haar-detail-energy!

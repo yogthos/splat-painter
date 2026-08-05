@@ -36,7 +36,7 @@
 ;; the image unpainted underneath.
 (def ^:private max-levels 8)
 
-;; --- generation program: vertex + geometry (transform feedback) --------------
+;; generation program: vertex + geometry (transform feedback)
 (def ^:private vs-src
   "#version 330 core
 flat out int v_id;
@@ -816,7 +816,7 @@ void main(){
      :locs (into {} (map (fn [n] [(keyword n) (gl/gl-get-uniform-location prog n)]))
                  gen-uniform-names)}))
 
-;; --- field texture upload (once per image) -----------------------------------
+;; field texture upload (once per image)
 (defn- new-tex []
   (let [t (gl/gen-one gl/gl-gen-textures)]
     (gl/gl-bind-texture gl/GL-TEXTURE-2D t)
@@ -908,7 +908,7 @@ void main(){
     (upload-rgba! t 512 1 (rgba-ptr 1 512 (fn [i] [(double (aget p i)) 0.0 0.0 1.0])))
     t))
 
-;; --- run generation ----------------------------------------------------------
+;; run generation
 (defn- set-1fv! [loc xs]
   (let [ptr (gl/write-floats xs)] (gl/gl-uniform-1fv loc (count xs) ptr) (ffi/free ptr)))
 (defn- set-1iv! [loc xs]

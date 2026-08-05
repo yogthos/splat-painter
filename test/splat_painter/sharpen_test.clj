@@ -223,7 +223,7 @@
                 (is (zero? (at 4 20))
                     "the bar itself stays black")))))))))
 
-;; --- antialias present pass (shader/build-program-aa) ------------------------
+;; antialias present pass (shader/build-program-aa)
 ;; Runs AFTER sharpen, so what it must do is remove the along-edge staircase
 ;; sharpen amplifies, WITHOUT softening the across-edge step it just bought.
 ;; Those two are the tests: a staircase flattens, a clean step does not move.

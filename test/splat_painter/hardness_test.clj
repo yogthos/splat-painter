@@ -84,7 +84,7 @@
                                   :color [1.0 1.0 1.0] :alpha 1.0}])]
       (is (== 1.0 (nth p 9))))))
 
-;; --- sharpen detail gate (splat-painter, same request as w4w) ----------------
+;; sharpen detail gate (splat-painter, same request as w4w)
 ;; Sharpen is a present pass on the flattened composite, so it rides the subjectness
 ;; FIELD rather than a per-splat value, but the shape of the scale is the same.
 
@@ -113,7 +113,7 @@
             visibly different in kind, not degree"
     (is (> (shader/detail-sharpen-scale 0.0) 0.25))))
 
-;; --- the knee ----------------------------------------------------------------
+;; the knee
 
 (deftest knee-gives-subject-the-full-dial-and-flat-the-floor
   (testing "absolute subjectness is BIMODAL on real photographs (Lenin percentiles

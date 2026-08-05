@@ -46,7 +46,7 @@
         (is (< (Math/abs (- (px img 0 1 1) (/ 200.0 255.0))) 1e-9)))
       (ffi/free buf))))
 
-;; --- layer stack: the pure vector + settings helpers --------------------------
+;; layer stack: the pure vector + settings helpers
 ;; The GL capture/commit fns can't run headless, but the index bookkeeping they
 ;; share (insert-at-active, remove-at-j, snapshot/restore of every slider) is
 ;; exercised here against dummy entries and the real control atoms.
@@ -108,7 +108,7 @@
       (is (= [:c4 :c2 :c3] (tex @v)))                           ; below=[] above=[c4,c2,c3]
       (is (= 0 @a)))))
 
-;; --- clear-layers! / on-image-loaded: the texture-leak + stack-reset paths ------
+;; clear-layers! / on-image-loaded: the texture-leak + stack-reset paths
 ;; area-atom is nil in this headless runner, so clear-layers! skips the GL
 ;; make-current + delete path (it gates on @area-atom) and on-image-loaded's
 ;; request-render! no-ops. The atom bookkeeping is what these two exercise.

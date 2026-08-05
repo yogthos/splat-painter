@@ -24,7 +24,7 @@
    :curvature 0.47 :contrast 1.0 :size-broad 2.31 :size-mid 0.47
    :size-fine 0.47 :edge-band 0.91 :swirl 0.91})
 
-;; --- band side-push override (mirror of iso-setup's alter-var-root) ----------
+;; band side-push override (mirror of iso-setup's alter-var-root)
 (def ^:private orig-lp splat-painter.seed/layer-params)
 (def ^:private sideo-mode (atom :shipped))
 
@@ -40,11 +40,11 @@
 
 (alter-var-root (var splat-painter.seed/layer-params) (fn [_] lp-wrap))
 
-;; --- CPU side ----------------------------------------------------------------
+;; CPU side
 (defn- cpu-field [img]
   (seed/splat-field img user-controls))
 
-;; --- GPU side (offscreen GL, mirrors core.clj ensure-gpu!/generate!) ---------
+;; GPU side (offscreen GL, mirrors core.clj ensure-gpu!/generate!)
 (defn- run-gpu [img]
   (let [ectx (off/ensure-current!)
         _    (when (:error ectx)
@@ -75,7 +75,7 @@
                                                {:height H :width W})]
       {:n count :total total :splats (gen/read-splats tf-buf count)})))
 
-;; --- stats + first divergence (mirror core.clj gpu-verify!) ------------------
+;; stats + first divergence (mirror core.clj gpu-verify!)
 (defn- splat-stats [splats]
   (reduce (fn [[sx sy sd sc sa] {[mx my] :mean [c00 c01 _ c11] :cov [r g b] :color a :alpha}]
             [(+ sx mx) (+ sy my) (+ sd (- (* c00 c11) (* c01 c01))) (+ sc r g b)
@@ -93,7 +93,7 @@
           (if (or (> (Math/abs (- gx1 cx1)) 0.5) (> (Math/abs (- gy1 cy1)) 0.5))
             i (recur (inc i))))))))
 
-;; --- CPU band chain stats (mirror of yield.clj's wrapping) --------------------
+;; CPU band chain stats (mirror of yield.clj's wrapping)
 (defn- band-chain-stats
   "Wrap stroke-segments to record [lvl chain-len stop-reason] per chain, run
    layered-means directly (yield.clj's proven pattern — no splat-field emit, so
@@ -134,7 +134,7 @@
                      (:n cs) (:p50 cs) (:p90 cs) (:max cs)
                      (clojure.string/join "  " wr)))))
 
-;; --- per-chain trace at the first divergence ----------------------------------
+;; per-chain trace at the first divergence
 (defn- trace-divergence
   "Find the chain owning the first-divergence index and dump both paths' segments
    with the CPU-side field state at each CPU segment position."

@@ -241,7 +241,7 @@
       (is (< (Math/abs (- (:fine-ppc realized) (:fine-ppc sampled)))
              (* 0.20 (:fine-ppc realized)))))))
 
-;; --- GL rig (mirrors band-ppc-test) ---------------------------------------
+;; GL rig (mirrors band-ppc-test)
 
 (defonce ^:private announced (atom false))
 

@@ -473,7 +473,7 @@
     (is (< (finest-ssz 1.0) (finest-ssz 0.0))
         "detail=1 reaches a finer smallest stroke than detail=0 (resolution, not count)")))
 
-;; --- cross-boundary colour-bleed regression ----------------------------------
+;; cross-boundary colour-bleed regression
 
 (defn- boundary-tone [y]
   ;; vertical boundary across COLUMNS: dark gray (y<63), light gray (y>=65),
@@ -549,7 +549,7 @@
         (str "dark paint bleeding into the light half: " @dark-in-light
              " splat(s) centred >=0.5σ inside cols y>=65 (of " (count splats) " total)"))))
 
-;; --- liner path-colour roughness dry-out ---------------------------------------
+;; liner path-colour roughness dry-out
 
 (deftest liner-chains-die-on-texture-live-on-contours
   ;; PATH-COLOUR ROUGHNESS gate for liner chains (mirror seed/stroke-segments +
@@ -657,7 +657,7 @@
       (is (>= cmed (* 0.8 (double segs))) (str "contour chains ride the line and run their full feature-determined span; median=" cmed " of nominal segs " segs))
       (is (>= tmed (* 0.5 (double segs))) (str "texture chains run their full span too — the racc dry-out is removed for detail tiers (it fragmented chains); median=" tmed " of " (count texture))))))
 
-;; --- physical-sigma liner span (thinness ramp) ---------------------------------
+;; physical-sigma liner span (thinness ramp)
 
 (deftest liner-span-follows-physical-size
   ;; Liner-ness, chain span and step are decided from the BUDGET-SCALED stdev with
@@ -737,7 +737,7 @@
       (is (some #(and (>= (long (:lvl %)) 2) (> (double (:ssz %)) 2.6)) (:levels p))
           "low budget must produce a fat (ssz>2.6) lvl>=2 level"))))
 
-;; --- Round 1: the level ladder must be monotone -------------------------------
+;; Round 1: the level ladder must be monotone
 ;; layer-params admits levels coarse→fine under a monotonicity + budget rule so
 ;; the finest strokes are never FATTER than coarser ones, redundant near-duplicate
 ;; passes collapse, and nothing sub-pixel survives. A large enough synthetic image
@@ -989,7 +989,7 @@
                                                       :variation 0.5 :curvature 0.5})))]
       (is (<= low 1500) (str "low count: survivor count respects the 1.5x bound; got " low)))))
 
-;; --- Round 2: liner-scale? is a pure physical-size predicate ------------------
+;; Round 2: liner-scale? is a pure physical-size predicate
 (deftest liner-scale-predicate
   (testing "liner-scale? = (lvl>=2 && ssz<3.5); boundary exclusive, lvl<2 never a liner"
     (is (not (seed/liner-scale? 4 3.85)))   ; fat lvl-4 stroke is NOT a liner
@@ -1028,7 +1028,7 @@
       (is (approx= 0.02 (/ (double a-fat) (double a-thin)) 0.7059)
           "head-alpha ratio folds the physical taper (0.5 vs 0.75) AND level-alpha/body — re-pinned to the measured value"))))
 
-;; --- Round 3: two-radius colour probe ---------------------------------------
+;; Round 3: two-radius colour probe
 (defn- ramp-img [H W dark light rw]
   ;; two flat colours joined by an rw-wide COSINE ramp (a soft edge) centred at W/2:
   ;; flat dark flank | cosine smoothstep | flat light flank. The 0.02 sine keeps a
@@ -1126,7 +1126,7 @@
           dark-ones (filter #(<= (cheb-from % dark) 0.12) splats)]
       (is (seq dark-ones) "the hard line is painted in its own dark colour, not lost"))))
 
-;; --- round 4: bilinear sampling ---------------------------------------------
+;; round 4: bilinear sampling
 
 (deftest sample-arr-is-bilinear
   (testing "seed/sample-arr interpolates bilinearly: exact at integers, mean at midpoints, clamped"
@@ -1176,7 +1176,7 @@
                "not the interpolation of the per-texel max (1.0); got " v)))))
 
 
-;; --- round 5: aspect-bounded span + coherence-gated chain length -------------
+;; round 5: aspect-bounded span + coherence-gated chain length
 
 (deftest liner-span-is-feature-determined
   (testing "round 5a: the absolute-px aspect cap is GONE — thin liner spans are feature-determined"
@@ -1228,7 +1228,7 @@
                " — coherence cannot tell a gradient from a line, so it must not gate"
                " chain length")))))
 
-;; --- feature-following tracer: long arc vs sharp corner ----------------------
+;; feature-following tracer: long arc vs sharp corner
 (deftest feature-following-tracer-breaks-at-corners
   (testing "a smooth ridge traces as one long stroke; a sharp corner breaks the chain (mirror seed/stroke-segments)"
     ;; The feature-following tracer ends a stroke where the FEATURE ends or turns — the
@@ -1287,7 +1287,7 @@
       ;; length. The :corner stops above (co-corner>=2) are the real corner signal.
       (is (pos? co-len) (str "corner chains still emit — the tracer rides the L; median " co-len " of " (count co))))))
 
-;; --- lip-band / dark-mark: detail-stroke raw-fidelity scales with fine-detail density ---
+;; lip-band / dark-mark: detail-stroke raw-fidelity scales with fine-detail density
 ;; (spec-lip-band) A ~1.4px detail stroke takes raw-floor 0.85, so 85% of its colour is a
 ;; single RAW sample. Where features crowd (a shadow / lip line 3-5px from the next
 ;; feature) that sample is a foreign dark value, and the stroke carrying it paints a dark
@@ -1331,7 +1331,7 @@
 
 
 
-;; --- the EDGE-BAND tier -------------------------------------------------------
+;; the EDGE-BAND tier
 ;; An OVERLAY, not a rung of the coarse→fine ladder: placed off the raw edge channel,
 ;; born long-and-thin, pushed clear of the ridge, drawn topmost. See seed/band-level.
 ;; Every assertion below is paired with the case that makes it FAIL if the mechanism
@@ -1723,7 +1723,7 @@
 
 
 
-;; --- Swirl: the dial on the image-INDEPENDENT Perlin noise ------------------
+;; Swirl: the dial on the image-INDEPENDENT Perlin noise
 ;; Two placement terms are steered by a Perlin field rather than by the photo: the
 ;; flat-region flow that orients strokes where the tensor has no opinion, and the
 ;; position warp that pushes flat-region seeds off the level lattice. Both are
@@ -1899,7 +1899,7 @@
 
 
 
-;; --- the Detail dial's travel (splat-painter-a65) -----------------------------
+;; the Detail dial's travel (splat-painter-a65)
 
 (defn- detail-ladders
   "The admitted ladder at each 0.05 step of the Detail dial, coarse→fine, on a

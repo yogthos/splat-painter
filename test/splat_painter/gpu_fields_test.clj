@@ -93,7 +93,7 @@
                       d    (max-diff got want)]
                   (is (< d float-tol) (str "radius " r " max diff " d)))))))))))
 
-;; --- Di Zenzo tensor ---------------------------------------------------------
+;; Di Zenzo tensor
 
 (defn- rel-max-diff
   "max |a-b| / (|want| + eps). The tensor's magnitudes span orders of magnitude
@@ -180,7 +180,7 @@
     ;; 40 gives a 1.6 ratio — not a power of two, so a sloppy resample shows up.
     (with-gl #(check-analyze 40))))
 
-;; --- reductions --------------------------------------------------------------
+;; reductions
 
 (deftest stats-reduce-matches-a-plain-loop
   (testing "the log-step max/sum fold placement-map's normalization rides on"
@@ -210,7 +210,7 @@
                   (str "sum " (aget ^doubles got2 0) " vs " want-sum))
               (is (seq sc) "the fold actually took intermediate steps"))))))))
 
-;; --- Haar placement map ------------------------------------------------------
+;; Haar placement map
 
 (defn- run-placement [im max-side]
   (let [H (long (:height im)) W (long (:width im))
@@ -249,7 +249,7 @@
   (testing "the same with the nearest reduction in play"
     (with-gl #(check-placement 40))))
 
-;; --- binned colour fields ----------------------------------------------------
+;; binned colour fields
 
 (defn- rgb-max-diff
   "max |a-b| between a GPU RGBA texture's three colour channels and a flat
