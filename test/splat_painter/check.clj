@@ -83,7 +83,9 @@
     (assert-contains vs-src-blit "v_uv = (pane - org) / (u_image * scale);" "blit texcoord from letterbox rect")
     (assert-contains fs-src-blit "uniform sampler2D u_layer;" "blit u_layer sampler")
     (assert-contains fs-src-blit "uniform float u_alpha;" "blit per-blit opacity gain")
-    (assert-contains fs-src-blit "frag = vec4(c.rgb * u_alpha, c.a * u_alpha);" "blit alpha-aware premultiplied output"))
+    (assert-contains fs-src-blit "uniform float u_encode;" "blit sRGB re-encode toggle")
+    (assert-contains fs-src-blit "if (u_encode > 0.5) rgb = srgbEncode(rgb);" "blit conditional sRGB re-encode")
+    (assert-contains fs-src-blit "frag = vec4(rgb, c.a * u_alpha);" "blit alpha-aware premultiplied output"))
 
   ;; the GPU generation shader must MIRROR seed/splat-record + layered-means + noise
   (let [{:keys [vs-src gs-src]} (gen/sources)]

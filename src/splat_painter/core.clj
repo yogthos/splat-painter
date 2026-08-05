@@ -72,6 +72,33 @@
 ;; non-reactive image / GL state
 ;; Need a sized internal-format for macOS core-profile FBO completeness.
 (def ^:private GL-RGBA8 0x8058)
+;; Linear-light compositing experiment (splat-painter-uy3.2). glimmer-gl binds neither
+;; sRGB constant, so declare them locally like GL-RGBA8 above. When
+;; GA_PAINTER_LINEAR_LIGHT is set, every composite/post/export/layer target is
+;; GL_SRGB8_ALPHA8 and GL_FRAMEBUFFER_SRGB is enabled for draws into them: the
+;; hardware decodes on sampler/blend read and encodes on write, so the existing
+;; ONE/ONE_MINUS_SRC_ALPHA src-over mixes LINEAR values instead of gamma-encoded ones.
+(def ^:private GL-SRGB8-ALPHA8   0x8C43)
+(def ^:private GL-FRAMEBUFFER-SRGB 0x8DB9)
+
+(defn- linear-light? []
+  (boolean (System/getenv "GA_PAINTER_LINEAR_LIGHT")))
+
+(defn- color-format []
+  "Internal format for the composite/post/export/layer color targets."
+  (if (linear-light?) GL-SRGB8-ALPHA8 GL-RGBA8))
+
+(defn- srgb-write!
+  "GL_FRAMEBUFFER_SRGB is context state: enable it for draws into our sRGB targets
+   (the encode-on-write that closes the linear-light loop) and disable it for
+   glReadPixels — with the flag enabled an sRGB-buffer readback converts sRGB->linear
+   (GL_ARB_framebuffer_sRGB), which would hand the PNG linear values — and for the
+   pane blit, whose destination is GTK's own non-sRGB framebuffer (the blit shader
+   re-encodes instead). No-op when the flag is unset so the flag-off call sequence is
+   byte-identical to today's."
+  [on?]
+  (when (linear-light?)
+    (if on? (gl/gl-enable GL-FRAMEBUFFER-SRGB) (gl/gl-disable GL-FRAMEBUFFER-SRGB))))
 ;; The splat field is built on the GPU via transform feedback (splat-painter.gen) —
 ;; ~50× faster than CPU seed/splat-field, which stays the tested reference: the
 ;; goldens pin it, GA_PAINTER_GPU_VERIFY compares the two fields numerically, and
@@ -262,7 +289,7 @@
 
 ;; save (offscreen render → glReadPixels → PNG)
 (defn- ensure-export-targets!
-  "Lazily create an FBO + RGBA8 color texture in gl-state for export, resizing
+  "Lazily create an FBO + color texture in gl-state for export, resizing
    the texture to iw*ih on each call (needed when image size changes). Caches
    and reuses the FBO/texture across saves — no glDelete needed."
   [area iw ih]
@@ -270,7 +297,7 @@
         fbo  (or (:export-fbo st)  (gl/gen-one gl/gl-gen-framebuffers))
         ctex (or (:export-tex st) (gl/gen-one gl/gl-gen-textures))]
     (gl/gl-bind-texture gl/GL-TEXTURE-2D ctex)
-    (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 GL-RGBA8 (int iw) (int ih) 0
+    (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 (color-format) (int iw) (int ih) 0
                         gl/GL-RGBA gl/GL-UNSIGNED-BYTE ffi/null)
     (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MIN-FILTER gl/GL-NEAREST)
     (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MAG-FILTER gl/GL-NEAREST)
@@ -281,7 +308,7 @@
     [fbo ctex]))
 
 (defn- ensure-render-targets!
-  "The two IMAGE-RESOLUTION FBO + RGBA8 texture pairs render-final! ping-pongs
+  "The two IMAGE-RESOLUTION FBO + color texture pairs render-final! ping-pongs
    between: `composite` is what the splat passes draw into, `post` is what a
    final-output pass (sharpen) writes. Separate from ensure-export-targets!,
    which is the destination the layer captures read back.
@@ -300,8 +327,12 @@
              (let [fbo (or (fbo-k st) (gl/gen-one gl/gl-gen-framebuffers))
                    tex (or (tex-k st) (gl/gen-one gl/gl-gen-textures))]
                (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
+               ;; (color-format), not GL-RGBA8: these two ARE the composite the pane
+               ;; shows and the PNG reads back, so leaving them RGBA8 makes
+               ;; GL_FRAMEBUFFER_SRGB a no-op — the enable only converts for an
+               ;; attachment that actually carries an sRGB internal format.
                (when-not (= [iw ih] (:render-size st))
-                 (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 GL-RGBA8 (int iw) (int ih) 0
+                 (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 (color-format) (int iw) (int ih) 0
                                      gl/GL-RGBA gl/GL-UNSIGNED-BYTE ffi/null)
                  (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MIN-FILTER gl/GL-LINEAR)
                  (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MAG-FILTER gl/GL-LINEAR)
@@ -504,6 +535,7 @@
         (gl/gl-active-texture (+ gl/GL-TEXTURE0 9))
         (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
         (gl/gl-uniform-1i (:u_layer blocs) 9)
+        (gl/gl-uniform-1f (:u_encode blocs) 0.0)   ; never self-encode: the sRGB target hardware-encodes
         (gl/gl-uniform-1f (:u_alpha blocs)
                           (double (if (and base-opaque? (zero? i)) 1.0 opacity)))
         (gl/gl-uniform-2f (:u_viewport blocs) (double vw) (double vh))
@@ -546,6 +578,7 @@
           (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw}))
         n (min count shader/max-splats)]
     (gl/gl-finish)   ; make the transform-feedback writes visible to the texelFetch below
+    (srgb-write! true)   ; the composite/export targets are sRGB under the linear-light flag
     (when (and (not blits-below) (System/getenv "GA_PAINTER_GPU_TIME"))
       (dotimes [_ 3] (gen/generate! gen fields (gpu-controls) tf-buf query gen-vao {:height ih :width iw}) (gl/gl-finish))
       (let [t1 (System/nanoTime) reps 8]
@@ -642,6 +675,7 @@
         prog    (get gpu prog-key)
         gen-vao (:gen-vao gpu)
         locs    (:locs prog)]
+    (srgb-write! true)   ; post target is sRGB under the linear-light flag
     (gl/gl-viewport 0 0 (int iw) (int ih))
     (gl/gl-clear-color 0.0 0.0 0.0 1.0)
     (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
@@ -716,6 +750,7 @@
   [area tex vw vh iw ih]
   (let [{:keys [blit gen-vao]} (ensure-gpu! area)
         locs (:locs blit)]
+    (srgb-write! false)   ; GTK's pane framebuffer is not sRGB — the FS re-encodes below instead
     (gl/gl-viewport 0 0 (int vw) (int vh))
     (gl/gl-clear-color 0.0 0.0 0.0 1.0)
     (gl/gl-clear gl/GL-COLOR-BUFFER-BIT)
@@ -724,6 +759,7 @@
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 9))
     (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
     (gl/gl-uniform-1i (:u_layer locs) 9)
+    (gl/gl-uniform-1f (:u_encode locs) 1.0)   ; decode-on-sample must land back encoded on the pane
     (gl/gl-uniform-1f (:u_alpha locs) 1.0)
     (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
     (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
@@ -840,6 +876,7 @@
         (println (format "gpu-save: %d candidates -> %d survivors (render %d)" total count n))
         (when (System/getenv "GA_PAINTER_GPU_VERIFY")   ; recomputes the CPU field — dev only
           (gpu-verify! area (:tf-buf (:gpu (get @gl-state area))) n))
+        (srgb-write! false)   ; an enabled FRAMEBUFFER_SRGB would return LINEAR readback — the PNG wants encoded
         (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
         (save-rgba-jolt! buf iw ih path)
         (println "gpu-save: wrote" path)
@@ -924,9 +961,10 @@
     (gpu-draw! area iw ih iw ih {:solo true})
     (let [buf (ffi/alloc (* iw ih 4))
           tex (gl/gen-one gl/gl-gen-textures)]
+      (srgb-write! false)   ; encoded readback: the layer texture holds display values, the sampler decodes
       (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
       (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
-      (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 GL-RGBA8 iw ih 0 gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
+      (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 (color-format) iw ih 0 gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
       (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MIN-FILTER gl/GL-LINEAR)
       (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-MAG-FILTER gl/GL-LINEAR)
       (gl/gl-tex-parameter-i gl/GL-TEXTURE-2D gl/GL-TEXTURE-WRAP-S gl/GL-CLAMP-TO-EDGE)
@@ -958,6 +996,7 @@
       (gl/gl-viewport 0 0 iw ih)
       (gpu-draw! area iw ih iw ih)               ; the full composite (below + live + above — live drawn ONCE)
       (let [buf  (ffi/alloc (* iw ih 4))
+            _    (srgb-write! false)   ; encoded readback — the repaint source stays gamma-encoded 0..1
             _    (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
             img' (rgba->image buf iw ih)]
         (ffi/free buf)
@@ -1007,6 +1046,7 @@
               (gl/gl-viewport 0 0 iw ih)
               (gpu-draw! area iw ih iw ih {:blits-below true})
               (let [buf (ffi/alloc (* iw ih 4))]
+                (srgb-write! false)   ; encoded readback — the source image stays gamma-encoded 0..1
                 (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
                 (reset! image-atom (rgba->image buf iw ih))
                 (ffi/free buf))
