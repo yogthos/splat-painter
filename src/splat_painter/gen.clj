@@ -308,9 +308,6 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, 4-tap bilinear (mirr
   return mix(r0, r1, fy);                             // along the COL axis (y0->y1)
 }
 
-// sRGB EOTF, inverse of the blit shader's srgbEncode. The field textures hold
-// GAMMA-encoded colour and the composite target is sRGB under
-
 // splat-record (mirror seed/splat-record) + emit one captured record. `alpha` is the
 // stroke taper (1.0 for base fills, fading toward a fine stroke's tail).
 // (hx,hy) = the chain HEAD's position — the colour-sample point for EVERY segment:
