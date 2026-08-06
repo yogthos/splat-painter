@@ -170,6 +170,31 @@ a regression gate rather than being a script someone remembers to run.
 `score.py` was removed once the port reproduced its numbers exactly
 (18.998 / 609 / -124.9 / 8.533 / 13.715 on loki); `git log` has it.
 
+### Multi-layer renders, headlessly
+
+    GA_PAINTER_PASSES=3 GA_PAINTER_SAVE_PNG=/tmp/out.png GA_PAINTER_QUIT_MS=25000 \
+      jolt -M:run examples/loki-original.jpg
+
+`(dec passes)` Add Layer commits stack under the final save, so a repaint chain is
+one command. Two things to know before reading numbers off it:
+
+**Layering costs fidelity, by design.** Each pass repaints from the previous
+RENDER, so error compounds: loki's full-frame mean|d| goes 8.533 → 9.468 → 10.173
+at 1/2/3 passes. Any layered comparison has to be against the same pass count.
+
+**`GA_PAINTER_RESIDUAL` aims the later layers** at what is still wrong relative to
+the original file (splat-painter.residual). 0 is off and reproduces a pass-matched
+baseline BYTE-IDENTICALLY — verified at 3 passes, which is the control to run
+before reading any sweep of it. Swept {0, 0.5, 1, 2, 3, 5} on loki/hk/photog: a
+peak at 2.0 (the shipped default) with all three turning back up at 3.0.
+
+**Watch the survivor count, not just the score.** The residual weighting makes the
+budget solve undershoot — 85859 survivors off, 70920 on, at the same Splats 72000
+(bd 0i2). So an on/off comparison at fixed Splats is NOT at fixed paint. To
+separate aiming from thinning, match the counts with `GA_PAINTER_COUNT` and compare
+there: at ~71k survivors it is 10.247 off vs 9.868 on, at ~86k it is 10.173 vs
+9.728 — the aim wins at both, and thinning the baseline alone makes it worse.
+
 Edge SHARPNESS, the metric that matches "fine detail looks soft" — inline, since
 it is three lines:
 

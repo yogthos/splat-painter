@@ -79,6 +79,12 @@
 ;; goldens pin it, GA_PAINTER_GPU_VERIFY compares the two fields numerically, and
 ;; `jolt -M:preview` renders one to PNG with no GL context at all.
 (defonce image-atom (atom nil))   ; {:height :width :channels :pixels} or nil
+;; The loaded FILE's pixels, kept for as long as the file is open. image-atom is
+;; replaced by a captured render on every Add Layer, so after the first commit this
+;; is the only record of what the painting is reproducing; splat-painter.residual
+;; reads it to aim later layers at the error that is left. nil = nothing loaded, and
+;; a first pass never consults it.
+(defonce original-atom (atom nil))
 (defonce gl-state   (atom {}))    ; per-GLArea GL handles, keyed by area pointer
 (defonce saved?-atom (atom false)) ; one-shot headless save via GA_PAINTER_SAVE_PNG
 (defonce viewport   (atom [800 600]))
@@ -221,6 +227,7 @@
     (let [img (image/load-image path 1024)]
       (clear-layers!)               ; new file: drop the previous image's committed layers + free their textures
       (reset! image-atom img)
+      (reset! original-atom (:pixels img))   ; the residual reference for every later layer
       (reset! image-path-atom path)
       ;; Size is the base (flat-region) stroke stdev; detail shrinks it locally. Seed
       ;; it relative to the image so default strokes are visible brush marks.
@@ -964,6 +971,23 @@
     (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
     (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))))
 
+(defn with-original
+  "Tag a repaint layer's source image with the original photograph's pixels, so
+   fields/prepare and gpu-fields/build-fields! can weight placement by the error
+   that is still left (splat-painter.residual).
+
+   Reads original-atom rather than chaining :original from image to image: the
+   chain breaks the moment select-layer! rebuilds a source from a readback, and a
+   silently missing :original is invisible — the render just goes back to spending
+   its budget uniformly. Returns `img` unchanged when there is no original (nothing
+   loaded) or the dimensions disagree, which is the single-pass case."
+  [img]
+  (let [^doubles orig @original-atom
+        ^doubles pix  (:pixels img)]
+    (if (and orig pix (= (alength orig) (alength pix)))
+      (assoc img :original orig)
+      img)))
+
 (defn add-layer!
   "Commit the live pass into the stack (commit-active!), then capture the FULL composite
    (a normal non-solo 1:1 draw) and make it the next pass's source image — so repainting
@@ -986,7 +1010,11 @@
             img' (rgba->image buf iw ih)]
         (ffi/free buf)
         (commit-active!)                         ; snapshot the live pass (needs the OLD image fields)
-        (reset! image-atom img'))
+        ;; hand the next pass the ORIGINAL photograph alongside its source. From here
+        ;; on the source IS a render, so without this nothing downstream knows what
+        ;; the painting is trying to reproduce — splat-painter.residual turns the gap
+        ;; between the two into the next pass's placement weights.
+        (reset! image-atom (with-original img')))
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))
       (reset! active-layer-atom (count @layers-atom))
@@ -1032,7 +1060,8 @@
               (gpu-draw! area iw ih iw ih {:blits-below true})
               (let [buf (ffi/alloc (* iw ih 4))]
                 (gl/gl-read-pixels 0 0 iw ih gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)
-                (reset! image-atom (rgba->image buf iw ih))
+                ;; a rebuilt source is still a repaint layer, so it keeps the residual aim
+                (reset! image-atom (with-original (rgba->image buf iw ih)))
                 (ffi/free buf))
               (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
               (let [[w h] @viewport] (gl/gl-viewport 0 0 w h))))

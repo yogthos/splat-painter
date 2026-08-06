@@ -11,6 +11,7 @@
    different painting than the app makes. It is a function now."
   (:require [splat-painter.structure :as structure]
             [splat-painter.wavelet :as wavelet]
+            [splat-painter.residual :as residual]
             [splat-painter.seed :as seed]))
 
 (defn heavy-radius
@@ -55,7 +56,15 @@
         efull  (future (structure/full-edge img0))
         sfield (structure/analyze img0)
         detail (future (wavelet/placement-map img0 sfield))
-        noise  (future (seed/prep-noise sfield))]
+        noise  (future (seed/prep-noise sfield))
+        ;; REPAINT AIM: on a layer whose source is the previous composite, scale the
+        ;; density channels by how far that composite still is from the original
+        ;; photograph. Nil on a first pass (no :original), and then this is identity —
+        ;; see splat-painter.residual for why it only ever boosts.
+        dmap0  @detail
+        dmap   (if-let [w (residual/weights-for img0 (:h dmap0) (:w dmap0))]
+                 (residual/weighted-dmap dmap0 w)
+                 dmap0)]
     (assoc img0 :structure sfield
                 :edge-full @efull
                 :blur   @light
@@ -70,9 +79,11 @@
                 :blur-heavy @heavy
                 ;; the band tier's realized paint per candidate, measured with the
                 ;; real gate and tracer (seed/band-paint-per-candidate) so band-level
-                ;; charges and caps the tier for what it actually paints on THIS image
-                :detail (assoc @detail :band-ppc
-                               (seed/band-paint-per-candidate @detail (seed/with-swirl @noise 1.0)
+                ;; charges and caps the tier for what it actually paints on THIS image.
+                ;; Measured on the WEIGHTED map: the tier is charged for the strokes it
+                ;; will actually place, and the residual boost changes that.
+                :detail (assoc dmap :band-ppc
+                               (seed/band-paint-per-candidate dmap (seed/with-swirl @noise 1.0)
                                                               @light @drift
                                                               (:height img0) (:width img0)))
                 :noise-fields @noise)))

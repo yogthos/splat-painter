@@ -9,6 +9,7 @@
             [splat-painter.structure :as structure]
             [splat-painter.wavelet :as wavelet]
             [splat-painter.fields :as fields]
+            [splat-painter.residual :as residual]
             [splat-painter.seed :as seed]))
 
 (def ^:private fixture "test/splat_painter/fixtures/eye.jpeg")
@@ -79,3 +80,44 @@
                         (ck (:detail (:detail f)))))
       (is (approx= 1e-6 (ck (:c2 (seed/prep-noise (structure/analyze (img)))))
                         (ck (:c2 (:noise-fields f))))))))
+
+(defn- with-original
+  "The fixture as a repaint layer's source: the same pixels, plus an :original that
+   matches on the left half and is well off on the right. Placement should then be
+   weighted toward the right half and left alone on the left."
+  [im]
+  (let [^doubles px (:pixels im)
+        W  (long (:width im))
+        or* (double-array (alength px))]
+    (System/arraycopy px 0 or* 0 (alength px))
+    (dotimes [i (quot (alength px) 3)]
+      (when (>= (mod i W) (quot W 2))
+        (let [b (* 3 i)]
+          (dotimes [c 3] (aset or* (+ b c) (max 0.0 (- (aget px (+ b c)) 0.35)))))))
+    (assoc im :original or*)))
+
+(deftest prepare-weights-placement-by-the-residual
+  (testing "a source carrying :original comes out with residually weighted density maps"
+    (let [im   (img)
+          base (:detail (fields/prepare im))
+          got  (:detail (fields/prepare (with-original im)))
+          w    (residual/weights-for (with-original im) (:h base) (:w base))
+          want (residual/weighted-dmap base w)]
+      (is (some? w) "an :original produces weights")
+      (doseq [k [:detail :sharp :mid :edge]]
+        (is (approx= 1e-9 (ck (get want k)) (ck (get got k)))
+            (str (name k) " is the weighted map")))
+      (is (not (approx= 1e-6 (ck (:detail base)) (ck (:detail got))))
+          "and it actually differs from the unweighted one")
+      (is (approx= 1e-9 (ck (:subject base)) (ck (:subject got)))
+          "subjectness is a gate, not a density — it must not move"))))
+
+(deftest prepare-without-an-original-is-untouched
+  (testing "the single-pass case takes no residual code path at all"
+    (let [im (img)
+          a  (:detail (fields/prepare im))
+          b  (:detail (fields/prepare im))]
+      (is (approx= 1e-12 (ck (:detail a)) (ck (:detail b))))
+      (is (approx= 1e-12 (ck (:detail (wavelet/placement-map im (structure/analyze im))))
+                         (ck (:detail a)))
+          "still exactly wavelet/placement-map's own output"))))

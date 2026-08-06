@@ -21,6 +21,7 @@
             [splat-painter.seed :as seed]
             [splat-painter.gen :as gen]
             [splat-painter.wavelet :as wavelet]
+            [splat-painter.residual :as residual]
             [jolt.ffi :as ffi]))
 
 (def ^:private fixture "test/splat_painter/fixtures/eye.jpeg")
@@ -434,3 +435,66 @@
                 (is (< (Math/abs (- (aget ^doubles got i) (aget ^doubles want i)))
                        float-tol)
                     (str "corner index " i))))))))))
+
+;; residual weighting
+
+(defn- residual-source
+  "The fixture as a repaint layer's source: same pixels, plus an :original that
+   matches on the left half and misses badly on the right."
+  [im]
+  (let [^doubles px (:pixels im)
+        W   (long (:width im))
+        or* (double-array (alength px))]
+    (System/arraycopy px 0 or* 0 (alength px))
+    (dotimes [i (quot (alength px) 3)]
+      (when (>= (mod i W) (quot W 2))
+        (let [b (* 3 i)]
+          (dotimes [c 3] (aset or* (+ b c) (max 0.0 (- (aget px (+ b c)) 0.35)))))))
+    (assoc im :original or*)))
+
+(deftest residual-weighting-matches-the-cpu
+  (testing "the GPU modulation pass reproduces residual/weighted-dmap"
+    ;; The two field builders reach the SAME candidate threshold and the SAME budget
+    ;; solve, so a residual applied on one path and not the other (or applied to
+    ;; different channels) silently paints two different pictures depending on
+    ;; whether the field shaders compiled. Nothing else pins that: the placement-map
+    ;; tests all run without an :original, where this code path does not execute.
+    (with-gl
+      (fn []
+        (let [im    (residual-source (img))
+              progs (gf/build-programs)]
+          (when progs
+            (let [ctx  (gf/make-ctx)
+                  perm (gen/upload-perm!)
+                  got  (:dmap (gf/build-fields! ctx progs im perm))
+                  base (wavelet/placement-map im (structure/analyze im) 768 4)
+                  w    (residual/weights-for im (:h base) (:w base))
+                  want (residual/weighted-dmap base w)]
+              (gf/free-ctx! ctx)
+              (is (some? w) "the fixture produces a residual")
+              (is (> (apply max (seq w)) 1.5) "and a boost big enough to be readable")
+              ;; the unweighted maps already agree to 2e-3 (placement-map-matches-the-cpu);
+              ;; the weight multiplies that error along with the value, so the bound does too
+              (doseq [k [:detail :sharp :mid :edge]]
+                (testing (name k)
+                  (let [d (max-diff (get got k) (get want k))]
+                    (is (< d (* 2e-3 (+ 1.0 (* residual/weight-cap (residual/strength)))))
+                        (str (name k) " max diff " d)))))
+              (is (< (max-diff (:subject got) (:subject base)) 2e-3)
+                  "subjectness is a gate — the residual pass must leave it alone"))))))))
+
+(deftest residual-weighting-is-skipped-without-an-original
+  (testing "a first pass gets the unweighted map, byte for byte the same code path"
+    (with-gl
+      (fn []
+        (let [im    (img)
+              progs (gf/build-programs)]
+          (when progs
+            (let [ctx  (gf/make-ctx)
+                  perm (gen/upload-perm!)
+                  got  (:dmap (gf/build-fields! ctx progs im perm))
+                  want (wavelet/placement-map im (structure/analyze im) 768 4)]
+              (gf/free-ctx! ctx)
+              (is (nil? (residual/weights-for im (:h want) (:w want))))
+              (doseq [k [:detail :sharp :mid :edge]]
+                (is (< (max-diff (get got k) (get want k)) 2e-3) (name k))))))))))
