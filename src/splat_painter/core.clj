@@ -13,6 +13,7 @@
   synchronous dialogs, so GtkFileDialog's async open is driven through a
   :collect-safe foreign-callable standing in for GAsyncReadyCallback."
   (:require [clojure.string]
+            [clojure.java.io]
             [glimmer.core   :as ui]
             [glimmer.ratom  :as r]
             [glimmer-gl.gtk :as glx]        ; registers :gl-area + :scale
@@ -24,6 +25,7 @@
             [splat-painter.gpu-fields :as gf]
             [splat-painter.seed      :as seed]
             [splat-painter.svg       :as svg]
+            [splat-painter.gzip      :as gzip]
             [jolt.ffi       :as ffi]))
 
 ;; reactive controls (the panel re-renders on change)
@@ -391,8 +393,15 @@
           (if (if (number? active) (not (zero? (long active))) (boolean active))
             :svg :png)))
 
+(defn save-ext
+  "The extension Save… offers for `fmt`. SVG defaults to the GZIPPED flavour: it is the
+   same document, about 7× smaller, and browsers and Inkscape read it directly. Typing
+   `.svg` over it still writes plain — the extension saved is what picks the writer."
+  [fmt]
+  (if (= :svg fmt) "svgz" "png"))
+
 (defn- save-image-dialog! []
-  (let [ext (name (or @save-format-atom :png))]
+  (let [ext (save-ext (or @save-format-atom :png))]
     (cond
       (not @area-atom)
       (reset! status-atom "window not ready yet")
@@ -855,6 +864,22 @@
                              (pr-str (mapv #(format "%.1f" (double %)) (:mean (nth cpu k))))
                              (double (or (:alpha (nth cpu k)) 1.0))))))))))
 
+(defn svg-path?
+  "Does `path` name a vector save? The EXTENSION is what picks the writer, so the
+   format follows what the user actually typed in the dialog rather than whatever
+   the toolbar toggle was set to when it opened."
+  [path]
+  (let [p (clojure.string/lower-case (str path))]
+    (or (clojure.string/ends-with? p ".svg")
+        (clojure.string/ends-with? p ".svgz"))))
+
+(defn gz-path?
+  "…and is it the gzipped flavour? `.svgz` is the default the SVG box offers: it is
+   the same document, worth about 7× on this exporter's output, and browsers and
+   Inkscape open it directly."
+  [path]
+  (clojure.string/ends-with? (clojure.string/lower-case (str path)) ".svgz"))
+
 (defn- save-rgba-jolt! [buf iw ih path]
   ;; buf = iw*ih*4 RGBA bytes, bottom-up (glReadPixels); write top-down via the native
   ;; jolt.png encoder (no gdk-pixbuf — its from-data path faults post-GL here).
@@ -940,22 +965,18 @@
             mb      (/ (clojure.core/count doc) 1048576.0)
             nlayers (clojure.core/count @layers-atom)]
         (println (format "svg-save: %d candidates -> %d survivors (render %d)" total count n))
-        (spit path doc)
-        (println (format "svg-save: wrote %s (%.2f MB, fidelity %.2f kept %d/%d splats)"
-                         path mb fid kept n))
-        (reset! status-atom
-                (str (format "saved %s — %.1f MB, %d/%d splats at fidelity %.2f" path mb kept n fid)
-                     (when (pos? nlayers)
-                       (format " (live pass only, %d layer(s) not in it)" nlayers)))))
+        (if (gz-path? path) (gzip/spit-gz! path doc) (spit path doc))
+        ;; report what landed on disk, not what we built — with .svgz they differ by ~7×
+        (let [on-disk (/ (.length (clojure.java.io/file path)) 1048576.0)]
+          (println (format "svg-save: wrote %s (%.2f MB on disk, %.2f MB of SVG, fidelity %.2f kept %d/%d splats)"
+                           path on-disk mb fid kept n))
+          (reset! status-atom
+                  (str (format "saved %s — %.1f MB, %d/%d splats at fidelity %.2f"
+                               path on-disk kept n fid)
+                       (when (pos? nlayers)
+                         (format " (live pass only, %d layer(s) not in it)" nlayers))))))
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h)))))
-
-(defn svg-path?
-  "Does `path` name a vector save? The EXTENSION is what picks the writer, so the
-   format follows what the user actually typed in the dialog rather than whatever
-   the toolbar toggle was set to when it opened."
-  [path]
-  (clojure.string/ends-with? (clojure.string/lower-case (str path)) ".svg"))
 
 (defn- save-render! [area path]
   (if (svg-path? path) (gpu-save-svg! area path) (gpu-save-png! area path)))

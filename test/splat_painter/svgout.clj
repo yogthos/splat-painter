@@ -15,10 +15,12 @@
    The SVG is written in image pixels (viewBox = the analysed image), so rendering it
    at any width is the upscale — nothing in the field is resolution-bound."
   (:require [clojure.string :as str]
+            [clojure.java.io]
             [splat-painter.image :as image]
             [splat-painter.fields :as fields]
             [splat-painter.seed :as seed]
-            [splat-painter.svg :as svg]))
+            [splat-painter.svg :as svg]
+            [splat-painter.gzip :as gzip]))
 
 (defn- arg [s]
   (let [s (when s (str/trim s))]
@@ -41,7 +43,10 @@
         t0    (System/nanoTime)
         {:keys [doc total kept residual repaired]} (svg/field->svg* fld opts)
         ms    (/ (- (System/nanoTime) t0) 1e6)]
-    (spit out doc)
-    (println (format "wrote %s  (%.2f MB, %d/%d kept = %.1f%%, %d repaired, worst hole %.3f, %.0f ms)"
-                     out (/ (count doc) 1048576.0) kept total
+    (if (str/ends-with? (str/lower-case out) ".svgz")
+      (gzip/spit-gz! out doc)
+      (spit out doc))
+    (println (format "wrote %s  (%.2f MB on disk, %.2f MB of SVG, %d/%d kept = %.1f%%, %d repaired, worst hole %.3f, %.0f ms)"
+                     out (/ (.length (clojure.java.io/file out)) 1048576.0)
+                     (/ (count doc) 1048576.0) kept total
                      (* 100.0 (/ (double kept) (max total 1))) repaired residual ms))))

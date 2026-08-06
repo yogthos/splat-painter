@@ -52,7 +52,9 @@ jolt -M:run path/to/image.jpeg    # load an image immediately
 **Save…** writes the picture you are looking at. The **SVG** box beside it picks the
 default extension — checked is vector, unchecked is PNG — but whatever extension you
 actually type is what decides, so a `.svg` filename over a PNG default does the
-obvious thing. **Fidelity** is the SVG size/quality trade. See "Vector output".
+obvious thing. The SVG default is `.svgz` (gzipped, ~7× smaller, opens the same
+everywhere); type `.svg` to get it plain. **Fidelity** is the size/quality trade.
+See "Vector output".
 
 Sliders (live):
 
@@ -130,14 +132,15 @@ an SVG document. It is pure: no GL, no I/O.
 
 In the app it is **Save…** with the SVG box checked: the live pass renders, the field
 comes back off the transform-feedback buffer, and the document is written. Headless,
-`GA_PAINTER_SAVE_PNG` takes an `.svg` path too — the extension picks the writer. There
-is also a CPU-path harness that needs no GL at all:
+`GA_PAINTER_SAVE_PNG` takes an `.svg`/`.svgz` path too — the extension picks the
+writer. There is also a CPU-path harness that needs no GL at all:
 
 ```sh
-jolt -M:svg examples/loki-original.jpg /tmp/a.svg
+jolt -M:svg examples/loki-original.jpg /tmp/a.svgz            # gzipped, from the extension
+jolt -M:svg examples/loki-original.jpg /tmp/a.svg             # plain
 jolt -M:svg examples/loki-original.jpg /tmp/a.svg - - '{:mode :flat}'
 jolt -M:svg examples/loki-original.jpg /tmp/a.svg - - '{:fidelity 0.5}'
-rsvg-convert -w 4000 -o /tmp/a-4x.png /tmp/a.svg   # the upscale
+rsvg-convert -w 4000 -o /tmp/a-4x.png /tmp/a.svgz             # the upscale
 ```
 
 The viewBox stays in analysed image pixels, so rendering the same file at 4× IS the
@@ -193,12 +196,12 @@ faithful export runs to tens of megabytes. The **Fidelity** slider beside the SV
 trades that off. 1.0 keeps every splat and is exactly what the exporter produced before
 the dial existed; below that it prunes, quantizes and rounds. On a 166k-splat painting:
 
-| Fidelity | splats kept | SVG | gzipped | MAE vs the PNG |
+| Fidelity | splats kept | `.svgz` | plain `.svg` | MAE vs the PNG |
 | --- | --- | --- | --- | --- |
-| 1.0 | 100% | 17.6 MB | 2.4 MB | 1.85/255 |
-| 0.9 (default) | 75% | 13.1 MB | 1.8 MB | 1.90/255 |
-| 0.5 | 49% | 8.4 MB | 1.2 MB | 2.48/255 |
-| 0.1 | 33% | 5.1 MB | 0.8 MB | 5.51/255 |
+| 1.0 | 100% | 2.4 MB | 17.6 MB | 1.85/255 |
+| 0.9 (default) | 75% | 1.8 MB | 13.1 MB | 1.90/255 |
+| 0.5 | 49% | 1.2 MB | 8.4 MB | 2.48/255 |
+| 0.1 | 33% | 0.8 MB | 5.1 MB | 5.51/255 |
 
 The dial's first move is nearly free — a quarter of the splats in a dense painting
 never reach the image at all.
@@ -244,8 +247,13 @@ empty.
 Against the app's own PNG save of the same render (64k splats, default texture dials,
 which the SVG does not reproduce) the export lands at 1.7/255 mean abs error.
 
-Gzip the result yourself (`.svgz`) — every browser and Inkscape reads it; the exporter
-does not.
+`.svgz` is the default and is worth more than every encoding trick in the file put
+together — an SVG is one long run of near-identical elements, which is the best case
+DEFLATE has, and it comes out around 7×. It is written through zlib's `gzopen`/
+`gzwrite` (`splat-painter.gzip`), so the file is a real RFC 1952 stream with no
+timestamp, and the same painting saves to the same bytes every time. Chromium, librsvg
+and Inkscape all open one straight off disk; a web SERVER has to send it with
+`Content-Encoding: gzip`.
 
 ## REPL-driven development
 

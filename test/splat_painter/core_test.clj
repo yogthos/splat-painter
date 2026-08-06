@@ -52,9 +52,23 @@
   (testing "a scripted GA_PAINTER_SAVE_PNG=/tmp/a.svg is a vector save"
     (is (core/svg-path? "/tmp/a.svg"))
     (is (core/svg-path? "/tmp/A.SVG"))
+    (is (core/svg-path? "/tmp/a.svgz") "and so is the gzipped flavour")
     (is (not (core/svg-path? "/tmp/a.png")))
     (is (not (core/svg-path? "/tmp/svg.png")) "the extension, not the name")
-    (is (not (core/svg-path? nil)))))
+    (is (not (core/svg-path? nil))))
+  (testing "and only .svgz gets gzipped"
+    (is (core/gz-path? "/tmp/a.svgz"))
+    (is (core/gz-path? "/tmp/A.SVGZ"))
+    (is (not (core/gz-path? "/tmp/a.svg")))
+    (is (not (core/gz-path? nil)))))
+
+(deftest the-svg-box-offers-the-gzipped-extension
+  ;; .svgz is the same document ~7x smaller and browsers and Inkscape open it directly,
+  ;; so it is what Save… defaults to. Typing .svg over it still writes plain — the
+  ;; extension saved is what picks the writer, not this.
+  (is (= "svgz" (core/save-ext :svg)))
+  (is (= "png" (core/save-ext :png)))
+  (is (core/gz-path? (str "splats." (core/save-ext :svg)))))
 
 (defn- toolbar-prop [tag k]
   (->> (#'core/toolbar) (filter vector?) (filter #(= tag (first %))) first second k))

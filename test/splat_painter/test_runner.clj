@@ -18,7 +18,8 @@
             [splat-painter.hardness-test]
             [splat-painter.band-ppc-test]
             [splat-painter.tier-ppc-test]
-            [splat-painter.svg-test]))
+            [splat-painter.svg-test]
+            [splat-painter.gzip-test]))
 
 (defmethod t/report :error [m]
   (t/with-test-out
@@ -52,7 +53,9 @@
                              'splat-painter.band-ppc-test
                              'splat-painter.tier-ppc-test
                              ;; pure string/geometry output — no GL, no I/O
-                             'splat-painter.svg-test)
+                             'splat-painter.svg-test
+                             ;; writes a temp file through zlib
+                             'splat-painter.gzip-test)
         failed (+ (:fail results 0) (:error results 0))]
     (println (format "\n%d tests, %d passed, %d failed"
                      (:test results 0) (:pass results 0) failed))
