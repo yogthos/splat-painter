@@ -29,6 +29,7 @@
    ["GA_PAINTER_SWIRL"      #'core/cur-swirl      #'core/swirl-atom      "0.5"   0.5]
    ["GA_PAINTER_CONTRAST"   #'core/cur-contrast   #'core/contrast-atom   "1.4"   1.4]
    ["GA_PAINTER_BRIGHTNESS" #'core/cur-brightness #'core/brightness-atom "1.3"   1.3]
+   ["GA_PAINTER_LIFT"       #'core/cur-lift       #'core/lift-atom       "1.8"   1.8]
    ["GA_PAINTER_HARDNESS"   #'core/cur-hardness   #'core/hardness-atom   "1.2"   1.2]
    ["GA_PAINTER_AA"         #'core/cur-aa         #'core/aa-atom         "1.0"   1.0]
    ["GA_PAINTER_TEX_STREAK" #'core/cur-tex-streak #'core/tex-streak-atom "0.3"   0.3]

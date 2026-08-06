@@ -703,6 +703,48 @@ void main(){
   frag = vec4(clamp(c * u_amount, 0.0, 1.0), 1.0);
 }")
 
+(def ^:private fs-src-lift
+  "Shadow lift on the finished composite, as a gamma curve: out = c^(1/amount).
+
+  Why a power curve and not a multiply — the two do different jobs and Brightness
+  already does the other one. A multiply scales every tone by the same factor, so
+  it reaches the highlights first and clips them while the shadows barely move. A
+  power curve has its steepest gain near black: at amount 2.2 a value of 0.02 goes
+  to 0.19 while 0.9 only reaches 0.95, so dark paint opens up and the highlights
+  roll off toward white instead of piling onto it.
+
+  This is the curve shape a double sRGB encode has, which is what made the earlier
+  pane bug read as 'more detailed but overexposed' — the detail was the shadow
+  gain, the overexposure was the same operator running unbounded on the top end.
+  Here it is a dial, and Brightness stays available to set the level afterwards.
+
+  Below 1.0 the curve inverts and deepens shadows, which is the useful direction
+  for a flat, hazy source."
+  "#version 330 core
+uniform sampler2D u_src;
+uniform vec2 u_viewport;
+uniform vec4 u_rect;
+uniform float u_amount;         // 1.0 = unchanged; >1 lifts shadows, <1 deepens
+out vec4 frag;
+void main(){
+  vec2 q = clamp(gl_FragCoord.xy, u_rect.xy + 0.5, u_rect.xy + u_rect.zw - 0.5);
+  vec3 c = texture(u_src, q / u_viewport).rgb;
+  // per-channel, so a lift does not shift hue the way a luma-only gain would
+  frag = vec4(clamp(pow(max(c, 0.0), vec3(1.0 / max(u_amount, 0.01))), 0.0, 1.0), 1.0);
+}")
+
+(defn build-program-lift
+  "Compile + link the shadow-lift present pass. Shares vs-src-sharpen's
+  attribute-less geometry and uniform names so present-pass! drives it unchanged.
+  Returns {:program :locs} or nil."
+  []
+  (when-let [prog (gl/make-program vs-src-sharpen fs-src-lift)]
+    {:program prog
+     :locs {:u_src      (gl/gl-get-uniform-location prog "u_src")
+            :u_viewport (gl/gl-get-uniform-location prog "u_viewport")
+            :u_rect     (gl/gl-get-uniform-location prog "u_rect")
+            :u_amount   (gl/gl-get-uniform-location prog "u_amount")}}))
+
 (defn build-program-brightness
   "Compile + link the brightness present pass. Shares vs-src-sharpen's
   attribute-less geometry and uniform names so present-pass! drives it unchanged.
