@@ -118,9 +118,17 @@ jobs:
         run: jolt build -m splat-painter.core -o splat-painter --opt
 
       - name: Package
+        # Name from the REF, not the event. A workflow_dispatch ON A TAG is still that
+        # tag's release — the Publish step below keys on exactly that — but naming off
+        # the event stamped the version out of the asset, so a release cut that way
+        # shipped splat-painter-aarch64-macos.tar.gz where every other release carries
+        # splat-painter-v0.1.10-aarch64-macos.tar.gz. Only an untagged build (dispatch
+        # on a branch) gets the bare name.
         run: |
-          name="splat-painter-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          [ "${{ github.event_name }}" = "workflow_dispatch" ] && name="splat-painter-${{ matrix.target }}"
+          case "${GITHUB_REF}" in
+            refs/tags/*) name="splat-painter-${GITHUB_REF_NAME}-${{ matrix.target }}" ;;
+            *)           name="splat-painter-${{ matrix.target }}" ;;
+          esac
           mkdir -p "$name"
           cp splat-painter README.md "$name/"
           tar czf "${name}.tar.gz" "$name"
