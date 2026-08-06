@@ -449,18 +449,15 @@ void main(){
   "#version 330 core
 uniform sampler2D u_layer;      // a committed pass, captured bottom-up via glReadPixels
 uniform float u_alpha;          // per-blit opacity gain (the layer glaze strength)
-uniform float u_encode;         // 1 = re-encode sRGB for a NON-sRGB destination (the pane blit)
 in vec2 v_uv;
 out vec4 frag;
-vec3 srgbEncode(vec3 c) {      // sRGB EOTF inverse, piecewise — matches the hardware encode exactly
-  return mix(12.92 * c, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
-             vec3(greaterThan(c, vec3(0.0031308))));
-}
 void main(){
+  // A STRAIGHT RESAMPLE — no colour transform of any kind. The composite already
+  // holds display-encoded values and the pane is a plain framebuffer, so anything
+  // applied here shows on screen but never in the saved PNG (which reads the
+  // composite directly). That divergence is invisible to every headless check.
   vec4 c = texture(u_layer, v_uv);
-  vec3 rgb = c.rgb * u_alpha;
-  if (u_encode > 0.5) rgb = srgbEncode(rgb);
-  frag = vec4(rgb, c.a * u_alpha);   // premultiplied content scaled by layer opacity
+  frag = vec4(c.rgb * u_alpha, c.a * u_alpha);   // premultiplied, scaled by layer opacity
 }")
 
 (defn build-program-quad
@@ -498,7 +495,7 @@ void main(){
             :u_image    (gl/gl-get-uniform-location prog "u_image")
             :u_layer    (gl/gl-get-uniform-location prog "u_layer")
             :u_alpha    (gl/gl-get-uniform-location prog "u_alpha")
-            :u_encode   (gl/gl-get-uniform-location prog "u_encode")}}))
+            }}))
 
 ;; sharpen present pass (final-output unsharp, gated)
 ;; A view/output effect applied ONCE to the finished composite (screen + PNG
