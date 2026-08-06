@@ -188,12 +188,17 @@ baseline BYTE-IDENTICALLY — verified at 3 passes, which is the control to run
 before reading any sweep of it. Swept {0, 0.5, 1, 2, 3, 5} on loki/hk/photog: a
 peak at 2.0 (the shipped default) with all three turning back up at 3.0.
 
-**Watch the survivor count, not just the score.** The residual weighting makes the
-budget solve undershoot — 85859 survivors off, 70920 on, at the same Splats 72000
-(bd 0i2). So an on/off comparison at fixed Splats is NOT at fixed paint. To
-separate aiming from thinning, match the counts with `GA_PAINTER_COUNT` and compare
-there: at ~71k survivors it is 10.247 off vs 9.868 on, at ~86k it is 10.173 vs
-9.728 — the aim wins at both, and thinning the baseline alone makes it worse.
+**Watch the survivor count, not just the score.** Splats does not deliver its
+nominal count in any configuration — a first pass overshoots it by 86% (134115
+against 72000), a third pass by 19%, and with the aim on it lands near nominal
+(70920). So an on/off comparison at fixed Splats is NOT at fixed paint. To separate
+aiming from thinning, match the counts with `GA_PAINTER_COUNT`: at ~71k survivors
+it is 10.247 off vs 9.868 on, at ~86k it is 10.173 vs 9.728. The aim wins at both,
+and thinning the baseline alone makes it worse (10.173 → 10.247).
+
+Worth knowing when you reach for Splats on a layered render: more paint buys the
+baseline 0.074 over that range and the aimed render 0.140 — roughly double, because
+the extra strokes go where they are needed.
 
 Edge SHARPNESS, the metric that matches "fine detail looks soft" — inline, since
 it is three lines:

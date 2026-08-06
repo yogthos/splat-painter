@@ -70,15 +70,14 @@
           w     (resid/weight-map comp' (flat 0.5) H W 32 32 1.0)]
       (is (<= (apply max (seq w)) (+ 1.0 resid/weight-cap 1e-9))))))
 
-(deftest apply-weights-scales-the-density-maps-only
+(deftest aim-scales-the-density-maps-only
   (testing "the four density channels scale; subject and the grid metadata do not"
     (let [n    16
           mk   (fn [v] (double-array n v))
           dmap {:h 4 :w 4 :dmax 1.0 :src-h 64 :src-w 64
                 :detail (mk 0.2) :sharp (mk 0.3) :mid (mk 0.4) :edge (mk 0.5)
                 :subject (mk 0.6)}
-          w    (double-array n 2.0)
-          out  (resid/weighted-dmap dmap w)]
+          out  (resid/aimed-dmap dmap (double-array n 2.0))]
       (is (every? #(= 0.4 %) (seq (:detail out))))
       (is (every? #(= 0.6 %) (seq (:sharp out))))
       (is (every? #(= 0.8 %) (seq (:mid out))))
@@ -93,7 +92,7 @@
     (let [n    16
           orig (double-array (map #(/ (double %) 17.0) (range n)))
           dmap {:h 4 :w 4 :dmax 1.0 :detail orig :sharp orig :mid orig :edge orig}
-          out  (resid/weighted-dmap dmap (double-array n 1.0))]
+          out  (resid/aimed-dmap dmap (double-array n 1.0))]
       (is (= (seq orig) (seq (:detail out))))
       (is (= (seq orig) (seq (:sharp out)))))))
 

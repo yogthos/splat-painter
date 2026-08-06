@@ -63,7 +63,7 @@
         ;; see splat-painter.residual for why it only ever boosts.
         dmap0  @detail
         dmap   (if-let [w (residual/weights-for img0 (:h dmap0) (:w dmap0))]
-                 (residual/weighted-dmap dmap0 w)
+                 (residual/aimed-dmap dmap0 w)
                  dmap0)]
     (assoc img0 :structure sfield
                 :edge-full @efull
