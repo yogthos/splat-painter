@@ -16,7 +16,8 @@
             [splat-painter.score-test]
             [splat-painter.hardness-test]
             [splat-painter.band-ppc-test]
-            [splat-painter.tier-ppc-test]))
+            [splat-painter.tier-ppc-test]
+            [splat-painter.linear-light-test]))
 
 (defmethod t/report :error [m]
   (t/with-test-out
@@ -47,7 +48,10 @@
                              'splat-painter.hardness-test
                              ;; also needs a GL context; skips itself without one
                              'splat-painter.band-ppc-test
-                             'splat-painter.tier-ppc-test)
+                             'splat-painter.tier-ppc-test
+                             ;; needs a GL context for the flag-on compile check;
+                             ;; source-level pins run headless regardless
+                             'splat-painter.linear-light-test)
         failed (+ (:fail results 0) (:error results 0))]
     (println (format "\n%d tests, %d passed, %d failed"
                      (:test results 0) (:pass results 0) failed))

@@ -308,6 +308,20 @@ vec3 sampleRGB(sampler2D tex, float x, float y){   // W×H, 4-tap bilinear (mirr
   return mix(r0, r1, fy);                             // along the COL axis (y0->y1)
 }
 
+// sRGB EOTF, inverse of the blit shader's srgbEncode. The field textures hold
+// GAMMA-encoded colour and the composite target is sRGB under
+// GA_PAINTER_LINEAR_LIGHT (encode-on-write): emit the splat colour in LINEAR or
+// the write encode hits an already-encoded value — double-encoded colour,
+// measured mean|d| 8.5 -> 55.5 on loki. Applied ONLY to the emitted colour,
+// AFTER every tonal decision: the decision probes (THIN_GAIN, drift) sample the
+// same textures for luma signals and keep their gamma-domain constants.
+#ifdef GA_PAINTER_LINEAR_LIGHT
+vec3 srgbToLinear(vec3 c){
+  return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)),
+             vec3(greaterThan(c, vec3(0.04045))));
+}
+#endif
+
 // splat-record (mirror seed/splat-record) + emit one captured record. `alpha` is the
 // stroke taper (1.0 for base fills, fading toward a fine stroke's tail).
 // (hx,hy) = the chain HEAD's position — the colour-sample point for EVERY segment:
@@ -372,6 +386,9 @@ void emitSplat(float px, float py, float hx, float hy, float csz, float D, float
   // (R up, B down) or cool. sn is the per-stroke seed noise, so this is exact parity.
   float temp = u_variation * 0.10 * (2.0 * sn);
   vec3 color = clamp(colorAc * tone * vec3(1.0 + temp, 1.0, 1.0 - temp), 0.0, 1.0);
+#ifdef GA_PAINTER_LINEAR_LIGHT
+  color = srgbToLinear(color);   // the composite target encodes on write — blend LINEAR
+#endif
   o_a = vec4(px, py, c00, c01);
   o_b = vec4(c11, color.r, color.g, color.b);
   // .y carries ABSOLUTE SUBJECTNESS at the stroke mean through to the render
@@ -807,11 +824,28 @@ void main(){
   []
   {:vs-src vs-src :gs-src gs-src})
 
+(defn- flag-gs-src
+  "gs-src with the linear-light define, or gs-src unchanged. Pure so the
+   #define-after-#version ordering invariant is testable without GL."
+  [on?]
+  (if on?
+    (.replace gs-src "#version 330 core"
+              ;; #define must FOLLOW #version — GLSL rejects any
+              ;; statement (a define counts) before it
+              "#version 330 core\n#define GA_PAINTER_LINEAR_LIGHT")
+    gs-src))
+
 (defn build-gen-program
   "Compile + link the VS+GS transform-feedback generation program, capturing
-   o_a,o_b interleaved (8 floats/splat). Returns {:program :locs} or nil."
+   o_a,o_b interleaved (8 floats/splat). Returns {:program :locs} or nil.
+   GA_PAINTER_LINEAR_LIGHT (mirror core/linear-light? — gen cannot require core,
+   core requires gen) injects a define that decodes the emitted splat colour
+   sRGB->linear before it reaches the sRGB composite target; flag off compiles
+   the base source unchanged."
   []
-  (when-let [prog (gl/make-tf-program vs-src gs-src ["o_a" "o_b" "o_c"])]
+  (when-let [prog (gl/make-tf-program vs-src
+                                      (flag-gs-src (boolean (System/getenv "GA_PAINTER_LINEAR_LIGHT")))
+                                      ["o_a" "o_b" "o_c"])]
     {:program prog
      :locs (into {} (map (fn [n] [(keyword n) (gl/gl-get-uniform-location prog n)]))
                  gen-uniform-names)}))

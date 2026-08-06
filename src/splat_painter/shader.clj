@@ -676,6 +676,45 @@ void main(){
   frag = vec4(clamp(mix(c, sm, clamp(u_amount, 0.0, 1.0) * gate), 0.0, 1.0), 1.0);
 }")
 
+(def ^:private fs-src-brightness
+  "Exposure on the finished composite, as a per-channel multiply.
+
+  A present pass rather than a per-splat colour term: brightness is a VIEWING
+  adjustment, so it must not move stroke placement. Folding it into the
+  generation shader would change the colour every survival and ridge test reads,
+  and every constant in seed.clj was measured against unscaled colour.
+
+  Multiply, not an additive lift: scaling preserves the ratio between neighbouring
+  tones, so paint keeps its modelling. Adding a constant flattens the shadow end
+  into grey. Clamped, so pushing past 1.0 rolls highlights off at white rather
+  than wrapping."
+  "#version 330 core
+uniform sampler2D u_src;
+uniform vec2 u_viewport;
+uniform vec4 u_rect;
+uniform float u_amount;         // 1.0 = unchanged
+out vec4 frag;
+void main(){
+  // vs-src-sharpen passes no varyings — every present pass derives its own UV from
+  // gl_FragCoord, with the same rect clamp the sharpen/aa taps use so the letterbox
+  // bar cannot bleed in at the edges.
+  vec2 q = clamp(gl_FragCoord.xy, u_rect.xy + 0.5, u_rect.xy + u_rect.zw - 0.5);
+  vec3 c = texture(u_src, q / u_viewport).rgb;
+  frag = vec4(clamp(c * u_amount, 0.0, 1.0), 1.0);
+}")
+
+(defn build-program-brightness
+  "Compile + link the brightness present pass. Shares vs-src-sharpen's
+  attribute-less geometry and uniform names so present-pass! drives it unchanged.
+  Returns {:program :locs} or nil."
+  []
+  (when-let [prog (gl/make-program vs-src-sharpen fs-src-brightness)]
+    {:program prog
+     :locs {:u_src      (gl/gl-get-uniform-location prog "u_src")
+            :u_viewport (gl/gl-get-uniform-location prog "u_viewport")
+            :u_rect     (gl/gl-get-uniform-location prog "u_rect")
+            :u_amount   (gl/gl-get-uniform-location prog "u_amount")}}))
+
 (defn build-program-aa
   "Compile + link the antialias present pass. Same attribute-less geometry and rect
   convention as the sharpen pass; runs after it. Returns {:program :locs} or nil."

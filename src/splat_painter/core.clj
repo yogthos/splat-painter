@@ -40,6 +40,7 @@
 (defonce variation-atom (r/atom 0.5))   ; per-stroke size/tone jitter
 (defonce curvature-atom (r/atom 0.5))   ; Perlin warp — how much strokes bend/curve off-grid
 (defonce contrast-atom (r/atom 1.0))
+(defonce brightness-atom (r/atom 1.0)) ; final-output exposure multiply; 1.0 = unchanged
 (defonce broad-atom    (r/atom 1.0))   ; per-tier size multipliers: background/large
 (defonce mid-atom      (r/atom 1.0))   ; features vs mid structure vs the finest
 (defonce fine-atom     (r/atom 1.0))   ; details, each loosened/focused independently
@@ -196,6 +197,7 @@
 (defn- cur-cutin  [] (or (some-> (System/getenv "GA_PAINTER_CUTIN")  Double/parseDouble)      @cutin-atom))
 (defn- cur-swirl  [] (or (some-> (System/getenv "GA_PAINTER_SWIRL")  Double/parseDouble)      @swirl-atom))
 (defn- cur-contrast [] (or (some-> (System/getenv "GA_PAINTER_CONTRAST") Double/parseDouble)  @contrast-atom))
+(defn- cur-brightness [] (or (some-> (System/getenv "GA_PAINTER_BRIGHTNESS") Double/parseDouble) @brightness-atom))
 (defn- cur-hardness [] (or (some-> (System/getenv "GA_PAINTER_HARDNESS") Double/parseDouble)  @hardness-atom))
 (defn- cur-aa       [] (or (some-> (System/getenv "GA_PAINTER_AA")       Double/parseDouble)  @aa-atom))
 (defn- cur-sharpen [] (or (some-> (System/getenv "GA_PAINTER_SHARPEN") Double/parseDouble)  @sharpen-atom))
@@ -489,6 +491,7 @@
                  :blit    (shader/build-program-blit)
                  :sharpen (shader/build-program-sharpen)
                  :aa      (shader/build-program-aa)
+                 :brightness (shader/build-program-brightness)
                  :perm    (gen/upload-perm!)
                  :tf-buf  tf-buf
                  :query   (gl/gen-one gl/gl-gen-queries)
@@ -665,7 +668,7 @@
     {:count count :total total :n n}))
 
 (defn- present-pass!
-  "Draw one full-frame present pass (`prog-key` = :sharpen or :aa) from `src-tex`
+  "Draw one full-frame present pass (`prog-key` = :sharpen, :aa or :brightness) from `src-tex`
    into the currently-bound framebuffer, at iw*ih. The target IS the image here —
    the letterbox exists only in the pane blit — so the clamp rect is the whole
    texture. Both passes share vs-src-sharpen's geometry and uniform names, so this
@@ -720,28 +723,37 @@
   [area iw ih]
   (let [{[cfbo ctex] :composite [pfbo ptex] :post} (ensure-render-targets! area iw ih)
         sharpen (double (cur-sharpen))
-        aa      (double (cur-aa))]
+        aa      (double (cur-aa))
+        bright  (double (cur-brightness))]
     (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER cfbo)
     (gl/gl-viewport 0 0 (int iw) (int ih))
     (let [result (gpu-draw! area iw ih iw ih)
-          ;; PRESENT-PASS ORDER: sharpen, then antialias. Sharpen is gated on local
-          ;; gradient so it targets silhouettes, and a painted silhouette is scalloped
-          ;; at sub-pixel scale by construction (overlapping strokes at slightly
-          ;; different angles) — amplifying that is the staircase. Antialias smooths
-          ;; ALONG the edge afterwards, so it cleans up after sharpen instead of being
-          ;; undone by it. The per-splat hardness easing cannot do this job: it runs
+          ;; PRESENT-PASS ORDER: sharpen, then antialias, then brightness. Sharpen is
+          ;; gated on local gradient so it targets silhouettes, and a painted silhouette
+          ;; is scalloped at sub-pixel scale by construction (overlapping strokes at
+          ;; slightly different angles) — amplifying that is the staircase. Antialias
+          ;; smooths ALONG the edge afterwards, so it cleans up after sharpen instead of
+          ;; being undone by it. The per-splat hardness easing cannot do this job: it runs
           ;; during rasterization, before the composite exists.
-          ;; Each pass ping-pongs between the two targets, so no third one is needed.
-          [tex fbo] (if (pos? sharpen)
-                      (do (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER pfbo)
-                          (present-pass! area iw ih ctex sharpen :sharpen)
-                          [ptex cfbo])
-                      [ctex pfbo])]
-      (if (pos? aa)
-        (do (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER fbo)
-            (present-pass! area iw ih tex aa :aa)
-            [(if (= fbo cfbo) ctex ptex) result])
-        [tex result]))))
+          ;; Brightness goes LAST: it is an exposure adjustment on the finished picture,
+          ;; and running it before sharpen would move the gradients sharpen gates on.
+          ;; Each pass is SKIPPED at its no-op value, so the common all-default path still
+          ;; does zero present passes and returns the composite untouched.
+          passes (cond-> []
+                   (pos? sharpen)    (conj [:sharpen sharpen])
+                   (pos? aa)         (conj [:aa aa])
+                   (not= 1.0 bright) (conj [:brightness bright]))
+          ;; Ping-pong between the two targets: carry the current texture and whichever
+          ;; fbo/tex pair is free to write into. Two targets suffice for any number of
+          ;; passes. The LAST framebuffer written stays bound — gpu-save-png! reads back
+          ;; straight off it.
+          [tex _] (reduce (fn [[src-tex [dst-fbo dst-tex]] [prog-key amount]]
+                            (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER dst-fbo)
+                            (present-pass! area iw ih src-tex amount prog-key)
+                            [dst-tex (if (= dst-fbo cfbo) [pfbo ptex] [cfbo ctex])])
+                          [ctex [pfbo ptex]]
+                          passes)]
+      [tex result])))
 
 (defn- blit-to-pane!
   "Resample the finished native-resolution texture into the currently-bound
@@ -759,7 +771,13 @@
     (gl/gl-active-texture (+ gl/GL-TEXTURE0 9))
     (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
     (gl/gl-uniform-1i (:u_layer locs) 9)
-    (gl/gl-uniform-1f (:u_encode locs) 1.0)   ; decode-on-sample must land back encoded on the pane
+    ;; Re-encode ONLY when the source texture is sRGB-format. Under the flag the
+    ;; sampler decodes on read, so the value must land back encoded for GTK's
+    ;; non-sRGB pane. With the flag off the texture is plain RGBA8, the sampler
+    ;; returns the stored gamma values untouched, and encoding them again washes
+    ;; the pane out. The headless PNG save never goes through here, so a
+    ;; byte-identical save proves nothing about this line.
+    (gl/gl-uniform-1f (:u_encode locs) (if (linear-light?) 1.0 0.0))
     (gl/gl-uniform-1f (:u_alpha locs) 1.0)
     (gl/gl-uniform-2f (:u_viewport locs) (double vw) (double vh))
     (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
@@ -894,10 +912,10 @@
 (def ^:private settings-atoms
   "The slider atoms a committed layer must snapshot so re-selecting it reproduces the
    pass deterministically. Positional — snapshot-settings / restore-settings! use the
-   same order. (count size broad mid fine detail variation curvature stroke contrast
+   same order. (count size broad mid fine detail variation curvature stroke contrast brightness
    hardness aa cutin swirl tex-streak tex-grain tex-edge.)"
   [count-atom size-atom broad-atom mid-atom fine-atom detail-atom variation-atom
-   curvature-atom stroke-atom contrast-atom hardness-atom aa-atom cutin-atom swirl-atom
+   curvature-atom stroke-atom contrast-atom brightness-atom hardness-atom aa-atom cutin-atom swirl-atom
    tex-streak-atom tex-grain-atom tex-edge-atom])
 
 (defn snapshot-settings
@@ -1155,6 +1173,7 @@
    [slider "Curvature" 0.0  1.0   0.02  curvature-atom]
    [slider "Stroke"    1.0  4.0   0.05  stroke-atom]   ; <1 degenerates chains to bead dots
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
+   [slider "Brightness" 0.4 2.0   0.05  brightness-atom]  ; final-output exposure; 1.0 = unchanged
    [slider "Hardness"  1.0  4.0   0.05  hardness-atom]   ; detail-stroke crispness (big strokes stay round)
    [slider "Antialias" 0.0  1.0   0.05  aa-atom]        ; smooths along edges AFTER Sharpen (kills the staircase); 0 = off
    [slider "Sharpen"   0.0  1.5   0.05  sharpen-atom]    ; final-output edge-gated unsharp; 0 = off
