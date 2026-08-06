@@ -41,6 +41,7 @@
 (defonce curvature-atom (r/atom 0.5))   ; Perlin warp — how much strokes bend/curve off-grid
 (defonce contrast-atom (r/atom 1.0))
 (defonce brightness-atom (r/atom 1.0)) ; final-output exposure multiply; 1.0 = unchanged
+(defonce lift-atom       (r/atom 1.0)) ; final-output gamma: >1 lifts shadows, <1 deepens; 1.0 = unchanged
 (defonce broad-atom    (r/atom 1.0))   ; per-tier size multipliers: background/large
 (defonce mid-atom      (r/atom 1.0))   ; features vs mid structure vs the finest
 (defonce fine-atom     (r/atom 1.0))   ; details, each loosened/focused independently
@@ -171,6 +172,7 @@
 (defn- cur-swirl  [] (or (some-> (System/getenv "GA_PAINTER_SWIRL")  Double/parseDouble)      @swirl-atom))
 (defn- cur-contrast [] (or (some-> (System/getenv "GA_PAINTER_CONTRAST") Double/parseDouble)  @contrast-atom))
 (defn- cur-brightness [] (or (some-> (System/getenv "GA_PAINTER_BRIGHTNESS") Double/parseDouble) @brightness-atom))
+(defn- cur-lift       [] (or (some-> (System/getenv "GA_PAINTER_LIFT")       Double/parseDouble) @lift-atom))
 (defn- cur-hardness [] (or (some-> (System/getenv "GA_PAINTER_HARDNESS") Double/parseDouble)  @hardness-atom))
 (defn- cur-aa       [] (or (some-> (System/getenv "GA_PAINTER_AA")       Double/parseDouble)  @aa-atom))
 (defn- cur-sharpen [] (or (some-> (System/getenv "GA_PAINTER_SHARPEN") Double/parseDouble)  @sharpen-atom))
@@ -465,6 +467,7 @@
                  :sharpen (shader/build-program-sharpen)
                  :aa      (shader/build-program-aa)
                  :brightness (shader/build-program-brightness)
+                 :lift    (shader/build-program-lift)
                  :perm    (gen/upload-perm!)
                  :tf-buf  tf-buf
                  :query   (gl/gen-one gl/gl-gen-queries)
@@ -639,7 +642,7 @@
     {:count count :total total :n n}))
 
 (defn- present-pass!
-  "Draw one full-frame present pass (`prog-key` = :sharpen, :aa or :brightness) from `src-tex`
+  "Draw one full-frame present pass (`prog-key` = :sharpen, :aa, :lift or :brightness) from `src-tex`
    into the currently-bound framebuffer, at iw*ih. The target IS the image here —
    the letterbox exists only in the pane blit — so the clamp rect is the whole
    texture. Both passes share vs-src-sharpen's geometry and uniform names, so this
@@ -694,7 +697,8 @@
   (let [{[cfbo ctex] :composite [pfbo ptex] :post} (ensure-render-targets! area iw ih)
         sharpen (double (cur-sharpen))
         aa      (double (cur-aa))
-        bright  (double (cur-brightness))]
+        bright  (double (cur-brightness))
+        lift    (double (cur-lift))]
     (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER cfbo)
     (gl/gl-viewport 0 0 (int iw) (int ih))
     (let [result (gpu-draw! area iw ih iw ih)
@@ -705,13 +709,17 @@
           ;; smooths ALONG the edge afterwards, so it cleans up after sharpen instead of
           ;; being undone by it. The per-splat hardness easing cannot do this job: it runs
           ;; during rasterization, before the composite exists.
-          ;; Brightness goes LAST: it is an exposure adjustment on the finished picture,
-          ;; and running it before sharpen would move the gradients sharpen gates on.
+          ;; Then Lift (a gamma curve) and Brightness (a multiply) last, in that order:
+          ;; Lift shapes the tone curve, Brightness sets the level afterwards, so
+          ;; Brightness stays a plain lighter/darker control whatever the curve is doing.
+          ;; Both are exposure adjustments on the finished picture — running either
+          ;; before sharpen would move the gradients sharpen gates on.
           ;; Each pass is SKIPPED at its no-op value, so the common all-default path still
           ;; does zero present passes and returns the composite untouched.
           passes (cond-> []
                    (pos? sharpen)    (conj [:sharpen sharpen])
                    (pos? aa)         (conj [:aa aa])
+                   (not= 1.0 lift)   (conj [:lift lift])
                    (not= 1.0 bright) (conj [:brightness bright]))
           ;; Ping-pong between the two targets: carry the current texture and whichever
           ;; fbo/tex pair is free to write into. Two targets suffice for any number of
@@ -876,7 +884,7 @@
    same order. (count size broad mid fine detail variation curvature stroke contrast brightness
    hardness aa cutin swirl tex-streak tex-grain tex-edge.)"
   [count-atom size-atom broad-atom mid-atom fine-atom detail-atom variation-atom
-   curvature-atom stroke-atom contrast-atom brightness-atom hardness-atom aa-atom cutin-atom swirl-atom
+   curvature-atom stroke-atom contrast-atom brightness-atom lift-atom hardness-atom aa-atom cutin-atom swirl-atom
    tex-streak-atom tex-grain-atom tex-edge-atom])
 
 (defn snapshot-settings
@@ -1131,6 +1139,7 @@
    [slider "Curvature" 0.0  1.0   0.02  curvature-atom]
    [slider "Stroke"    1.0  4.0   0.05  stroke-atom]   ; <1 degenerates chains to bead dots
    [slider "Contrast"  0.5  2.0   0.05  contrast-atom]
+   [slider "Lift"      0.5  2.5   0.05  lift-atom]        ; final-output gamma: >1 opens shadows; 1.0 = unchanged
    [slider "Brightness" 0.4 2.0   0.05  brightness-atom]  ; final-output exposure; 1.0 = unchanged
    [slider "Hardness"  1.0  4.0   0.05  hardness-atom]   ; detail-stroke crispness (big strokes stay round)
    [slider "Antialias" 0.0  1.0   0.05  aa-atom]        ; smooths along edges AFTER Sharpen (kills the staircase); 0 = off
