@@ -40,12 +40,16 @@
 
 ;; ---------------------------------------------------------------- number output
 
+;; table-driven rather than Math/pow — `fixed` runs a few times per splat.
+(def ^:private pow10 [1 10 100 1000 10000 100000 1000000])
+(def ^:private zeros ["" "0" "00" "000" "0000" "00000" "000000"])
+
 (defn- fixed
-  "`v` rounded to `dp` decimals, as a compact string — trailing zeros and a bare
-   \".0\" dropped. `format` is called once per coordinate per splat, so this exists
-   to keep the emit loop off it."
+  "`v` rounded to `dp` decimals (0–6), as a compact string — trailing zeros and a
+   bare \".0\" dropped. `format` would be called several times per splat, so this
+   exists to keep the emit loop off it."
   [^double v ^long dp]
-  (let [m (nth [1 10 100 1000] dp)
+  (let [m (nth pow10 dp)
         r (Math/round (* v (double m)))
         neg (neg? r)
         r (Math/abs r)
@@ -55,7 +59,7 @@
     (if (zero? f)
       (str sign i)
       (let [fs (str f)
-            fs (str (subs "000" 0 (- dp (count fs))) fs)
+            fs (str (nth zeros (- dp (count fs))) fs)
             fs (str/replace fs #"0+$" "")]
         (str sign i "." fs)))))
 
@@ -183,7 +187,9 @@
    :hard-soft   1.0
    :cull-alpha  0.004      ; below half an 8-bit step, the splat is invisible
    :dp          1          ; decimals on coordinates
-   :scale       1.0})      ; width/height multiplier — the viewBox stays in image px
+   :scale       1.0        ; width/height multiplier — the viewBox stays in image px
+   :lift        1.0        ; the app's Lift present pass; 1.0 = no filter emitted
+   :brightness  1.0})      ; the app's Brightness present pass; 1.0 = none
 
 (defn- splat->draw
   "One splat → the drawing primitive, or nil if it cannot leave a mark."
@@ -215,6 +221,39 @@
                        "\" stop-opacity=\"" (fixed (if (< a cull) 0.0 a) 3) "\"/>")))
          "</radialGradient>")))
 
+(defn- transfer [type* attr* ^double v]
+  (apply str (for [ch ["R" "G" "B"]]
+               (str "<feFunc" ch " type=\"" type* "\" " attr* "=\"" (fixed v 4) "\"/>"))))
+
+(defn tone-filter
+  "The Lift and Brightness present passes as ONE filter over the finished picture.
+
+   Both are per-channel point operations on the composite — Lift is c^(1/amount)
+   (shader/fs-src-lift), Brightness is c·amount (fs-src-brightness) — so they are
+   exactly `feComponentTransfer` gamma and linear, in that order. Applying them to
+   each splat's colour instead would be a different picture: the passes run AFTER
+   compositing, and a tone curve does not commute with over-alpha blending.
+
+   One filter on one group costs one offscreen surface for the whole canvas, not one
+   per element — this is the only place a filter is affordable here. Sharpen and
+   Antialias get no equivalent: both are gated on a local gradient, which
+   feConvolveMatrix cannot express.
+
+   `color-interpolation-filters=\"sRGB\"` is not optional. SVG filters default to
+   linearRGB, and the shaders operate on the stored sRGB values."
+  [id ^double lift ^double brightness ^long w ^long h]
+  (str "<filter id=\"" id "\" filterUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\""
+       " width=\"" w "\" height=\"" h "\" color-interpolation-filters=\"sRGB\">"
+       (when (not= lift 1.0)
+         (str "<feComponentTransfer>"
+              (transfer "gamma" "exponent" (/ 1.0 (max lift 0.01)))
+              "</feComponentTransfer>"))
+       (when (not= brightness 1.0)
+         (str "<feComponentTransfer>"
+              (transfer "linear" "slope" brightness)
+              "</feComponentTransfer>"))
+       "</filter>"))
+
 (defn- el [{:keys [cx cy rx ry deg alpha]} fill ^double k ^long dp]
   (let [cxs (fixed cx dp) cys (fixed cy dp)]
     (str "<ellipse cx=\"" cxs "\" cy=\"" cys
@@ -234,14 +273,16 @@
 
    Options (see `default-opts`): `:mode` :gradient | :flat, `:colors` palette size,
    `:hard-levels` falloff buckets, `:extent` stdevs drawn, `:hard-sharp` the app's
-   Hardness, `:scale` a width/height multiplier for upscaled output."
+   Hardness, `:lift` / `:brightness` its two tone passes, `:scale` a width/height
+   multiplier for upscaled output."
   [{:keys [splats background height width opacity sig-min sig-max]} opts]
   (let [o (merge default-opts
                  {:opacity (double (or opacity 1.0))
                   :sig-min (double (or sig-min 1.0))
                   :sig-max (double (or sig-max 1.0))}
                  opts)
-        {:keys [mode colors hard-levels stops extent flat-extent dp scale cull-alpha]} o
+        {:keys [mode colors hard-levels stops extent flat-extent dp scale cull-alpha
+                lift brightness]} o
         draws (vec (keep #(splat->draw % o) splats))
         ;; hardness buckets: uniform over the range the field actually spans, so a
         ;; field of all-soft base strokes does not spend three profiles on nothing.
@@ -256,10 +297,15 @@
         hmid (fn [^long b] (+ hlo (* (/ (+ b 0.5) nh) (- hhi hlo))))
         [bg-r bg-g bg-b] (or background [0.0 0.0 0.0])
         w (long width) h (long height)
+        ;; the tone passes run on the COMPOSITE, so they wrap the background rect too
+        tone? (or (not= (double lift) 1.0) (not= (double brightness) 1.0))
         head (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
                   "<svg xmlns=\"http://www.w3.org/2000/svg\" "
                   "width=\"" (fixed (* scale w) 0) "\" height=\"" (fixed (* scale h) 0) "\" "
                   "viewBox=\"0 0 " w " " h "\">"
+                  (when tone?
+                    (str "<defs>" (tone-filter "tone" (double lift) (double brightness) w h)
+                         "</defs><g filter=\"url(#tone)\">"))
                   "<rect width=\"" w "\" height=\"" h "\" fill=\""
                   (hex-rgb [bg-r bg-g bg-b]) "\"/>")
         body
@@ -285,4 +331,4 @@
                     (for [i (range (dec n) -1 -1)
                           :let [d (nth draws i)]]
                       (el d (str "url(#" (gid (key-of i d)) ")") (double extent) dp)))}))]
-    (str head (:defs body) (apply str (:els body)) "</svg>")))
+    (str head (:defs body) (apply str (:els body)) (when tone? "</g>") "</svg>")))

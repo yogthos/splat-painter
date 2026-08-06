@@ -49,6 +49,10 @@ jolt -M:run                       # open the window, click "Open Image…"
 jolt -M:run path/to/image.jpeg    # load an image immediately
 ```
 
+**Save…** writes the picture you are looking at. The PNG/SVG toggle beside it picks
+the default extension; whatever extension you actually type is what decides, so a
+`.svg` filename over a PNG default does the obvious thing. See "Vector output".
+
 Sliders (live):
 
 - **Splats**, stroke budget (higher = finer, more faithful)
@@ -105,7 +109,8 @@ Headless overrides (for scripting/testing): `GA_PAINTER_SAVE_PNG`,
 `GA_PAINTER_BROAD/MID/FINE`, `GA_PAINTER_CUTIN`, `GA_PAINTER_SWIRL`,
 `GA_PAINTER_CONTRAST`, `GA_PAINTER_HARDNESS`, `GA_PAINTER_TEX_STREAK/GRAIN/EDGE`.
 Then `GA_PAINTER_GPU_VERIFY`, `GA_PAINTER_LOOP_RENDER`, `GA_PAINTER_TF_SMOKE`.
-`core-test` pins the one-per-slider rule.
+`core-test` pins the one-per-slider rule. `GA_PAINTER_SAVE_PNG` writes whatever its
+path's extension asks for, so `=out.svg` scripts a vector save.
 
 The CPU generator (`splat-painter.seed/splat-field`) stays the tested reference,
 the goldens pin it, `GA_PAINTER_GPU_VERIFY` compares the two fields numerically,
@@ -120,6 +125,11 @@ radii and a rotation, which SVG expresses exactly — so the field can leave as 
 instead of pixels. `splat-painter.svg/field->svg` takes the same field map
 `seed/splat-field` returns (and `gen/read-splats` reads back off the GPU) and returns
 an SVG document. It is pure: no GL, no I/O.
+
+In the app it is **Save…** with the SVG toggle: the live pass renders, the field comes
+back off the transform-feedback buffer, and the document is written. Headless,
+`GA_PAINTER_SAVE_PNG` takes an `.svg` path too — the extension picks the writer. There
+is also a CPU-path harness that needs no GL at all:
 
 ```sh
 jolt -M:svg examples/loki-original.jpg /tmp/a.svg
@@ -174,10 +184,25 @@ saturated accent (a cat's green eye against grey fur) into the nearest grey box.
 its half-intensity contour. It is not a faithful raster (MAE 5.0) — it is a different
 picture, a palette-knife look with exact unquantized colour, and the smallest file.
 
-An export is the painting's GEOMETRY and COLOUR. The fragment shader's bristle texture
-(streak/grain/ragged edge) and the final sharpen pass have no per-element SVG
-equivalent that survives the element count, so neither is reproduced. Gzip the result
-yourself (`.svgz`) — every browser and Inkscape reads it; the exporter does not.
+An export is the painting's GEOMETRY and COLOUR. Lift and Brightness come along —
+both are per-channel point operations on the composite, so they are exactly one
+`feComponentTransfer` gamma and one linear over the whole picture, which costs one
+offscreen surface rather than one per element. Sharpen and Antialias do not: both gate
+on a local gradient, which `feConvolveMatrix` cannot express. Neither does the fragment
+shader's bristle texture (streak/grain/ragged edge) — nothing per-element survives the
+element count.
+
+Saving from the app exports THE LIVE PASS. A committed layer is stored as a texture,
+not a splat field — `commit-active!` captures its pixels and the field that made them
+is gone — so a stacked painting cannot be re-serialized without regenerating every
+layer against its own source composite. The status line says so when the stack is not
+empty.
+
+Against the app's own PNG save of the same render (64k splats, default texture dials,
+which the SVG does not reproduce) the export lands at 1.7/255 mean abs error.
+
+Gzip the result yourself (`.svgz`) — every browser and Inkscape reads it; the exporter
+does not.
 
 ## REPL-driven development
 

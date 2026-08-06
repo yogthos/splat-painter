@@ -23,6 +23,7 @@
             [splat-painter.fields    :as fields]
             [splat-painter.gpu-fields :as gf]
             [splat-painter.seed      :as seed]
+            [splat-painter.svg       :as svg]
             [jolt.ffi       :as ffi]))
 
 ;; reactive controls (the panel re-renders on change)
@@ -58,6 +59,10 @@
 (defonce tex-grain-atom  (r/atom 0.10)) ; canvas-tooth brightness+chroma mottle
 (defonce tex-edge-atom   (r/atom 0.25)) ; edge raggedness (contour breaks up)
 (defonce status-atom   (r/atom "no image loaded — click Open Image…"))
+;; what Save… writes. The chosen format only picks the dialog's default extension —
+;; the EXTENSION of the path actually saved is what decides (see save-render!), so
+;; typing "a.svg" over a .png default does the obvious thing.
+(defonce save-format-atom (r/atom :png))
 ;; layered repainting: layers-atom is the committed stack (bottom-first). Each
 ;; entry {:tex <GL id> :opacity <double> :settings <14-vector>} holds a layer's
 ;; SOLO render — its own full splat pass captured over a TRANSPARENT clear, so the
@@ -163,7 +168,7 @@
 ;; forward references: defined further down, used by the render/callback wiring above.
 ;; A cold AOT compile resolves a file top-down, so without these a clean checkout
 ;; cannot compile core (a warm ~/.jolt/aot-cache hides it).
-(declare clear-layers! gpu-save-png!)
+(declare clear-layers! save-render!)
 
 (defn- cur-count  [] (or (some-> (System/getenv "GA_PAINTER_COUNT")  Double/parseDouble long) @count-atom))
 (defn- cur-size   [] (or (some-> (System/getenv "GA_PAINTER_SIZE")   Double/parseDouble)      @size-atom))
@@ -186,6 +191,15 @@
 (defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
 (defn- cur-tex-edge   [] (or (some-> (System/getenv "GA_PAINTER_TEX_EDGE")   Double/parseDouble) @tex-edge-atom))
 (defn- cur-layer-opacity [] (or (some-> (System/getenv "GA_PAINTER_LAYER_OPACITY") Double/parseDouble) @layer-opacity-atom))
+
+(defn- effective-hard-sharp
+  "The Hardness the render shaders actually get — u_hard_sharp. Short-stroke regimes
+   render fine marks as SOFT dabs: hard plateau-edged dots don't merge, they bead
+   contours into pearls. The SVG export reads this too, so a vector save carries the
+   same crispness the pane is showing."
+  []
+  (+ 1.0 (* (- (double (cur-hardness)) 1.0)
+            (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
 
 (defn- field-for-current-controls
   "The CPU reference field. image-atom now holds RAW pixels — the shipping path
@@ -352,32 +366,42 @@
         (g-object-unref gfile)
         (when @area-atom
           (glx/make-current @area-atom)
-          (gpu-save-png! @area-atom path))))
+          (save-render! @area-atom path))))
     (ffi/free errslot)
     (g-object-unref dialog)))
 
+(defn- set-save-format!
+  "Pick what Save… defaults to. Clicking the box that is ALREADY on still unchecks it
+   in GTK, and a reset! to the value it already holds notifies nothing (glimmer.ratom
+   only fires on a real change) — so nothing would re-render and the box would sit
+   unchecked while the atom disagreed. Bouncing through nil forces that re-render."
+  [fmt]
+  (when (= fmt @save-format-atom) (reset! save-format-atom nil))
+  (reset! save-format-atom fmt))
+
 (defn- save-image-dialog! []
-  (cond
-    (not @area-atom)
-    (reset! status-atom "window not ready yet")
+  (let [ext (name (or @save-format-atom :png))]
+    (cond
+      (not @area-atom)
+      (reset! status-atom "window not ready yet")
 
-    ;; no GSettings schemas anywhere -> opening the dialog would ABORT the process;
-    ;; save directly next to the source image instead.
-    (not (schemas-available?))
-    (let [path (str (or @image-path-atom "splat-painter") "-splats.png")]
-      (glx/make-current @area-atom)
-      (gpu-save-png! @area-atom path))
+      ;; no GSettings schemas anywhere -> opening the dialog would ABORT the process;
+      ;; save directly next to the source image instead.
+      (not (schemas-available?))
+      (let [path (str (or @image-path-atom "splat-painter") "-splats." ext)]
+        (glx/make-current @area-atom)
+        (save-render! @area-atom path))
 
-    :else
-    (let [root   (glx/gtk-widget-get-root @area-atom)
-          dialog (gtk-file-dialog-new)]
-      (gtk-file-dialog-set-title dialog "Save PNG")
-      (gtk-file-dialog-set-initial-name dialog "splats.png")
-      (let [cb (ffi/foreign-callable
-                 (fn [src res _ud] (handle-save-result src res))
-                 [:pointer :pointer :pointer] :void :collect-safe)]
-        (reset! save-cb-atom cb)   ; retain past the async callback (see the atom's docstring)
-        (gtk-file-dialog-save dialog root ffi/null cb ffi/null)))))
+      :else
+      (let [root   (glx/gtk-widget-get-root @area-atom)
+            dialog (gtk-file-dialog-new)]
+        (gtk-file-dialog-set-title dialog (str "Save " (clojure.string/upper-case ext)))
+        (gtk-file-dialog-set-initial-name dialog (str "splats." ext))
+        (let [cb (ffi/foreign-callable
+                   (fn [src res _ud] (handle-save-result src res))
+                   [:pointer :pointer :pointer] :void :collect-safe)]
+          (reset! save-cb-atom cb) ; retain past the async callback (see the atom's docstring)
+          (gtk-file-dialog-save dialog root ffi/null cb ffi/null))))))
 
 ;; GL plumbing
 (def ^:private quad-verts [-1.0 -1.0   1.0 -1.0   -1.0 1.0   1.0 1.0])
@@ -588,11 +612,7 @@
         (gl/gl-uniform-2f (:u_image locs) (double iw) (double ih))
         (gl/gl-uniform-3f (:u_bg locs) 0.0 0.0 0.0)
         (gl/gl-uniform-1f (:u_opacity locs) 0.9)   ; fixed stroke alpha (slider removed)
-        (gl/gl-uniform-1f (:u_hard_sharp locs)
-                          ;; short-stroke regimes render fine marks as SOFT dabs — hard
-                          ;; plateau-edged dots don't merge and bead contours into pearls
-                          (+ 1.0 (* (- (double (cur-hardness)) 1.0)
-                                    (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
+        (gl/gl-uniform-1f (:u_hard_sharp locs) (effective-hard-sharp))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
@@ -614,11 +634,7 @@
         ;; a cur-layer-opacity glaze — a live preview of this pass's stored opacity.
         (gl/gl-uniform-1f (:u_opacity locs)
                           (cond solo 0.9 (zero? active) 0.9 :else (* 0.9 (cur-layer-opacity))))
-        (gl/gl-uniform-1f (:u_hard_sharp locs)
-                          ;; short-stroke regimes render fine marks as SOFT dabs — hard
-                          ;; plateau-edged dots don't merge and bead contours into pearls
-                          (+ 1.0 (* (- (double (cur-hardness)) 1.0)
-                                    (min 1.0 (+ 0.4 (* 0.24 (cur-stroke)))))))
+        (gl/gl-uniform-1f (:u_hard_sharp locs) (effective-hard-sharp))
         (gl/gl-uniform-1f (:u_hard_soft locs) 1.0)
         (gl/gl-uniform-1f (:u_sig_min locs) (double sig-min))
         (gl/gl-uniform-1f (:u_sig_max locs) (double sig-max))
@@ -646,7 +662,9 @@
           (blit-layers! blit quad gen-vao buf-tex tf-buf layers active nlayers false vw vh iw ih))
         (gl/gl-disable gl/GL-SCISSOR-TEST)
         (gl/gl-disable gl/GL-BLEND)))
-    {:count count :total total :n n}))
+    ;; the sig range rides out with the counts: it is a property of THIS field, and
+    ;; the SVG export needs it to reproduce the size→hardness easing off the readback.
+    {:count count :total total :n n :sig-min sig-min :sig-max sig-max}))
 
 (defn- present-pass!
   "Draw one full-frame present pass (`prog-key` = :sharpen, :aa, :lift or :brightness) from `src-tex`
@@ -877,6 +895,53 @@
         (ffi/free buf))
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h)))))
+
+(defn- gpu-save-svg!
+  "Write the live splat pass as SVG. Renders first — same pass the pane and the PNG
+   come from — then reads the field back out of the transform-feedback buffer with
+   gen/read-splats and hands it to splat-painter.svg, which needs no GL of its own.
+
+   THE LIVE PASS ONLY. A committed layer is stored as a TEXTURE, not a splat field;
+   commit-active! captures its pixels and the field that made them is gone, so a
+   stacked painting cannot be re-serialized without re-generating every layer against
+   its own source composite. The status line says so when the stack is non-empty.
+
+   Sharpen and Antialias are not reproduced either (both gate on a local gradient);
+   Lift and Brightness are, as one filter over the whole picture."
+  [area path]
+  (when-let [img @image-atom]
+    (let [iw (int (:width img)) ih (int (:height img))
+          prev-fbo (read-fbo-binding)]
+      (let [[_tex {:keys [count total n sig-min sig-max]}] (render-final! area iw ih)
+            splats (gen/read-splats (:tf-buf (:gpu (get @gl-state area))) n)
+            doc    (svg/field->svg {:splats splats
+                                    :background [0.0 0.0 0.0]  ; gpu-draw!'s composite clear
+                                    :height ih :width iw
+                                    :opacity 0.9               ; the live pass's fixed alpha
+                                    :sig-min sig-min :sig-max sig-max}
+                                   {:hard-sharp (effective-hard-sharp)
+                                    :lift       (double (cur-lift))
+                                    :brightness (double (cur-brightness))})
+            nlayers (clojure.core/count @layers-atom)]
+        (println (format "svg-save: %d candidates -> %d survivors (render %d)" total count n))
+        (spit path doc)
+        (println (format "svg-save: wrote %s (%.2f MB)" path (/ (clojure.core/count doc) 1048576.0)))
+        (reset! status-atom
+                (if (pos? nlayers)
+                  (format "saved %s — live pass only, %d committed layer(s) not in it" path nlayers)
+                  (format "saved %s" path))))
+      (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
+      (let [[w h] @viewport] (gl/gl-viewport 0 0 w h)))))
+
+(defn svg-path?
+  "Does `path` name a vector save? The EXTENSION is what picks the writer, so the
+   format follows what the user actually typed in the dialog rather than whatever
+   the toolbar toggle was set to when it opened."
+  [path]
+  (clojure.string/ends-with? (clojure.string/lower-case (str path)) ".svg"))
+
+(defn- save-render! [area path]
+  (if (svg-path? path) (gpu-save-svg! area path) (gpu-save-png! area path)))
 
 ;; layer stack: pure helpers (testable, no GL/atoms beyond the slider reset)
 ;; A committed layer is {:tex <GL id> :opacity <double> :settings <14-vector>}. The
@@ -1118,7 +1183,10 @@
           ;; GA_PAINTER_PASSES unset/1 == the original single-pass save (bit-identical).
           (let [passes (or (some-> (System/getenv "GA_PAINTER_PASSES") Integer/parseInt) 1)]
             (dotimes [_ (dec passes)] (add-layer!)))
-          (gpu-save-png! area p))))))
+          ;; the extension still picks the writer, so GA_PAINTER_SAVE_PNG=/tmp/a.svg
+          ;; scripts a vector save. The var keeps its name — it is the headless
+          ;; "save the render to this path" hook, and core-test pins the contract.
+          (save-render! area p))))))
 
 ;; reactive control panel
 ;; Layout rule that keeps the sidebar narrow: NO widget inside the sidebar ever
@@ -1148,7 +1216,14 @@
   ;; layout rule above) and long paths can't stretch the window.
   [:hbox {:spacing 6 :margin 6}
    [:button {:label "Open Image…"  :on-click open-image-dialog!}]
-   [:button {:label "Save PNG…"    :on-click save-image-dialog!}]
+   [:button {:label "Save…"        :on-click save-image-dialog!}]
+   ;; glimmer has no radio or dropdown widget, so the pair is grouped through the
+   ;; atom rather than through GTK: each box only ever SETS the format and the
+   ;; re-render unchecks the other one.
+   [:checkbutton {:label "PNG" :active (= :png @save-format-atom)
+                  :on-toggled #(set-save-format! :png)}]
+   [:checkbutton {:label "SVG" :active (= :svg @save-format-atom)
+                  :on-toggled #(set-save-format! :svg)}]
    [:button {:label "Add Layer"    :on-click add-layer!}]
    [:button {:label "Reset Layers" :on-click reset-layers!}]
    [:button {:label "◀" :on-click #(select-layer! (dec @active-layer-atom))}]

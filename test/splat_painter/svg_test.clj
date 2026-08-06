@@ -14,6 +14,23 @@
   (when-let [m (re-find (re-pattern (str name "=\"([^\"]*)\"")) el)]
     (second m)))
 
+;; ---------------------------------------------------------------- number output
+
+(deftest coordinates-are-compact-and-lossless-to-the-decimal
+  (let [f #'svg/fixed]
+    (is (= "5" (f 5.0 1)))
+    (is (= "5.1" (f 5.14 1)))
+    (is (= "5.2" (f 5.15 1)))
+    (is (= "0.1" (f 0.1 3)) "trailing zeros dropped")
+    (is (= "0.001" (f 0.001 3)) "leading zeros kept")
+    (is (= "-0.1" (f -0.06 1)))
+    (is (= "0" (f -0.04 1)) "a value that rounds to zero has no sign")
+    (is (= "1000" (f 1000.0 0)))
+    ;; the tone filter asks for 4 — a table too short for it is an index-out-of-bounds
+    ;; at save time, not a rounding error
+    (is (= "0.5556" (f (/ 1.0 1.8) 4)))
+    (is (= "0.555556" (f (/ 1.0 1.8) 6)))))
+
 ;; ---------------------------------------------------------------- geometry
 
 (deftest ellipse-inverts-the-covariance-construction
@@ -166,6 +183,27 @@
 (deftest background-is-the-fields-background
   (is (str/includes? (svg/field->svg (assoc field :background [1.0 0.5 0.0]) {:mode :flat})
                      "<rect width=\"40\" height=\"20\" fill=\"#ff8000\"/>")))
+
+(deftest tone-passes-become-one-filter-over-the-whole-picture
+  (testing "no filter at the no-op values"
+    (let [doc (svg/field->svg field {:mode :flat})]
+      (is (not (str/includes? doc "<filter")))
+      (is (not (str/includes? doc "<g filter")))))
+  (testing "Lift is the gamma transfer, Brightness the linear one, in that order"
+    (let [doc (svg/field->svg field {:mode :flat :lift 1.8 :brightness 1.2})]
+      ;; shader/fs-src-lift is c^(1/amount); feFunc gamma is amplitude·C^exponent+offset
+      (is (str/includes? doc "type=\"gamma\" exponent=\"0.5556\""))
+      (is (str/includes? doc "type=\"linear\" slope=\"1.2\""))
+      (is (< (str/index-of doc "gamma") (str/index-of doc "linear")))
+      (testing "SVG filters default to linearRGB; the shaders work on stored sRGB"
+        (is (str/includes? doc "color-interpolation-filters=\"sRGB\"")))
+      (testing "the filter covers the background too — the passes run on the composite"
+        (is (< (str/index-of doc "<g filter=\"url(#tone)\">") (str/index-of doc "<rect")))
+        (is (str/ends-with? doc "</g></svg>")))))
+  (testing "either dial alone emits only its own transfer"
+    (let [doc (svg/field->svg field {:mode :flat :brightness 1.2})]
+      (is (str/includes? doc "type=\"linear\""))
+      (is (not (str/includes? doc "type=\"gamma\""))))))
 
 (deftest an-empty-field-still-produces-a-document
   (let [doc (svg/field->svg (assoc field :splats []) {:mode :gradient})]

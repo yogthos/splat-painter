@@ -48,6 +48,35 @@
       (c-unsetenv var-name)
       (is (= @@atom-var (accessor)) var-name))))
 
+(deftest the-extension-picks-the-writer
+  (testing "a scripted GA_PAINTER_SAVE_PNG=/tmp/a.svg is a vector save"
+    (is (core/svg-path? "/tmp/a.svg"))
+    (is (core/svg-path? "/tmp/A.SVG"))
+    (is (not (core/svg-path? "/tmp/a.png")))
+    (is (not (core/svg-path? "/tmp/svg.png")) "the extension, not the name")
+    (is (not (core/svg-path? nil)))))
+
+(deftest re-picking-the-active-save-format-still-re-renders
+  ;; Clicking the box that is already on UNCHECKS it in GTK, and glimmer.ratom only
+  ;; notifies on a real change — so a plain reset! to the format it already holds
+  ;; would publish nothing, and the box would sit unchecked while the atom disagreed.
+  (let [seen  (atom [])
+        watch (fn [r] (swap! seen conj @r))
+        orig  @core/save-format-atom]
+    (try
+      (reset! core/save-format-atom :png)
+      (swap! (:watches core/save-format-atom) conj watch)   ; glimmer.ratom's watcher set
+      (#'core/set-save-format! :svg)
+      (is (= :svg @core/save-format-atom))
+      (is (= [:svg] @seen) "a real change publishes once")
+      (reset! seen [])
+      (#'core/set-save-format! :svg)
+      (is (= :svg @core/save-format-atom) "the format is unchanged")
+      (is (seq @seen) "but the toggles were told to re-render anyway")
+      (finally
+        (swap! (:watches core/save-format-atom) disj watch)
+        (reset! core/save-format-atom orig)))))
+
 (deftest every-settings-atom-has-an-override
   (testing "no slider is reachable only through the UI"
     (let [covered (set (map (fn [[_ _ a _ _]] a) overrides))]
