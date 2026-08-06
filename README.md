@@ -49,9 +49,10 @@ jolt -M:run                       # open the window, click "Open Image…"
 jolt -M:run path/to/image.jpeg    # load an image immediately
 ```
 
-**Save…** writes the picture you are looking at. The PNG/SVG toggle beside it picks
-the default extension; whatever extension you actually type is what decides, so a
-`.svg` filename over a PNG default does the obvious thing. See "Vector output".
+**Save…** writes the picture you are looking at. The **SVG** box beside it picks the
+default extension — checked is vector, unchecked is PNG — but whatever extension you
+actually type is what decides, so a `.svg` filename over a PNG default does the
+obvious thing. See "Vector output".
 
 Sliders (live):
 
@@ -126,8 +127,8 @@ instead of pixels. `splat-painter.svg/field->svg` takes the same field map
 `seed/splat-field` returns (and `gen/read-splats` reads back off the GPU) and returns
 an SVG document. It is pure: no GL, no I/O.
 
-In the app it is **Save…** with the SVG toggle: the live pass renders, the field comes
-back off the transform-feedback buffer, and the document is written. Headless,
+In the app it is **Save…** with the SVG box checked: the live pass renders, the field
+comes back off the transform-feedback buffer, and the document is written. Headless,
 `GA_PAINTER_SAVE_PNG` takes an `.svg` path too — the extension picks the writer. There
 is also a CPU-path harness that needs no GL at all:
 

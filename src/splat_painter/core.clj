@@ -370,14 +370,17 @@
     (ffi/free errslot)
     (g-object-unref dialog)))
 
-(defn- set-save-format!
-  "Pick what Save… defaults to. Clicking the box that is ALREADY on still unchecks it
-   in GTK, and a reset! to the value it already holds notifies nothing (glimmer.ratom
-   only fires on a real change) — so nothing would re-render and the box would sit
-   unchecked while the atom disagreed. Bouncing through nil forces that re-render."
-  [fmt]
-  (when (= fmt @save-format-atom) (reset! save-format-atom nil))
-  (reset! save-format-atom fmt))
+(defn- toggle-save-format!
+  "Flip what Save… defaults to. ONE check box that flips, rather than a PNG/SVG pair,
+   because a pair cannot stay honest here: glimmer has no radio widget, clicking the
+   box that is already on still unchecks it in GTK, and a reset! to the value the atom
+   already holds notifies nothing — so the box would sit unchecked while the atom
+   disagreed. Forcing the re-render anyway (bouncing the atom through a third value)
+   worked but put two reactive writes in one signal callback, and a re-render posted
+   from there crashed the app once inside glimmer's idle-callback plumbing. A flip is
+   one write, always a real change, and the widget and the atom cannot drift."
+  []
+  (reset! save-format-atom (if (= :svg @save-format-atom) :png :svg)))
 
 (defn- save-image-dialog! []
   (let [ext (name (or @save-format-atom :png))]
@@ -1217,13 +1220,10 @@
   [:hbox {:spacing 6 :margin 6}
    [:button {:label "Open Image…"  :on-click open-image-dialog!}]
    [:button {:label "Save…"        :on-click save-image-dialog!}]
-   ;; glimmer has no radio or dropdown widget, so the pair is grouped through the
-   ;; atom rather than through GTK: each box only ever SETS the format and the
-   ;; re-render unchecks the other one.
-   [:checkbutton {:label "PNG" :active (= :png @save-format-atom)
-                  :on-toggled #(set-save-format! :png)}]
+   ;; checked = SVG, unchecked = PNG. One box that flips rather than a PNG/SVG pair —
+   ;; see toggle-save-format! for why a pair cannot stay in sync here.
    [:checkbutton {:label "SVG" :active (= :svg @save-format-atom)
-                  :on-toggled #(set-save-format! :svg)}]
+                  :on-toggled toggle-save-format!}]
    [:button {:label "Add Layer"    :on-click add-layer!}]
    [:button {:label "Reset Layers" :on-click reset-layers!}]
    [:button {:label "◀" :on-click #(select-layer! (dec @active-layer-atom))}]

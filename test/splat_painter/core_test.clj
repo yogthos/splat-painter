@@ -56,23 +56,21 @@
     (is (not (core/svg-path? "/tmp/svg.png")) "the extension, not the name")
     (is (not (core/svg-path? nil)))))
 
-(deftest re-picking-the-active-save-format-still-re-renders
-  ;; Clicking the box that is already on UNCHECKS it in GTK, and glimmer.ratom only
-  ;; notifies on a real change — so a plain reset! to the format it already holds
-  ;; would publish nothing, and the box would sit unchecked while the atom disagreed.
+(deftest the-format-box-cannot-drift-from-the-atom
+  ;; The box is checked iff the atom says :svg, and every click flips it — so each
+  ;; click is a REAL change (glimmer.ratom only notifies on those) and exactly one
+  ;; reactive write. A PNG/SVG pair could not manage either: clicking the box already
+  ;; on still unchecks it in GTK, while a reset! to the value already held publishes
+  ;; nothing, leaving the widget and the atom disagreeing.
   (let [seen  (atom [])
         watch (fn [r] (swap! seen conj @r))
         orig  @core/save-format-atom]
     (try
       (reset! core/save-format-atom :png)
       (swap! (:watches core/save-format-atom) conj watch)   ; glimmer.ratom's watcher set
-      (#'core/set-save-format! :svg)
-      (is (= :svg @core/save-format-atom))
-      (is (= [:svg] @seen) "a real change publishes once")
-      (reset! seen [])
-      (#'core/set-save-format! :svg)
-      (is (= :svg @core/save-format-atom) "the format is unchanged")
-      (is (seq @seen) "but the toggles were told to re-render anyway")
+      (dotimes [_ 4] (#'core/toggle-save-format!))
+      (is (= [:svg :png :svg :png] @seen) "every click publishes, none is a no-op")
+      (is (= :png @core/save-format-atom) "and an even number of clicks is where it started")
       (finally
         (swap! (:watches core/save-format-atom) disj watch)
         (reset! core/save-format-atom orig)))))
