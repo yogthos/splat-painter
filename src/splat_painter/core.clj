@@ -69,6 +69,9 @@
 ;; show, quantizes harder and writes coarser numbers — see splat-painter.svg's
 ;; fidelity->opts. Element count IS file size, so this is the size dial.
 (defonce svg-fidelity-atom (r/atom 0.9))
+;; whether the SVG box offers `.svgz`. Only the extension actually saved decides what
+;; gets written (see gz-path?) — this picks what the dialog proposes.
+(defonce svg-gzip-atom (r/atom true))
 ;; layered repainting: layers-atom is the committed stack (bottom-first). Each
 ;; entry {:tex <GL id> :opacity <double> :settings <14-vector>} holds a layer's
 ;; SOLO render — its own full splat pass captured over a TRANSPARENT clear, so the
@@ -377,31 +380,39 @@
     (ffi/free errslot)
     (g-object-unref dialog)))
 
-(defn- set-save-format!
-  "Pick what Save… defaults to, from the SVG box's new state.
+(defn- checked?
+  "A check box's new state as glimmer hands it over.
 
    :on-toggled is a VALUE-BEARING signal — glimmer-gl registers
    gtk_check_button_get_active as its value fn (glimmer_gl/gtk.clj), exactly like
-   :on-value hands a slider its double — so the handler is called WITH the state
-   (1/0), not with no args. A zero-arg handler here is an arity crash on the first
-   real click, and no direct call from a test or the REPL reproduces it because that
-   argument only appears when the signal fires. That is the whole reason this takes
-   `active` rather than flipping the atom: the widget is the source of truth and the
-   atom just follows it, so the two cannot drift and a click is one reactive write."
+   :on-value hands a slider its double — so a handler is called WITH the state (a C
+   int), not with no args. A zero-arg handler is an arity crash on the first real
+   click, and no direct call from a test or the REPL reproduces it, because that
+   argument only exists when the signal fires. Taking the state is also what keeps the
+   widget and its atom from drifting: the widget is the source of truth, the atom
+   follows, and a click is one reactive write."
   [active]
-  (reset! save-format-atom
-          (if (if (number? active) (not (zero? (long active))) (boolean active))
-            :svg :png)))
+  (if (number? active) (not (zero? (long active))) (boolean active)))
+
+(defn- set-save-format! [active]
+  (reset! save-format-atom (if (checked? active) :svg :png)))
+
+(defn- set-svg-gzip! [active]
+  (reset! svg-gzip-atom (checked? active)))
 
 (defn save-ext
-  "The extension Save… offers for `fmt`. SVG defaults to the GZIPPED flavour: it is the
-   same document, about 7× smaller, and browsers and Inkscape read it directly. Typing
-   `.svg` over it still writes plain — the extension saved is what picks the writer."
-  [fmt]
-  (if (= :svg fmt) "svgz" "png"))
+  "The extension Save… offers for `fmt`. SVG comes in two flavours of the same
+   document: `.svgz` is gzipped, about 7× smaller, and Chromium, librsvg and Inkscape
+   all open it straight off disk — so it is the default, and the gzip box turns it off
+   for anything that wants the markup readable. Whatever extension is actually saved
+   is still what picks the writer, so typing one overrides the box either way."
+  [fmt gzip?]
+  (cond (not= :svg fmt) "png"
+        gzip?           "svgz"
+        :else           "svg"))
 
 (defn- save-image-dialog! []
-  (let [ext (save-ext (or @save-format-atom :png))]
+  (let [ext (save-ext (or @save-format-atom :png) @svg-gzip-atom)]
     (cond
       (not @area-atom)
       (reset! status-atom "window not ready yet")
@@ -1255,10 +1266,11 @@
   [:hbox {:spacing 6 :margin 6}
    [:button {:label "Open Image…"  :on-click open-image-dialog!}]
    [:button {:label "Save…"        :on-click save-image-dialog!}]
-   ;; checked = SVG, unchecked = PNG. The handler takes the box's new state — see
-   ;; set-save-format!; :on-toggled carries a value the way :on-value does.
+   ;; checked = SVG, unchecked = PNG. The handlers take the box's new state — see
+   ;; `checked?`; :on-toggled carries a value the way :on-value does.
    [:checkbutton {:label "SVG" :active (= :svg @save-format-atom)
                   :on-toggled set-save-format!}]
+   [:checkbutton {:label "gzip" :active @svg-gzip-atom :on-toggled set-svg-gzip!}]
    ;; export-only, so it lives beside the box it belongs to rather than in the
    ;; painting sliders — moving it changes no pixel on screen, only the saved file.
    [:label {:label (format "fidelity %.2f" (double @svg-fidelity-atom))

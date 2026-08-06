@@ -62,33 +62,44 @@
     (is (not (core/gz-path? "/tmp/a.svg")))
     (is (not (core/gz-path? nil)))))
 
-(deftest the-svg-box-offers-the-gzipped-extension
-  ;; .svgz is the same document ~7x smaller and browsers and Inkscape open it directly,
-  ;; so it is what Save… defaults to. Typing .svg over it still writes plain — the
-  ;; extension saved is what picks the writer, not this.
-  (is (= "svgz" (core/save-ext :svg)))
-  (is (= "png" (core/save-ext :png)))
-  (is (core/gz-path? (str "splats." (core/save-ext :svg)))))
+(deftest the-gzip-box-chooses-between-the-two-svg-extensions
+  ;; .svgz is the same document ~7x smaller and Chromium, librsvg and Inkscape all open
+  ;; it off disk, so it is the default — but the markup is unreadable that way, so the
+  ;; box turns it off. Typing an extension in the dialog still overrides both: the
+  ;; extension SAVED is what picks the writer, not this.
+  (is (= "svgz" (core/save-ext :svg true)))
+  (is (= "svg"  (core/save-ext :svg false)))
+  (is (= "png"  (core/save-ext :png true)) "gzip means nothing to a PNG save")
+  (is (= "png"  (core/save-ext :png false)))
+  (testing "and each extension routes where it should"
+    (is (core/gz-path? (str "splats." (core/save-ext :svg true))))
+    (is (core/svg-path? (str "splats." (core/save-ext :svg false))))
+    (is (not (core/gz-path? (str "splats." (core/save-ext :svg false)))))))
+
+(deftest both-toolbar-boxes-take-the-widgets-value
+  ;; :on-toggled is value-bearing (glimmer-gl registers gtk_check_button_get_active as
+  ;; its value fn), so a zero-arg handler is an arity crash on the first real click and
+  ;; nothing that calls the handler directly catches it. This pulls both handlers out of
+  ;; the toolbar tree and calls them the way the signal will.
+  (let [boxes (->> (#'core/toolbar) (filter vector?) (filter #(= :checkbutton (first %))))
+        by    (into {} (map (juxt #(:label (second %)) #(:on-toggled (second %))) boxes))
+        orig  [@core/save-format-atom @core/svg-gzip-atom]]
+    (try
+      (is (= #{"SVG" "gzip"} (set (keys by))))
+      ((by "SVG") 1)  (is (= :svg @core/save-format-atom))
+      ((by "SVG") 0)  (is (= :png @core/save-format-atom))
+      ((by "gzip") 0) (is (false? @core/svg-gzip-atom))
+      ((by "gzip") 1) (is (true? @core/svg-gzip-atom))
+      (testing "a boolean would do too, if the value fn ever stops being a C int"
+        ((by "SVG") true)   (is (= :svg @core/save-format-atom))
+        ((by "SVG") false)  (is (= :png @core/save-format-atom))
+        ((by "gzip") false) (is (false? @core/svg-gzip-atom)))
+      (finally
+        (reset! core/save-format-atom (first orig))
+        (reset! core/svg-gzip-atom (second orig))))))
 
 (defn- toolbar-prop [tag k]
   (->> (#'core/toolbar) (filter vector?) (filter #(= tag (first %))) first second k))
-
-(deftest toggle-handlers-are-called-with-the-widgets-value
-  ;; THE contract that broke SVG export: :on-toggled is value-bearing — glimmer-gl
-  ;; registers gtk_check_button_get_active as its value fn, so glimmer.widget calls
-  ;; (handler active) and a zero-arg handler is an arity crash on the first real
-  ;; click. Nothing catches that by calling the handler directly, so this pulls it
-  ;; out of the actual toolbar tree and calls it the way the signal will.
-  (let [h    (toolbar-prop :checkbutton :on-toggled)
-        orig @core/save-format-atom]
-    (try
-      (is (some? h) "the SVG box still has a toggle handler")
-      (h 1) (is (= :svg @core/save-format-atom) "checked (GTK's 1) is the vector save")
-      (h 0) (is (= :png @core/save-format-atom) "unchecked is PNG")
-      (testing "a boolean would do too, if the value fn ever stops being a C int"
-        (h true)  (is (= :svg @core/save-format-atom))
-        (h false) (is (= :png @core/save-format-atom)))
-      (finally (reset! core/save-format-atom orig)))))
 
 (deftest the-format-box-shows-the-format
   (let [orig @core/save-format-atom]

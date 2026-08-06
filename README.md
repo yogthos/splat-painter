@@ -52,9 +52,9 @@ jolt -M:run path/to/image.jpeg    # load an image immediately
 **Save…** writes the picture you are looking at. The **SVG** box beside it picks the
 default extension — checked is vector, unchecked is PNG — but whatever extension you
 actually type is what decides, so a `.svg` filename over a PNG default does the
-obvious thing. The SVG default is `.svgz` (gzipped, ~7× smaller, opens the same
-everywhere); type `.svg` to get it plain. **Fidelity** is the size/quality trade.
-See "Vector output".
+obvious thing. **gzip** picks between the two SVG flavours — `.svgz` (the default,
+~7× smaller, opens the same everywhere) and plain `.svg` when you want the markup
+readable. **Fidelity** is the size/quality trade. See "Vector output".
 
 Sliders (live):
 
@@ -247,8 +247,8 @@ empty.
 Against the app's own PNG save of the same render (64k splats, default texture dials,
 which the SVG does not reproduce) the export lands at 1.7/255 mean abs error.
 
-`.svgz` is the default and is worth more than every encoding trick in the file put
-together — an SVG is one long run of near-identical elements, which is the best case
+`.svgz` is the default — untick **gzip** for plain markup — and it is worth more than
+every encoding trick in the file put together — an SVG is one long run of near-identical elements, which is the best case
 DEFLATE has, and it comes out around 7×. It is written through zlib's `gzopen`/
 `gzwrite` (`splat-painter.gzip`), so the file is a real RFC 1952 stream with no
 timestamp, and the same painting saves to the same bytes every time. Chromium, librsvg
