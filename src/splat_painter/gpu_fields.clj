@@ -21,6 +21,7 @@
    clip space), rendering into an RGBA32F colour attachment."
   (:require [glimmer-gl.gl :as gl]
             [splat-painter.shader :as shader]
+            [splat-painter.residual :as residual]
             [jolt.ffi :as ffi]))
 
 ;; pass plumbing
@@ -793,6 +794,21 @@ void main(){
               texelFetch(u_edge, p, 0).r,   texelFetch(u_mid, p, 0).r);
 }")
 
+(def ^:private resid-fs
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_packed;
+uniform sampler2D u_weight;   // .r = residual weight, >= 1, on the SAME grid
+uniform vec2 u_dim;
+void main(){
+  ivec2 p = ivec2(floor(v_uv * u_dim));
+  // all four channels are densities and all four scale — the CPU twin is
+  // residual/weighted-dmap, which multiplies the same four arrays. Subjectness
+  // lives in its own texture and is deliberately left alone.
+  frag = texelFetch(u_packed, p, 0) * texelFetch(u_weight, p, 0).r;
+}")
+
 (defn build-programs
   "Compile the field-construction programs. Needs a current GL context. Returns
    nil if any shader fails, so a caller can report rather than draw garbage."
@@ -820,6 +836,7 @@ void main(){
             :upsamp  (gl/make-program vs-src upsample-fs)
             :noise   (gl/make-program vs-src noise-fs)
             :pack    (gl/make-program vs-src pack-fs)
+            :resid   (gl/make-program vs-src resid-fs)
             :g2      (gl/make-program vs-src g2-fs)
             :fulledge (gl/make-program vs-src fulledge-fs)}]
     (when (every? some? (vals ps))
@@ -1032,6 +1049,24 @@ void main(){
       (ffi/free ptr)
       t)))
 
+(defn upload-scalar!
+  "Upload a single-channel w*h ^doubles as a w×h RGBA32F texture (value in .r)."
+  [^doubles a w h]
+  (let [n   (* (long w) (long h))
+        ptr (ffi/alloc (* n 4 (ffi/sizeof :float)))]
+    (dotimes [i n]
+      (let [o (* i 16)]
+        (ffi/write ptr :float o          (aget a i))
+        (ffi/write ptr :float (+ o 4)    0.0)
+        (ffi/write ptr :float (+ o 8)    0.0)
+        (ffi/write ptr :float (+ o 12)   1.0)))
+    (let [t (new-target w h)]
+      (gl/gl-bind-texture gl/GL-TEXTURE-2D t)
+      (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 gl/GL-RGBA32F (int w) (int h) 0
+                          gl/GL-RGBA gl/GL-FLOAT ptr)
+      (ffi/free ptr)
+      t)))
+
 (defn read-rgba
   "Read all four channels of a w×h RGBA32F texture in ONE glReadPixels, as
    [r g b a] ^doubles. Four read-channel calls would pull the same pixels four
@@ -1098,11 +1133,26 @@ void main(){
         Ht (:h tensor) Wt (:w tensor)
         pm     (placement-map! ctx progs src (:eigen tensor) H W Ht Wt 768 4)
         Hd (:h pm) Wd (:w pm)
-        packed (new-target Wd Hd)
-        _      (run-pass! ctx (:pack progs) packed Wd Hd
+        packed0 (new-target Wd Hd)
+        _      (run-pass! ctx (:pack progs) packed0 Wd Hd
                           [["u_detail" (:detail pm)] ["u_sharp" (:sharp pm)]
                            ["u_edge" (:edge pm)] ["u_mid" (:mid pm)]]
                           [["u_dim" :2f Wd Hd]])
+        ;; REPAINT AIM (mirror of the residual/weighted-dmap step in fields/prepare):
+        ;; scale the four density channels by the residual weight, HERE — before the
+        ;; readback below — so the budget solve and the candidate threshold see the
+        ;; same weighted map. Nil weights (a first pass) skip the pass entirely, which
+        ;; is what keeps the single-pass render bit-identical.
+        rweight (residual/weights-for img Hd Wd)
+        packed (if-not rweight
+                 packed0
+                 (let [wt  (upload-scalar! rweight Wd Hd)
+                       out (new-target Wd Hd)]
+                   (run-pass! ctx (:resid progs) out Wd Hd
+                              [["u_packed" packed0] ["u_weight" wt]]
+                              [["u_dim" :2f Wd Hd]])
+                   (free-textures! [packed0 wt])
+                   out))
         [noise noise0] (noise-fields! ctx progs (:eigen tensor) (:flow tensor)
                                       perm Wt Ht W H)
         blur   (bilateral-blur! ctx progs src (new-target W H) W H 3)

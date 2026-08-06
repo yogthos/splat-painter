@@ -11,6 +11,7 @@
             [splat-painter.wavelet-test]
             [splat-painter.core-test]
             [splat-painter.fields-test]
+            [splat-painter.residual-test]
             [splat-painter.gpu-fields-test]
             [splat-painter.sharpen-test]
             [splat-painter.score-test]
@@ -38,6 +39,7 @@
                              'splat-painter.wavelet-test
                              'splat-painter.core-test
                              'splat-painter.fields-test
+                             'splat-painter.residual-test
                              ;; needs a GL context; skips itself when there is no
                              ;; display (glimmer-gl.offscreen reports why)
                              'splat-painter.gpu-fields-test
