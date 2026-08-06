@@ -83,6 +83,7 @@ Sliders (live):
 jolt -M:test      # unit + golden-field regression tests (incl. GPU field passes)
 jolt -M:check     # headless: shader GLSL structure, packing, full pipeline
 jolt -M:preview   # CPU render to PNG (no GL needed)
+jolt -M:svg       # CPU field to SVG (no GL needed) — see "Vector output"
 jolt -M:prof      # analysis/placement profiling
 jolt -M:detail    # detail-placement ladder, survival and coverage report
 jolt -M:yield     # per-level splats-per-candidate vs what the budget charges for it
@@ -111,6 +112,72 @@ the goldens pin it, `GA_PAINTER_GPU_VERIFY` compares the two fields numerically,
 and `jolt -M:preview` renders one to PNG with no GL context. There is no CPU
 render path in the app: `GA_PAINTER_LOOP_RENDER` swaps the quad renderer for the
 pixels×splats loop, which only completes at low splat counts.
+
+## Vector output
+
+A splat IS an ellipse — eigen-decomposing Σ = R·diag(sx²,sy²)·Rᵀ gives a centre, two
+radii and a rotation, which SVG expresses exactly — so the field can leave as vectors
+instead of pixels. `splat-painter.svg/field->svg` takes the same field map
+`seed/splat-field` returns (and `gen/read-splats` reads back off the GPU) and returns
+an SVG document. It is pure: no GL, no I/O.
+
+```sh
+jolt -M:svg examples/loki-original.jpg /tmp/a.svg
+jolt -M:svg examples/loki-original.jpg /tmp/a.svg - - '{:mode :flat}'
+jolt -M:svg examples/loki-original.jpg /tmp/a.svg - - '{:colors 1024 :hard-levels 6}'
+rsvg-convert -w 4000 -o /tmp/a-4x.png /tmp/a.svg   # the upscale
+```
+
+The viewBox stays in analysed image pixels, so rendering the same file at 4× IS the
+upscale: stroke edges and liner traces stay crisp where a bicubic enlargement of the
+PNG goes soft. Nothing in the field is resolution-bound.
+
+What SVG has no primitive for is the gaussian FALLOFF across the ellipse, and that is
+the whole design problem. Three ways to get a per-splat colour with a soft profile,
+measured with `rsvg-convert` on 20k splats at 1000×1000:
+
+| | colour | defs | render |
+| --- | --- | --- | --- |
+| shared `<mask>`, objectBoundingBox units | exact | 1 | ~100 s |
+| `<radialGradient>` per quantized colour | palette | N | ~1.1 s |
+| flat ellipse at an iso-contour | exact | 0 | ~0.5 s |
+
+Masks are out — a masked element forces the renderer into an offscreen buffer, 5 ms
+each. A gradient cannot take its colour from the element referencing it: `currentColor`
+and `var()` in a `<stop>` both resolve against the gradient's own ancestors (checked in
+Chromium and librsvg), so one shared gradient paints one colour, full stop. Hence
+`:mode :gradient` (the default): median-cut the field's colours and emit one gradient
+per (palette entry, hardness bucket) actually used.
+
+The other 15× is `fill-opacity`, not `opacity`. The `opacity` attribute is defined to
+composite the element as an isolated group, so renderers allocate a scratch surface per
+ellipse — 16 s against 1.1 s on the same 20k. Per-splat alpha is exact either way; only
+the colour is quantized.
+
+Against `-M:preview`'s raster of the same field (`examples/loki-original.jpg`, 17.4k
+splats, mean abs error per channel):
+
+| `:colors` | MAE | SVG | gzipped |
+| --- | --- | --- | --- |
+| 64 | 2.85 | 2.2 MB | 373 KB |
+| 256 | 1.88 | 2.6 MB | 405 KB |
+| 512 (default) | 1.62 | 2.9 MB | 427 KB |
+| 1024 | 1.47 | 3.4 MB | 446 KB |
+| 2048 | 1.39 | 4.4 MB | 506 KB |
+
+Past ~1024 the remaining error is the piecewise-linear gradient ramp, not the palette:
+6, 10 and 16 stops all measure the same, so the default is 8. The palette splits boxes
+by population × spread rather than population alone — plain median cut folds a rare
+saturated accent (a cat's green eye against grey fur) into the nearest grey box.
+
+`:mode :flat` drops the gradients entirely and draws each splat as a solid ellipse at
+its half-intensity contour. It is not a faithful raster (MAE 5.0) — it is a different
+picture, a palette-knife look with exact unquantized colour, and the smallest file.
+
+An export is the painting's GEOMETRY and COLOUR. The fragment shader's bristle texture
+(streak/grain/ragged edge) and the final sharpen pass have no per-element SVG
+equivalent that survives the element count, so neither is reproduced. Gzip the result
+yourself (`.svgz`) — every browser and Inkscape reads it; the exporter does not.
 
 ## REPL-driven development
 

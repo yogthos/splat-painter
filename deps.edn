@@ -23,6 +23,7 @@
            :check {:extra-paths ["test"] :main-opts ["-m" "splat-painter.check"]}
            :prof  {:extra-paths ["test"] :main-opts ["-m" "splat-painter.prof"]}
            :preview {:extra-paths ["test"] :main-opts ["-m" "splat-painter.preview"]}
+           :svg   {:extra-paths ["test"] :main-opts ["-m" "splat-painter.svgout"]}
            :detail {:extra-paths ["test"] :main-opts ["-m" "splat-painter.detail"]}
            :yield {:extra-paths ["test"] :main-opts ["-m" "splat-painter.yield"]}
            :scan {:extra-paths ["test"] :main-opts ["-m" "splat-painter.scan"]}

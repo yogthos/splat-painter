@@ -927,9 +927,11 @@ void main(){
 
 (defn read-splats
   "Read `n` generated splats back from the transform-feedback buffer as a vector of
-   {:mean [x y] :cov [c00 c01 c01 c11] :color [r g b] :alpha a} — the same shape as the CPU
-   splat-field, for numerical verification against the golden reference. `tf-buf` must
-   be bound to GL_TRANSFORM_FEEDBACK_BUFFER."
+   {:mean [x y] :cov [c00 c01 c01 c11] :color [r g b] :alpha a :detail d} — the same
+   shape as the CPU splat-field, for numerical verification against the golden
+   reference and for splat-painter.svg's vector export (which needs `:detail` to
+   recover each stroke's hardness). `tf-buf` must be bound to
+   GL_TRANSFORM_FEEDBACK_BUFFER."
   [tf-buf n]
   (let [nf  (* n 12)
         ptr (ffi/alloc (* nf (ffi/sizeof :float)))]
@@ -944,7 +946,8 @@ void main(){
                     c00 (nth fl (+ b 2)) c01 (nth fl (+ b 3)) c11 (nth fl (+ b 4))]
                 {:mean [mx my] :cov [c00 c01 c01 c11]
                  :color [(nth fl (+ b 5)) (nth fl (+ b 6)) (nth fl (+ b 7))]
-                 :alpha (nth fl (+ b 8))}))
+                 :alpha (nth fl (+ b 8))
+                 :detail (nth fl (+ b 9))}))
             (range n)))))
 
 (defn- run-gen!
