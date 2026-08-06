@@ -63,6 +63,10 @@
 ;; the EXTENSION of the path actually saved is what decides (see save-render!), so
 ;; typing "a.svg" over a .png default does the obvious thing.
 (defonce save-format-atom (r/atom :png))
+;; SVG only. 1.0 keeps every splat; below that the exporter prunes the ones that never
+;; show, quantizes harder and writes coarser numbers — see splat-painter.svg's
+;; fidelity->opts. Element count IS file size, so this is the size dial.
+(defonce svg-fidelity-atom (r/atom 0.9))
 ;; layered repainting: layers-atom is the committed stack (bottom-first). Each
 ;; entry {:tex <GL id> :opacity <double> :settings <14-vector>} holds a layer's
 ;; SOLO render — its own full splat pass captured over a TRANSPARENT clear, so the
@@ -191,6 +195,7 @@
 (defn- cur-tex-grain  [] (or (some-> (System/getenv "GA_PAINTER_TEX_GRAIN")  Double/parseDouble) @tex-grain-atom))
 (defn- cur-tex-edge   [] (or (some-> (System/getenv "GA_PAINTER_TEX_EDGE")   Double/parseDouble) @tex-edge-atom))
 (defn- cur-layer-opacity [] (or (some-> (System/getenv "GA_PAINTER_LAYER_OPACITY") Double/parseDouble) @layer-opacity-atom))
+(defn- cur-svg-fidelity [] (or (some-> (System/getenv "GA_PAINTER_SVG_FIDELITY") Double/parseDouble) @svg-fidelity-atom))
 
 (defn- effective-hard-sharp
   "The Hardness the render shaders actually get — u_hard_sharp. Short-stroke regimes
@@ -921,22 +926,27 @@
           prev-fbo (read-fbo-binding)]
       (let [[_tex {:keys [count total n sig-min sig-max]}] (render-final! area iw ih)
             splats (gen/read-splats (:tf-buf (:gpu (get @gl-state area))) n)
-            doc    (svg/field->svg {:splats splats
-                                    :background [0.0 0.0 0.0]  ; gpu-draw!'s composite clear
-                                    :height ih :width iw
-                                    :opacity 0.9               ; the live pass's fixed alpha
-                                    :sig-min sig-min :sig-max sig-max}
-                                   {:hard-sharp (effective-hard-sharp)
-                                    :lift       (double (cur-lift))
-                                    :brightness (double (cur-brightness))})
+            fid    (double (cur-svg-fidelity))
+            {:keys [doc kept]} (svg/field->svg*
+                                 {:splats splats
+                                  :background [0.0 0.0 0.0]  ; gpu-draw!'s composite clear
+                                  :height ih :width iw
+                                  :opacity 0.9               ; the live pass's fixed alpha
+                                  :sig-min sig-min :sig-max sig-max}
+                                 {:fidelity   fid
+                                  :hard-sharp (effective-hard-sharp)
+                                  :lift       (double (cur-lift))
+                                  :brightness (double (cur-brightness))})
+            mb      (/ (clojure.core/count doc) 1048576.0)
             nlayers (clojure.core/count @layers-atom)]
         (println (format "svg-save: %d candidates -> %d survivors (render %d)" total count n))
         (spit path doc)
-        (println (format "svg-save: wrote %s (%.2f MB)" path (/ (clojure.core/count doc) 1048576.0)))
+        (println (format "svg-save: wrote %s (%.2f MB, fidelity %.2f kept %d/%d splats)"
+                         path mb fid kept n))
         (reset! status-atom
-                (if (pos? nlayers)
-                  (format "saved %s — live pass only, %d committed layer(s) not in it" path nlayers)
-                  (format "saved %s" path))))
+                (str (format "saved %s — %.1f MB, %d/%d splats at fidelity %.2f" path mb kept n fid)
+                     (when (pos? nlayers)
+                       (format " (live pass only, %d layer(s) not in it)" nlayers)))))
       (gl/gl-bind-framebuffer gl/GL-FRAMEBUFFER prev-fbo)
       (let [[w h] @viewport] (gl/gl-viewport 0 0 w h)))))
 
@@ -1228,6 +1238,13 @@
    ;; set-save-format!; :on-toggled carries a value the way :on-value does.
    [:checkbutton {:label "SVG" :active (= :svg @save-format-atom)
                   :on-toggled set-save-format!}]
+   ;; export-only, so it lives beside the box it belongs to rather than in the
+   ;; painting sliders — moving it changes no pixel on screen, only the saved file.
+   [:label {:label (format "fidelity %.2f" (double @svg-fidelity-atom))
+            :width-chars 13 :xalign 0.0}]
+   [:scale {:min 0.1 :max 1.0 :step 0.05 :value @svg-fidelity-atom :digits 2
+            :width-request 110
+            :on-value #(reset! svg-fidelity-atom %)}]
    [:button {:label "Add Layer"    :on-click add-layer!}]
    [:button {:label "Reset Layers" :on-click reset-layers!}]
    [:button {:label "◀" :on-click #(select-layer! (dec @active-layer-atom))}]

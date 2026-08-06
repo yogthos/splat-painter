@@ -38,6 +38,10 @@
         _     (println (format "%dx%d  %d splats  size %.1f  sig %.1f..%.1f  opts %s"
                                (:width fld) (:height fld) (count (:splats fld))
                                size (:sig-min fld) (:sig-max fld) (pr-str opts)))
-        doc   (svg/field->svg fld opts)]
+        t0    (System/nanoTime)
+        {:keys [doc total kept residual repaired]} (svg/field->svg* fld opts)
+        ms    (/ (- (System/nanoTime) t0) 1e6)]
     (spit out doc)
-    (println (format "wrote %s  (%.2f MB)" out (/ (count doc) 1048576.0)))))
+    (println (format "wrote %s  (%.2f MB, %d/%d kept = %.1f%%, %d repaired, worst hole %.3f, %.0f ms)"
+                     out (/ (count doc) 1048576.0) kept total
+                     (* 100.0 (/ (double kept) (max total 1))) repaired residual ms))))

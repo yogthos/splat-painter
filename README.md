@@ -52,7 +52,7 @@ jolt -M:run path/to/image.jpeg    # load an image immediately
 **Save…** writes the picture you are looking at. The **SVG** box beside it picks the
 default extension — checked is vector, unchecked is PNG — but whatever extension you
 actually type is what decides, so a `.svg` filename over a PNG default does the
-obvious thing. See "Vector output".
+obvious thing. **Fidelity** is the SVG size/quality trade. See "Vector output".
 
 Sliders (live):
 
@@ -111,7 +111,8 @@ Headless overrides (for scripting/testing): `GA_PAINTER_SAVE_PNG`,
 `GA_PAINTER_CONTRAST`, `GA_PAINTER_HARDNESS`, `GA_PAINTER_TEX_STREAK/GRAIN/EDGE`.
 Then `GA_PAINTER_GPU_VERIFY`, `GA_PAINTER_LOOP_RENDER`, `GA_PAINTER_TF_SMOKE`.
 `core-test` pins the one-per-slider rule. `GA_PAINTER_SAVE_PNG` writes whatever its
-path's extension asks for, so `=out.svg` scripts a vector save.
+path's extension asks for, so `=out.svg` scripts a vector save, and
+`GA_PAINTER_SVG_FIDELITY` sets the dial for it.
 
 The CPU generator (`splat-painter.seed/splat-field`) stays the tested reference,
 the goldens pin it, `GA_PAINTER_GPU_VERIFY` compares the two fields numerically,
@@ -135,7 +136,7 @@ is also a CPU-path harness that needs no GL at all:
 ```sh
 jolt -M:svg examples/loki-original.jpg /tmp/a.svg
 jolt -M:svg examples/loki-original.jpg /tmp/a.svg - - '{:mode :flat}'
-jolt -M:svg examples/loki-original.jpg /tmp/a.svg - - '{:colors 1024 :hard-levels 6}'
+jolt -M:svg examples/loki-original.jpg /tmp/a.svg - - '{:fidelity 0.5}'
 rsvg-convert -w 4000 -o /tmp/a-4x.png /tmp/a.svg   # the upscale
 ```
 
@@ -184,6 +185,47 @@ saturated accent (a cat's green eye against grey fur) into the nearest grey box.
 `:mode :flat` drops the gradients entirely and draws each splat as a solid ellipse at
 its half-intensity contour. It is not a faithful raster (MAE 5.0) — it is a different
 picture, a palette-knife look with exact unquantized colour, and the smallest file.
+
+### Fidelity
+
+Element count is file size — nothing else comes close — and at a high splat budget a
+faithful export runs to tens of megabytes. The **Fidelity** slider beside the SVG box
+trades that off. 1.0 keeps every splat and is exactly what the exporter produced before
+the dial existed; below that it prunes, quantizes and rounds. On a 166k-splat painting:
+
+| Fidelity | splats kept | SVG | gzipped | MAE vs the PNG |
+| --- | --- | --- | --- | --- |
+| 1.0 | 100% | 17.6 MB | 2.4 MB | 1.85/255 |
+| 0.9 (default) | 75% | 13.1 MB | 1.8 MB | 1.90/255 |
+| 0.5 | 49% | 8.4 MB | 1.2 MB | 2.48/255 |
+| 0.1 | 33% | 5.1 MB | 0.8 MB | 5.51/255 |
+
+The dial's first move is nearly free — a quarter of the splats in a dense painting
+never reach the image at all.
+
+What decides is each splat's PEAK contribution, max over its footprint of α·T: how
+strongly it shows through everything painted in front of it, at the one pixel where it
+shows most. That is the 3DGS pruning score (accumulated opacity × transmittance) that
+[LightGaussian](https://lightgaussian.github.io/) introduced, with the max
+[RadSplat](https://arxiv.org/pdf/2311.17245) substitutes for LightGaussian's sum. The
+max is what retains detail: a sum is an AREA measure, so it ranks a one-pixel liner
+stroke below a barely-visible fat glaze and prunes the marks the painting is made of.
+The literature's other finding lands the same way — occlusion-aware pruning beats
+heuristics on isolated attributes like area or opacity, which is why this measures
+transmittance rather than either.
+
+Coverage is safe by construction: a dropped splat does not consume transmittance, so
+pruning the strokes in front of a base daub leaves it reading a clear canvas and it
+cannot then be pruned itself. That bounds how much background can show but does not
+drive it to zero, and every hole shows the black clear — which reads as the whole
+picture going a couple of levels darker, not as local damage. So a repair pass walks
+the dropped splats back to front and re-instates any still sitting over bare ground.
+Without it, Fidelity 0.25 lost 4 levels of mean luminance; with it, 0.4.
+
+Under the dial the encoding is squeezed losslessly: a round splat is a `<circle>` (no
+second radius, no rotate), a rotated one is `translate()rotate()` rather than a
+`rotate()` that repeats the centre three times, and numbers drop their leading zero.
+That is about 10% before any splat is pruned.
 
 An export is the painting's GEOMETRY and COLOUR. Lift and Brightness come along —
 both are per-channel point operations on the composite, so they are exactly one

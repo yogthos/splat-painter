@@ -8,7 +8,7 @@
 
 (defn- approx? [tol a b] (< (Math/abs (- (double a) (double b))) (double tol)))
 
-(defn- els [doc] (re-seq #"<ellipse[^/]*/>" doc))
+(defn- els [doc] (re-seq #"<(?:circle|ellipse)[^/]*/>" doc))
 
 (defn- attr [el name]
   (when-let [m (re-find (re-pattern (str name "=\"([^\"]*)\"")) el)]
@@ -21,15 +21,15 @@
     (is (= "5" (f 5.0 1)))
     (is (= "5.1" (f 5.14 1)))
     (is (= "5.2" (f 5.15 1)))
-    (is (= "0.1" (f 0.1 3)) "trailing zeros dropped")
-    (is (= "0.001" (f 0.001 3)) "leading zeros kept")
-    (is (= "-0.1" (f -0.06 1)))
+    (is (= ".1" (f 0.1 3)) "trailing zeros dropped, and so is the leading zero")
+    (is (= ".001" (f 0.001 3)) "the zeros INSIDE the fraction are kept")
+    (is (= "-.1" (f -0.06 1)))
     (is (= "0" (f -0.04 1)) "a value that rounds to zero has no sign")
     (is (= "1000" (f 1000.0 0)))
     ;; the tone filter asks for 4 — a table too short for it is an index-out-of-bounds
     ;; at save time, not a rounding error
-    (is (= "0.5556" (f (/ 1.0 1.8) 4)))
-    (is (= "0.555556" (f (/ 1.0 1.8) 6)))))
+    (is (= ".5556" (f (/ 1.0 1.8) 4)))
+    (is (= ".555556" (f (/ 1.0 1.8) 6)))))
 
 ;; ---------------------------------------------------------------- geometry
 
@@ -87,6 +87,83 @@
     (testing "a degenerate size range does not divide by zero"
       (is (pos? (svg/hardness 3.0 4.0 4.0 1.0 sharp soft))))))
 
+;; ---------------------------------------------------------------- fidelity
+
+(deftest fidelity-1-is-a-no-op-on-every-knob-it-drives
+  (let [o (svg/fidelity->opts 1.0)]
+    (is (zero? (:cull-peak o)) "nothing is pruned")
+    (is (= 512 (:colors o))    "the full palette")
+    (is (= 1.0 (:round o))     "circles only where the splat is already round")
+    (is (= 1 (:dp o))          "full coordinate precision")))
+
+(deftest fidelity-moves-every-knob-monotonically
+  (let [ks (map svg/fidelity->opts [1.0 0.75 0.5 0.25 0.0])]
+    (is (apply < (map :cull-peak ks)) "prunes harder as fidelity drops")
+    (is (apply > (map :colors ks))    "and quantizes harder")
+    (is (apply < (map :round ks))     "and rounds more strokes to circles"))
+  (is (= (svg/fidelity->opts 0.0) (svg/fidelity->opts -3.0)) "clamped below")
+  (is (= (svg/fidelity->opts 1.0) (svg/fidelity->opts 9.0)) "and above"))
+
+;; ---------------------------------------------------------------- pruning
+
+(defn- dr [cx cy r alpha]
+  {:cx (double cx) :cy (double cy) :rx (double r) :ry (double r)
+   :cos 1.0 :sin 0.0 :hard 1.0 :alpha (double alpha) :color [0.5 0.5 0.5]})
+
+;; A backing daub big and flat enough to be opaque over the whole 64x64 canvas, in the
+;; backmost slot. Without one the corners are bare ground, the repair pass is right to
+;; put everything back, and no pruning test can say anything. The real field has this
+;; by construction: the base level covers the image with no gaps.
+(def ^:private backing (dr 32 32 400 1.0))
+
+(defn- mask [draws thresh]
+  (svg/keep-mask (conj (vec draws) backing) 64 64 thresh 1 3.5))
+
+(defn- kept [draws thresh] (vec (seq (:keep (mask draws thresh)))))
+
+(deftest nothing-is-pruned-at-threshold-zero
+  (is (= [1 1 1] (kept [(dr 32 32 8 1.0) (dr 32 32 8 1.0)] 0.0))))
+
+(deftest an-occluded-splat-goes-and-a-visible-one-stays
+  ;; index 0 is the TOPMOST stroke; index 1 sits directly behind an opaque one
+  (is (= [1 0 1] (kept [(dr 32 32 8 1.0) (dr 32 32 4 1.0)] 0.5)))
+  ;; the same splat with nothing over it survives
+  (is (= [1 1 1] (kept [(dr 8 8 8 1.0) (dr 32 32 4 1.0)] 0.5))))
+
+(deftest a-small-fully-visible-stroke-outranks-a-large-faint-one
+  ;; THE reason the score is a max and not a sum. The liner stroke covers a fraction of
+  ;; the glaze's area, so by summed contribution the glaze wins and the detail is
+  ;; pruned first — which is backwards. By peak the stroke is opaque and the glaze is
+  ;; not, and the stroke stays.
+  (let [glaze  (dr 8 8 16 0.08)
+        stroke (dr 48 48 1.2 0.95)]
+    (is (= [0 1 1] (kept [glaze stroke] 0.2)))))
+
+(deftest a-splat-hidden-at-its-centre-but-exposed-at-its-rim-stays
+  ;; reading the peak only at the centre culled this and opened a hole where the rim
+  ;; was the last paint on the canvas
+  (let [cap  (dr 32 32 3 1.0)       ; small opaque cap over the big one's middle
+        wide (dr 32 32 12 0.9)]
+    (is (= [1 1 1] (kept [cap wide] 0.5)))))
+
+(deftest a-dropped-splat-does-not-consume-transmittance
+  ;; the coverage guarantee: pruning the glaze in front must leave the opaque splat
+  ;; behind it reading a clear canvas, so it cannot be pruned in turn
+  (let [{:keys [keep residual repaired]} (mask [(dr 32 32 8 0.5) (dr 32 32 8 1.0)] 0.6)]
+    (is (= [0 1 1] (vec (seq keep))))
+    (is (zero? repaired) "the opaque splat behind covers it, so there is nothing to repair")
+    (is (< residual 0.01) "and no background shows through")))
+
+(deftest holes-are-repaired-rather-than-left-dark
+  ;; NO backing here: two glazes are the only paint on the canvas, each scores under the
+  ;; threshold, and dropping both is a hole straight to the background. Left alone every
+  ;; such hole shows the black clear, which reads as the whole picture going darker — so
+  ;; the repair pass walks the dropped splats back to front and puts them back.
+  (let [{:keys [keep repaired]} (svg/keep-mask [(dr 32 32 8 0.5) (dr 32 32 8 0.5)]
+                                               64 64 0.6 1 3.5)]
+    (is (= [1 1] (vec (seq keep))))
+    (is (= 2 repaired))))
+
 ;; ---------------------------------------------------------------- palette
 
 (deftest palette-assigns-every-colour
@@ -136,20 +213,34 @@
       (is (= "#0000ff" (attr (first es) "fill")))
       (is (= "#ff0000" (attr (last es) "fill"))))
     (testing "SVG x is the image's column"
-      (is (= "10" (attr (last es) "cx")))
-      (is (= "5" (attr (last es) "cy"))))))
+      ;; splat 0 is elongated along the image's ROW axis, so it is rotated, and a
+      ;; rotated splat carries its centre once in the transform rather than three times
+      (is (= "translate(10 5)rotate(90)" (attr (last es) "transform")))
+      ;; splat 1 is isotropic — a circle, no rotate, centre in cx/cy
+      (is (str/starts-with? (second es) "<circle"))
+      (is (= "20" (attr (second es) "cx")))
+      (is (= "6" (attr (second es) "cy"))))))
+
+(deftest a-round-splat-is-a-circle-and-a-rotated-one-carries-its-centre-once
+  (let [doc (svg/field->svg field {:mode :flat})]
+    (testing "rotating a circle does nothing, so both the second radius and the rotate go"
+      (is (str/includes? doc "<circle"))
+      (is (not (re-find #"<circle[^/]*transform" doc))))
+    (testing "and a rotated ellipse writes translate()rotate() instead of cx/cy + rotate(a cx cy)"
+      (is (re-find #"<ellipse[^/]*transform=\"translate\([^)]*\)rotate\([^)]*\)\"" doc))
+      (is (not (re-find #"rotate\([-0-9.]+ " doc)) "no centre repeated inside rotate()"))))
 
 (deftest alpha-rides-fill-opacity-never-opacity
   (testing "`opacity` composites the element as an isolated group — 15× slower per splat"
     (let [doc (svg/field->svg field {:mode :flat})]
-      (is (not (re-find #"<ellipse[^/]*[^-]opacity=" doc)))
-      (is (str/includes? doc "fill-opacity=\"0.5\""))
-      (is (str/includes? doc "fill-opacity=\"0.25\"")))))
+      (is (not (re-find #"<(?:circle|ellipse)[^/]*[^-]opacity=" doc)))
+      (is (str/includes? doc "fill-opacity=\".5\""))
+      (is (str/includes? doc "fill-opacity=\".25\"")))))
 
 (deftest global-opacity-multiplies-into-the-per-splat-alpha
   (let [doc (svg/field->svg (assoc field :opacity 0.5) {:mode :flat})]
-    (is (str/includes? doc "fill-opacity=\"0.25\""))
-    (is (str/includes? doc "fill-opacity=\"0.125\""))))
+    (is (str/includes? doc "fill-opacity=\".25\""))
+    (is (str/includes? doc "fill-opacity=\".13\""))))
 
 (deftest gradient-mode-emits-one-def-per-used-colour-and-profile
   (let [doc (svg/field->svg field {:mode :gradient :colors 8 :hard-levels 2})
@@ -192,7 +283,7 @@
   (testing "Lift is the gamma transfer, Brightness the linear one, in that order"
     (let [doc (svg/field->svg field {:mode :flat :lift 1.8 :brightness 1.2})]
       ;; shader/fs-src-lift is c^(1/amount); feFunc gamma is amplitude·C^exponent+offset
-      (is (str/includes? doc "type=\"gamma\" exponent=\"0.5556\""))
+      (is (str/includes? doc "type=\"gamma\" exponent=\".5556\""))
       (is (str/includes? doc "type=\"linear\" slope=\"1.2\""))
       (is (< (str/index-of doc "gamma") (str/index-of doc "linear")))
       (testing "SVG filters default to linearRGB; the shaders work on stored sRGB"
