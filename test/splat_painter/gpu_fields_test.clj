@@ -452,8 +452,8 @@
           (dotimes [c 3] (aset or* (+ b c) (max 0.0 (- (aget px (+ b c)) 0.35)))))))
     (assoc im :original or*)))
 
-(deftest residual-weighting-matches-the-cpu
-  (testing "the GPU modulation pass reproduces residual/weighted-dmap"
+(deftest residual-aim-matches-the-cpu
+  (testing "build-fields! aims the map, and re-uploads what the budget solve reads"
     ;; The two field builders reach the SAME candidate threshold and the SAME budget
     ;; solve, so a residual applied on one path and not the other (or applied to
     ;; different channels) silently paints two different pictures depending on
@@ -469,21 +469,28 @@
                   got  (:dmap (gf/build-fields! ctx progs im perm))
                   base (wavelet/placement-map im (structure/analyze im) 768 4)
                   w    (residual/weights-for im (:h base) (:w base))
-                  want (residual/weighted-dmap base w)]
+                  want (residual/aimed-dmap base w)]
               (gf/free-ctx! ctx)
               (is (some? w) "the fixture produces a residual")
               (is (> (apply max (seq w)) 1.5) "and a boost big enough to be readable")
-              ;; the unweighted maps already agree to 2e-3 (placement-map-matches-the-cpu);
-              ;; the weight multiplies that error along with the value, so the bound does too
+              ;; the aim runs on the CPU on both paths now, so the only difference
+              ;; left is the float32 round trip through the re-uploaded texture and
+              ;; the 2e-3 the unweighted maps already differ by
               (doseq [k [:detail :sharp :mid :edge]]
                 (testing (name k)
                   (let [d (max-diff (get got k) (get want k))]
-                    (is (< d (* 2e-3 (+ 1.0 (* residual/weight-cap (residual/strength)))))
-                        (str (name k) " max diff " d)))))
+                    (is (< d 2e-3) (str (name k) " max diff " d)))))
               (is (< (max-diff (:subject got) (:subject base)) 2e-3)
-                  "subjectness is a gate — the residual pass must leave it alone"))))))))
+                  "subjectness is a gate — the aim must leave it alone")
+              ;; the budget solve reads these arrays and the geometry shader reads
+              ;; the texture they were uploaded into — a divergence here would size
+              ;; the candidate pools for a different picture than the one painted
+              (is (> (reduce max 0.0 (map #(Math/abs (- %1 %2))
+                                          (seq (:detail base)) (seq (:detail got))))
+                     1e-3)
+                  "the aim actually moved the map"))))))))
 
-(deftest residual-weighting-is-skipped-without-an-original
+(deftest residual-aim-is-skipped-without-an-original
   (testing "a first pass gets the unweighted map, byte for byte the same code path"
     (with-gl
       (fn []

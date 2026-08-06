@@ -794,21 +794,6 @@ void main(){
               texelFetch(u_edge, p, 0).r,   texelFetch(u_mid, p, 0).r);
 }")
 
-(def ^:private resid-fs
-  "#version 330 core
-in vec2 v_uv;
-out vec4 frag;
-uniform sampler2D u_packed;
-uniform sampler2D u_weight;   // .r = residual weight, >= 1, on the SAME grid
-uniform vec2 u_dim;
-void main(){
-  ivec2 p = ivec2(floor(v_uv * u_dim));
-  // all four channels are densities and all four scale — the CPU twin is
-  // residual/weighted-dmap, which multiplies the same four arrays. Subjectness
-  // lives in its own texture and is deliberately left alone.
-  frag = texelFetch(u_packed, p, 0) * texelFetch(u_weight, p, 0).r;
-}")
-
 (defn build-programs
   "Compile the field-construction programs. Needs a current GL context. Returns
    nil if any shader fails, so a caller can report rather than draw garbage."
@@ -836,7 +821,6 @@ void main(){
             :upsamp  (gl/make-program vs-src upsample-fs)
             :noise   (gl/make-program vs-src noise-fs)
             :pack    (gl/make-program vs-src pack-fs)
-            :resid   (gl/make-program vs-src resid-fs)
             :g2      (gl/make-program vs-src g2-fs)
             :fulledge (gl/make-program vs-src fulledge-fs)}]
     (when (every? some? (vals ps))
@@ -1049,17 +1033,24 @@ void main(){
       (ffi/free ptr)
       t)))
 
-(defn upload-scalar!
-  "Upload a single-channel w*h ^doubles as a w×h RGBA32F texture (value in .r)."
-  [^doubles a w h]
+(defn upload-packed!
+  "Upload a dmap's four density channels as a w×h RGBA32F texture in the layout the
+   generation shader reads: .r aggregate, .g sharp fine-band, .b raw edge, .a mid.
+   Mirrors the :pack pass, for the one case that needs the map back on the card
+   after the CPU has touched it (the residual aim)."
+  [dmap w h]
   (let [n   (* (long w) (long h))
+        ^doubles dd (:detail dmap)
+        ^doubles ds (:sharp dmap)
+        ^doubles de (:edge dmap)
+        ^doubles dm (:mid dmap)
         ptr (ffi/alloc (* n 4 (ffi/sizeof :float)))]
     (dotimes [i n]
       (let [o (* i 16)]
-        (ffi/write ptr :float o          (aget a i))
-        (ffi/write ptr :float (+ o 4)    0.0)
-        (ffi/write ptr :float (+ o 8)    0.0)
-        (ffi/write ptr :float (+ o 12)   1.0)))
+        (ffi/write ptr :float o        (aget dd i))
+        (ffi/write ptr :float (+ o 4)  (aget ds i))
+        (ffi/write ptr :float (+ o 8)  (aget de i))
+        (ffi/write ptr :float (+ o 12) (aget dm i))))
     (let [t (new-target w h)]
       (gl/gl-bind-texture gl/GL-TEXTURE-2D t)
       (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 gl/GL-RGBA32F (int w) (int h) 0
@@ -1138,21 +1129,6 @@ void main(){
                           [["u_detail" (:detail pm)] ["u_sharp" (:sharp pm)]
                            ["u_edge" (:edge pm)] ["u_mid" (:mid pm)]]
                           [["u_dim" :2f Wd Hd]])
-        ;; REPAINT AIM (mirror of the residual/weighted-dmap step in fields/prepare):
-        ;; scale the four density channels by the residual weight, HERE — before the
-        ;; readback below — so the budget solve and the candidate threshold see the
-        ;; same weighted map. Nil weights (a first pass) skip the pass entirely, which
-        ;; is what keeps the single-pass render bit-identical.
-        rweight (residual/weights-for img Hd Wd)
-        packed (if-not rweight
-                 packed0
-                 (let [wt  (upload-scalar! rweight Wd Hd)
-                       out (new-target Wd Hd)]
-                   (run-pass! ctx (:resid progs) out Wd Hd
-                              [["u_packed" packed0] ["u_weight" wt]]
-                              [["u_dim" :2f Wd Hd]])
-                   (free-textures! [packed0 wt])
-                   out))
         [noise noise0] (noise-fields! ctx progs (:eigen tensor) (:flow tensor)
                                       perm Wt Ht W H)
         blur   (bilateral-blur! ctx progs src (new-target W H) W H 3)
@@ -1169,8 +1145,25 @@ void main(){
                           [["u_src" src] ["u_g2" g2] ["u_stats" gstat2]]
                           [["u_dim" :2f W H]])
         ;; the budget reduction's inputs — the only thing that comes back
-        [dd ds de dm] (read-rgba ctx packed Wd Hd)
-        [su _ _ _]    (read-rgba ctx (:subject pm) Wd Hd)]
+        [dd0 ds0 de0 dm0] (read-rgba ctx packed0 Wd Hd)
+        [su _ _ _]        (read-rgba ctx (:subject pm) Wd Hd)
+        dmap0  {:h Hd :w Wd :detail dd0 :sharp ds0 :edge de0 :mid dm0 :subject su
+                :dmax 1.0 :src-h H :src-w W}
+        ;; REPAINT AIM. Applied on the CPU, to the arrays that just came back, and
+        ;; the result re-uploaded — NOT as a GPU pass, though a one-line shader would
+        ;; do it. The budget solve reads these arrays and the geometry shader reads
+        ;; the texture, and they MUST be the same map; doing it here means the two
+        ;; field paths share one implementation (residual/aimed-dmap) instead of a
+        ;; shader and a Clojure function that have to be kept in agreement. Costs one
+        ;; extra upload of a Wd*Hd RGBA32F, on repaint layers only: nil weights (a
+        ;; first pass) skip all of it, which is what keeps the single-pass render
+        ;; bit-identical.
+        rweight (residual/weights-for img Hd Wd)
+        dmap   (if rweight (residual/aimed-dmap dmap0 rweight) dmap0)
+        packed (if-not rweight
+                 packed0
+                 (do (free-textures! [packed0])
+                     (upload-packed! dmap Wd Hd)))]
     ;; NOT (:subject pm) — it is returned as :subject and outlives this call
     (free-textures! [(:eigen tensor) (:flow tensor) (:tensor tensor)
                      (:detail pm) (:sharp pm) (:mid pm) (:edge pm)
@@ -1179,9 +1172,10 @@ void main(){
     (restore-viewport! ctx)
     {:detail packed :subject (:subject pm) :noise noise :noise-swirl0 noise0
      :blur blur :blur-drift drift :blur-heavy heavy :raw rawe :perm perm
-     ;; placement-map is pre-normalized, so dmax is 1.0 by construction
-     :dmap {:h Hd :w Wd :detail dd :sharp ds :edge de :mid dm :subject su
-            :dmax 1.0 :src-h H :src-w W}
+     ;; placement-map is pre-normalized, so dmax is 1.0 by construction. This is the
+     ;; AIMED map when there is a residual — the budget solve has to read the same
+     ;; arrays the texture holds, or it sizes the pools for a different picture.
+     :dmap dmap
      :dmax 1.0
      :detail-dim [(double Hd) (double Wd)] :detail-src [(double H) (double W)]
      :noise-dim  [(double Ht) (double Wt)] :noise-src  [(double H) (double W)]

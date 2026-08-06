@@ -102,11 +102,11 @@
           base (:detail (fields/prepare im))
           got  (:detail (fields/prepare (with-original im)))
           w    (residual/weights-for (with-original im) (:h base) (:w base))
-          want (residual/weighted-dmap base w)]
+          want (residual/aimed-dmap base w)]
       (is (some? w) "an :original produces weights")
       (doseq [k [:detail :sharp :mid :edge]]
         (is (approx= 1e-9 (ck (get want k)) (ck (get got k)))
-            (str (name k) " is the weighted map")))
+            (str (name k) " is the aimed map")))
       (is (not (approx= 1e-6 (ck (:detail base)) (ck (:detail got))))
           "and it actually differs from the unweighted one")
       (is (approx= 1e-9 (ck (:subject base)) (ck (:subject got)))

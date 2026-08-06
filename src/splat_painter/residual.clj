@@ -140,8 +140,8 @@
         out))))
 
 (defn weight-map
-  "Placement-map weights for a repaint layer: a fresh ^doubles of sh*sw, every entry
-   >= 1.0, high where `composite` still misses `original`.
+  "Placement-map weights for a repaint layer: a fresh ^doubles of sh*sw, high where
+   `composite` still misses `original` and low where it has converged.
 
    The error is measured RELATIVE to the frame mean, not absolutely. An absolute
    threshold would be a per-image constant nobody can set: a soft portrait's worst
@@ -176,31 +176,43 @@
                                              (max 0.0 (- (/ (aget e i) mean) 1.0)))))))
               out))))))
 
-(defn weighted-dmap
-  "A copy of `dmap` with its four DENSITY channels scaled by `w` (a weight array on
-   the dmap's own grid). Pure — the input arrays are left alone, because the CPU
-   path hands the same dmap to the budget solve and to the texture upload.
+(defn aimed-dmap
+  "A copy of `dmap` whose four DENSITY channels are scaled by `w`. Pure; the input
+   arrays are untouched, because both field paths hand the same dmap to the budget
+   solve AND to the texture upload.
 
-   :subject is deliberately NOT scaled. It is a GATE (which tier may paint here at
-   all — the bokeh-adaptive Broad thinning reads it), not a density; scaling it
-   would let residual error turn background into subject and pull the broad tier's
-   whole growth/melt behaviour off its footprint.
+   Scaling, deliberately, after measuring the alternative. A boost raises the map's
+   ABSOLUTE values, and dv drives more than admission: D = min(1, Detail*dv*2.2) is
+   the per-stroke fidelity, and the Perlin warp is warp*(1-D)*ssz. So a boosted
+   region gets strokes that are more faithful and less warped, not just more of
+   them. The cost is that it also raises detail-fraction, which the budget solve
+   charges for — a repaint layer paints ~17% less at the same Splats.
 
-   :dmax stays 1.0. The weighted values can exceed 1, and that is the point — the
-   per-level thresholds are fractions of dmax, so a boosted cell clearing a
-   threshold it used to miss IS the extra stroke."
+   A rank transfer (histogram-match the map onto the residual ordering) removes that
+   cost exactly: it preserves detail-fraction at EVERY threshold by construction, so
+   the solve sizes identical candidate pools, and the shortfall fell from 17.4% to
+   3.1%. It also scored WORSE at every strength swept {0.5, 1, 2, 4} — best 10.038
+   against scaling's 9.868 on loki at three layers — because conserving the
+   distribution means robbing converged regions of fidelity to pay unresolved ones,
+   and it cannot raise D anywhere. The budget cost buys more than it costs. See
+   splat-painter-0i2.
+
+   :subject is deliberately left alone. It is a GATE (which tier may paint here at
+   all — the bokeh-adaptive Broad thinning reads it), not a density; moving it would
+   let residual error turn background into subject and pull the broad tier's whole
+   growth/melt behaviour off its footprint."
   [dmap ^doubles w]
-  (let [scale (fn [^doubles a]
-                (when a
-                  (let [n   (alength a)
-                        out (double-array n)]
-                    (dotimes [i n] (aset out i (* (aget a i) (aget w (min i (dec (alength w)))))))
-                    out)))]
+  (let [aim (fn [^doubles a]
+              (when a
+                (let [n   (alength a)
+                      out (double-array n)]
+                  (dotimes [i n] (aset out i (* (aget a i) (aget w (min i (dec (alength w)))))))
+                  out)))]
     (cond-> dmap
-      (:detail dmap) (assoc :detail (scale (:detail dmap)))
-      (:sharp dmap)  (assoc :sharp  (scale (:sharp dmap)))
-      (:mid dmap)    (assoc :mid    (scale (:mid dmap)))
-      (:edge dmap)   (assoc :edge   (scale (:edge dmap))))))
+      (:detail dmap) (assoc :detail (aim (:detail dmap)))
+      (:sharp dmap)  (assoc :sharp  (aim (:sharp dmap)))
+      (:mid dmap)    (assoc :mid    (aim (:mid dmap)))
+      (:edge dmap)   (assoc :edge   (aim (:edge dmap))))))
 
 (defn weights-for
   "The weight array for `img`'s placement grid (sh*sw), or nil when `img` carries no
