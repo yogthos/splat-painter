@@ -370,17 +370,21 @@
     (ffi/free errslot)
     (g-object-unref dialog)))
 
-(defn- toggle-save-format!
-  "Flip what Save… defaults to. ONE check box that flips, rather than a PNG/SVG pair,
-   because a pair cannot stay honest here: glimmer has no radio widget, clicking the
-   box that is already on still unchecks it in GTK, and a reset! to the value the atom
-   already holds notifies nothing — so the box would sit unchecked while the atom
-   disagreed. Forcing the re-render anyway (bouncing the atom through a third value)
-   worked but put two reactive writes in one signal callback, and a re-render posted
-   from there crashed the app once inside glimmer's idle-callback plumbing. A flip is
-   one write, always a real change, and the widget and the atom cannot drift."
-  []
-  (reset! save-format-atom (if (= :svg @save-format-atom) :png :svg)))
+(defn- set-save-format!
+  "Pick what Save… defaults to, from the SVG box's new state.
+
+   :on-toggled is a VALUE-BEARING signal — glimmer-gl registers
+   gtk_check_button_get_active as its value fn (glimmer_gl/gtk.clj), exactly like
+   :on-value hands a slider its double — so the handler is called WITH the state
+   (1/0), not with no args. A zero-arg handler here is an arity crash on the first
+   real click, and no direct call from a test or the REPL reproduces it because that
+   argument only appears when the signal fires. That is the whole reason this takes
+   `active` rather than flipping the atom: the widget is the source of truth and the
+   atom just follows it, so the two cannot drift and a click is one reactive write."
+  [active]
+  (reset! save-format-atom
+          (if (if (number? active) (not (zero? (long active))) (boolean active))
+            :svg :png)))
 
 (defn- save-image-dialog! []
   (let [ext (name (or @save-format-atom :png))]
@@ -1220,10 +1224,10 @@
   [:hbox {:spacing 6 :margin 6}
    [:button {:label "Open Image…"  :on-click open-image-dialog!}]
    [:button {:label "Save…"        :on-click save-image-dialog!}]
-   ;; checked = SVG, unchecked = PNG. One box that flips rather than a PNG/SVG pair —
-   ;; see toggle-save-format! for why a pair cannot stay in sync here.
+   ;; checked = SVG, unchecked = PNG. The handler takes the box's new state — see
+   ;; set-save-format!; :on-toggled carries a value the way :on-value does.
    [:checkbutton {:label "SVG" :active (= :svg @save-format-atom)
-                  :on-toggled toggle-save-format!}]
+                  :on-toggled set-save-format!}]
    [:button {:label "Add Layer"    :on-click add-layer!}]
    [:button {:label "Reset Layers" :on-click reset-layers!}]
    [:button {:label "◀" :on-click #(select-layer! (dec @active-layer-atom))}]

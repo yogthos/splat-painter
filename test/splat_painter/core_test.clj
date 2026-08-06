@@ -56,24 +56,34 @@
     (is (not (core/svg-path? "/tmp/svg.png")) "the extension, not the name")
     (is (not (core/svg-path? nil)))))
 
-(deftest the-format-box-cannot-drift-from-the-atom
-  ;; The box is checked iff the atom says :svg, and every click flips it — so each
-  ;; click is a REAL change (glimmer.ratom only notifies on those) and exactly one
-  ;; reactive write. A PNG/SVG pair could not manage either: clicking the box already
-  ;; on still unchecks it in GTK, while a reset! to the value already held publishes
-  ;; nothing, leaving the widget and the atom disagreeing.
-  (let [seen  (atom [])
-        watch (fn [r] (swap! seen conj @r))
-        orig  @core/save-format-atom]
+(defn- toolbar-prop [tag k]
+  (->> (#'core/toolbar) (filter vector?) (filter #(= tag (first %))) first second k))
+
+(deftest toggle-handlers-are-called-with-the-widgets-value
+  ;; THE contract that broke SVG export: :on-toggled is value-bearing — glimmer-gl
+  ;; registers gtk_check_button_get_active as its value fn, so glimmer.widget calls
+  ;; (handler active) and a zero-arg handler is an arity crash on the first real
+  ;; click. Nothing catches that by calling the handler directly, so this pulls it
+  ;; out of the actual toolbar tree and calls it the way the signal will.
+  (let [h    (toolbar-prop :checkbutton :on-toggled)
+        orig @core/save-format-atom]
     (try
+      (is (some? h) "the SVG box still has a toggle handler")
+      (h 1) (is (= :svg @core/save-format-atom) "checked (GTK's 1) is the vector save")
+      (h 0) (is (= :png @core/save-format-atom) "unchecked is PNG")
+      (testing "a boolean would do too, if the value fn ever stops being a C int"
+        (h true)  (is (= :svg @core/save-format-atom))
+        (h false) (is (= :png @core/save-format-atom)))
+      (finally (reset! core/save-format-atom orig)))))
+
+(deftest the-format-box-shows-the-format
+  (let [orig @core/save-format-atom]
+    (try
+      (reset! core/save-format-atom :svg)
+      (is (true? (toolbar-prop :checkbutton :active)))
       (reset! core/save-format-atom :png)
-      (swap! (:watches core/save-format-atom) conj watch)   ; glimmer.ratom's watcher set
-      (dotimes [_ 4] (#'core/toggle-save-format!))
-      (is (= [:svg :png :svg :png] @seen) "every click publishes, none is a no-op")
-      (is (= :png @core/save-format-atom) "and an even number of clicks is where it started")
-      (finally
-        (swap! (:watches core/save-format-atom) disj watch)
-        (reset! core/save-format-atom orig)))))
+      (is (false? (toolbar-prop :checkbutton :active)))
+      (finally (reset! core/save-format-atom orig)))))
 
 (deftest every-settings-atom-has-an-override
   (testing "no slider is reachable only through the UI"
