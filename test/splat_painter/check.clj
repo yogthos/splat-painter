@@ -83,9 +83,11 @@
     (assert-contains vs-src-blit "v_uv = (pane - org) / (u_image * scale);" "blit texcoord from letterbox rect")
     (assert-contains fs-src-blit "uniform sampler2D u_layer;" "blit u_layer sampler")
     (assert-contains fs-src-blit "uniform float u_alpha;" "blit per-blit opacity gain")
-    (assert-contains fs-src-blit "uniform float u_encode;" "blit sRGB re-encode toggle")
-    (assert-contains fs-src-blit "if (u_encode > 0.5) rgb = srgbEncode(rgb);" "blit conditional sRGB re-encode")
-    (assert-contains fs-src-blit "frag = vec4(rgb, c.a * u_alpha);" "blit alpha-aware premultiplied output"))
+    ;; the pane blit must stay a STRAIGHT RESAMPLE. A colour transform here shows on
+    ;; screen but never in the saved PNG (which reads the composite directly), and no
+    ;; headless check can see that divergence — so pin the absence of one.
+    (assert-not-contains fs-src-blit "srgbEncode" "blit applies no colour transform")
+    (assert-contains fs-src-blit "frag = vec4(c.rgb * u_alpha, c.a * u_alpha);" "blit alpha-aware premultiplied output"))
 
   ;; the GPU generation shader must MIRROR seed/splat-record + layered-means + noise
   (let [{:keys [vs-src gs-src]} (gen/sources)]
