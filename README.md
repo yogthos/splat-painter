@@ -6,7 +6,8 @@ of large soft strokes, then successively finer, more translucent layers of brush
 traced along the image's edges.
 
 Built in [Jolt](https://github.com/jolt-lang/jolt) (Clojure on Chez
-Scheme) with [glimmer](https://github.com/jolt-lang/glimmer) (GTK4) and
+Scheme) with [glimmer](https://github.com/jolt-lang/glimmer) and its
+[glimmer-gtk](https://github.com/jolt-lang/glimmer-gtk) backend (GTK4), plus
 [glimmer-gl](https://github.com/jolt-lang/glimmer-gl) (OpenGL).
 
 The covariance math (Σ = R·diag(s²)·Rᵀ, closed-form 2×2 precision) follows the 2D
@@ -300,5 +301,6 @@ Prebuilt binaries for macOS (arm64) and Linux (x86_64) are attached to each
 
 ## Dependencies
 
-Glimmer and glimmer-gl are git deps pinned in `deps.edn`. gdk-pixbuf (image decode)
-is declared as a `:jolt/native` lib. GTK4/OpenGL/GLib come in transitively.
+glimmer-gtk and glimmer-gl are git deps pinned in `deps.edn` (glimmer itself comes
+in under them). gdk-pixbuf (image decode) is declared as a `:jolt/native` lib.
+GTK4/OpenGL/GLib come in transitively.

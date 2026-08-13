@@ -1,14 +1,17 @@
 {:paths ["src"]
 
- :deps {jolt-lang/glimmer-gl {:git/url "https://github.com/jolt-lang/glimmer-gl.git"
-                              :git/tag "v0.0.5"
-                              :git/sha "05a27d378a542cc0f32ff2b2682e0e47ffb83599"}
-        jolt-lang/glimmer    {:git/url "https://github.com/jolt-lang/glimmer.git"
-                              :git/tag "v0.0.5"
-                              :git/sha "b34652052e25dc816bd5e10ad2fc6a9cf3e2e8cf"}}
+ ;; glimmer is the toolkit-agnostic reactive core; glimmer-gtk is its GTK4
+ ;; backend (widgets, the app loop) and comes in transitively under glimmer-gl,
+ ;; but is pinned here too since the app requires it directly.
+ :deps {jolt-lang/glimmer-gl  {:git/url "https://github.com/jolt-lang/glimmer-gl.git"
+                               :git/tag "v0.1.0"
+                               :git/sha "ae9a53291c553e89dde79a90389224f46e5e7fa8"}
+        jolt-lang/glimmer-gtk {:git/url "https://github.com/jolt-lang/glimmer-gtk.git"
+                               :git/tag "v0.1.0"
+                               :git/sha "ce79d45698d36ccf496397bb85974e3cce6abfd8"}}
 
  ;; gdk-pixbuf decodes the input image (JPEG/PNG/...) into an in-memory pixel
- ;; buffer. OpenGL comes in transitively via glimmer-gl; GTK4/GLib via glimmer.
+ ;; buffer. OpenGL comes in transitively via glimmer-gl; GTK4/GLib via glimmer-gtk.
  ;; On macOS Chez's dlopen default path skips Homebrew, so the full dylib path
  ;; is listed first (Apple Silicon then Intel), then the bare name for Linux.
  :jolt/native [{:name "gdk-pixbuf"

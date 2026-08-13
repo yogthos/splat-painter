@@ -16,6 +16,7 @@
             [clojure.java.io]
             [glimmer.core   :as ui]
             [glimmer.ratom  :as r]
+            [glimmer-gtk.core]              ; installs the GTK4 backend glimmer renders with
             [glimmer-gl.gtk :as glx]        ; registers :gl-area + :scale
             [glimmer-gl.gl  :as gl]
             [splat-painter.shader    :as shader]
@@ -164,10 +165,6 @@
   [:pointer :pointer :pointer] :pointer)
 (ffi/defcfn gtk-file-dialog-set-initial-name "gtk_file_dialog_set_initial_name"
   [:pointer :string] :void)
-;; glimmer-gl v0.0.3 doesn't bind glDeleteTextures, so declare it locally. Used by
-;; delete-layer-textures! to free committed-layer textures on drop/reset/replace.
-(ffi/defcfn gl-delete-textures "glDeleteTextures" [:int :pointer] :void)
-
 ;; render requests
 ;; glimmer.ratom atoms aren't IRef-watchable, so we don't add-watch. Each slider's
 ;; :on-value resets its atom and calls request-render!, so the image updates live
@@ -492,7 +489,7 @@
     (let [ids (field-tex-ids fields)]
       (when (pos? (count ids))
         (let [p (gl/write-ints (mapv int ids))]
-          (gl-delete-textures (count ids) p)
+          (gl/gl-delete-textures (count ids) p)
           (ffi/free p))))))
 
 (defn- quad-vao!
@@ -1039,7 +1036,7 @@
   [entries]
   (doseq [{:keys [tex]} entries :when (and tex (pos? (long tex)))]
     (let [p (gl/write-ints [(int tex)])]
-      (gl-delete-textures 1 p)
+      (gl/gl-delete-textures 1 p)
       (ffi/free p))))
 
 (defn- clear-layers!

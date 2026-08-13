@@ -9,7 +9,7 @@
             [splat-painter.seed :as seed]
             [splat-painter.image :as image]
             [splat-painter.core :as core]
-            [glimmer.widget :as w]
+            [glimmer-gtk.widget :as w]
             [glimmer-gl.gtk]))            ; loading registers :gl-area / :scale
 
 (defn- assert-contains [src needle label]

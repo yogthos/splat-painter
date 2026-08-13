@@ -34,7 +34,7 @@ permissions:
 #    builders silently ran serially.
 #  - 0.5.13's dependency resolver shells out to `git checkout <sha> -`, and current git
 #    rejects that bare `-` as a pathspec, so it cannot fetch the pinned glimmer-gl /
-#    glimmer deps at all — warm cache or cold, on an unchanged deps.edn. v0.1.8 built
+#    glimmer-gtk deps at all — warm cache or cold, on an unchanged deps.edn. v0.1.8 built
 #    with it on 2026-07-31, so it is a git-version-dependent latent failure in that
 #    compiler rather than anything in the tree.
 
