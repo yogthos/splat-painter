@@ -50,10 +50,10 @@
         buf (ffi/alloc (* W H 4))]
     (dotimes [i (* W H)]
       (let [b (bit-and (aget grey-bytes i) 0xff)]
-        (ffi/write buf :uint8 (* 4 i)       b)
-        (ffi/write buf :uint8 (+ (* 4 i) 1) b)
-        (ffi/write buf :uint8 (+ (* 4 i) 2) b)
-        (ffi/write buf :uint8 (+ (* 4 i) 3) 255)))
+        (ffi/write buf :uint8 b (* 4 i))
+        (ffi/write buf :uint8 b (+ (* 4 i) 1))
+        (ffi/write buf :uint8 b (+ (* 4 i) 2))
+        (ffi/write buf :uint8 255 (+ (* 4 i) 3))))
     (gl/gl-bind-texture gl/GL-TEXTURE-2D tex)
     (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 GL-RGBA8 (int W) (int H) 0
                         gl/GL-RGBA gl/GL-UNSIGNED-BYTE buf)

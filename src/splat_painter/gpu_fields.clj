@@ -1022,10 +1022,10 @@ void main(){
         ptr (ffi/alloc (* n 4 (ffi/sizeof :float)))]
     (dotimes [i n]
       (let [b (* 3 i) o (* i 4 4)]
-        (ffi/write ptr :float o            (aget px b))
-        (ffi/write ptr :float (+ o 4)      (aget px (+ b 1)))
-        (ffi/write ptr :float (+ o 8)      (aget px (+ b 2)))
-        (ffi/write ptr :float (+ o 12)     1.0)))
+        (ffi/write ptr :float (aget px b) o)
+        (ffi/write ptr :float (aget px (+ b 1)) (+ o 4))
+        (ffi/write ptr :float (aget px (+ b 2)) (+ o 8))
+        (ffi/write ptr :float 1.0 (+ o 12))))
     (let [t (new-target W H)]
       (gl/gl-bind-texture gl/GL-TEXTURE-2D t)
       (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 gl/GL-RGBA32F (int W) (int H) 0
@@ -1047,10 +1047,10 @@ void main(){
         ptr (ffi/alloc (* n 4 (ffi/sizeof :float)))]
     (dotimes [i n]
       (let [o (* i 16)]
-        (ffi/write ptr :float o        (aget dd i))
-        (ffi/write ptr :float (+ o 4)  (aget ds i))
-        (ffi/write ptr :float (+ o 8)  (aget de i))
-        (ffi/write ptr :float (+ o 12) (aget dm i))))
+        (ffi/write ptr :float (aget dd i) o)
+        (ffi/write ptr :float (aget ds i) (+ o 4))
+        (ffi/write ptr :float (aget de i) (+ o 8))
+        (ffi/write ptr :float (aget dm i) (+ o 12))))
     (let [t (new-target w h)]
       (gl/gl-bind-texture gl/GL-TEXTURE-2D t)
       (gl/gl-tex-image-2d gl/GL-TEXTURE-2D 0 gl/GL-RGBA32F (int w) (int h) 0

@@ -11,10 +11,10 @@
 (defn- put-rgba! [buf iw r c rr gg bb]
   ;; one RGBA byte at buffer row r, col c (row-major, bottom-up glReadPixels layout)
   (let [o (+ (* 4 (* r iw)) (* 4 c))]
-    (ffi/write buf :uint8 o            rr)
-    (ffi/write buf :uint8 (+ o 1)      gg)
-    (ffi/write buf :uint8 (+ o 2)      bb)
-    (ffi/write buf :uint8 (+ o 3)      255)))
+    (ffi/write buf :uint8 rr o)
+    (ffi/write buf :uint8 gg (+ o 1))
+    (ffi/write buf :uint8 bb (+ o 2))
+    (ffi/write buf :uint8 255 (+ o 3))))
 
 (defn- px [img x y k]
   ;; image pixel channel k (0=r 1=g 2=b) at row x, col y — flat base 3*(x*W+y)

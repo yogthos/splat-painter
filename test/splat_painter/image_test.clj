@@ -39,7 +39,7 @@
   ;; at byte offset 8, after the two 4-byte fields — reading 16 fetched one
   ;; pointer past the struct and faulted.
   (let [slot (ffi/alloc (ffi/sizeof :pointer))]
-    (ffi/write slot :pointer 0 ffi/null)
+    (ffi/write slot :pointer ffi/null 0)
     (is (nil? (#'splat-painter.image/read-gerror slot)))
     (ffi/free slot)))
 
