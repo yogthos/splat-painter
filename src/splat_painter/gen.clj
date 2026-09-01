@@ -840,10 +840,10 @@ void main(){
     (dotimes [idx n]
       (let [o (* idx 16)                     ; 4 floats × 4 bytes
             [r g b a] (getter idx)]
-        (ffi/write ptr :float o        (double r))
-        (ffi/write ptr :float (+ o 4)  (double g))
-        (ffi/write ptr :float (+ o 8)  (double b))
-        (ffi/write ptr :float (+ o 12) (double a))))
+        (ffi/write ptr :float (double r) o)
+        (ffi/write ptr :float (double g) (+ o 4))
+        (ffi/write ptr :float (double b) (+ o 8))
+        (ffi/write ptr :float (double a) (+ o 12))))
     ptr))
 
 (defn upload-fields!
