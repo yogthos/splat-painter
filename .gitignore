@@ -24,9 +24,10 @@ blog.md
 post.md
 ideas.md
 
-# jolt build output
+# jolt build output / classpath cache
 /splat-painter
 splat-painter.build/
+.jolt/
 
 # harness scratch
 dev/harness/ab-server.log

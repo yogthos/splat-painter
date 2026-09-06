@@ -8,9 +8,10 @@
  ;; glimmer is the toolkit-agnostic reactive core; glimmer-gtk is its GTK4
  ;; backend (widgets, the app loop) and comes in transitively under glimmer-gl,
  ;; but is pinned here too since the app requires it directly.
+ ;; glimmer-gl is pinned to main past v0.1.0: that commit carries the ffi/write
+ ;; argument-order change and upstream has not tagged it yet.
  :deps {jolt-lang/glimmer-gl  {:git/url "https://github.com/jolt-lang/glimmer-gl.git"
-                               :git/tag "v0.1.0"
-                               :git/sha "ae9a53291c553e89dde79a90389224f46e5e7fa8"}
+                               :git/sha "5f01fc66d164cfe7551209c3b1fe1b4777c617cf"}
         jolt-lang/glimmer-gtk {:git/url "https://github.com/jolt-lang/glimmer-gtk.git"
                                :git/tag "v0.1.0"
                                :git/sha "ce79d45698d36ccf496397bb85974e3cce6abfd8"}}

@@ -39,9 +39,10 @@
   ([path max-side]
    (let [errslot (ffi/alloc (ffi/sizeof :pointer))
          ;; GLib's GError out-param must start as NULL: on the error path the loader
-         ;; asserts *error == NULL and then dereferences it. ffi/alloc doesn't zero,
-         ;; so uninitialized garbage (NULL only by luck on macOS, non-NULL on Linux)
-         ;; trips the assertion and crashes. Initialize the slot to NULL.
+         ;; asserts *error == NULL and then dereferences it. ffi/alloc zeroes its
+         ;; memory since jolt 0.8.0, but the NULL is written explicitly so the
+         ;; contract does not rest on the allocator: before 0.8.0 it did not zero,
+         ;; and the leftover garbage tripped that assertion on Linux.
          _ (ffi/write errslot :pointer ffi/null 0)
          ;; With preserve_aspect=1, passing max-side for both axes fits the
          ;; image in a max-side box so the longest edge becomes max-side.

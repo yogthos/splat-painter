@@ -261,7 +261,7 @@
 ;; GAsyncReadyCallback body: src is the GtkFileDialog, res the GAsyncResult.
 (defn- handle-open-result [dialog res]
   (let [errslot (ffi/alloc (ffi/sizeof :pointer))
-        _       (ffi/write errslot :pointer ffi/null 0)  ; GError out-param must start NULL (ffi/alloc doesn't zero)
+        _       (ffi/write errslot :pointer ffi/null 0)  ; GError out-param must start NULL (written explicitly, not left to ffi/alloc's zero fill)
         gfile   (gtk-file-dialog-open-finish dialog res errslot)]
     (if (ffi/null? gfile)
       (let [ep (ffi/read errslot :pointer 0)]
@@ -356,7 +356,7 @@
 
 (defn- handle-save-result [dialog res]
   (let [errslot (ffi/alloc (ffi/sizeof :pointer))
-        _       (ffi/write errslot :pointer ffi/null 0)  ; GError out-param must start NULL (ffi/alloc doesn't zero)
+        _       (ffi/write errslot :pointer ffi/null 0)  ; GError out-param must start NULL (written explicitly, not left to ffi/alloc's zero fill)
         gfile   (gtk-file-dialog-save-finish dialog res errslot)]
     (if (ffi/null? gfile)
       (let [ep (ffi/read errslot :pointer 0)]
