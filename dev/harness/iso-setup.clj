@@ -76,7 +76,7 @@
   "The unfiltered ladder, for picking which :lvl values exist."
   []
   (reset! keep-lvls :all)
-  (let [f (splat-painter.core/field-for-current-controls)]
+  (let [f (#'splat-painter.core/field-for-current-controls)]
     (mapv (fn [l] {:lvl (:lvl l) :ssz (:ssz l) :sp (:sp l)
                    :nx (:nx l) :band (:band l) :map-kind (:map-kind l)
                    :segs (:segs l)})

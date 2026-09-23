@@ -1012,7 +1012,7 @@
           nf     (seed/prep-noise sfield)
           px     (:pixels img)
           head-a (fn [ssz]
-                   (let [[rows _reason] (seed/stroke-segments nf dmap 5 16 16 ssz 1.0 0.0 0.5 1 0.5 2.5
+                   (let [[rows _reason] (#'seed/stroke-segments nf dmap 5 16 16 ssz 1.0 0.0 0.5 1 0.5 2.5
                                                     31 31 8 0.9 0.0 0.0 0.5 1.0 px 32 32
                                                     0.5 0.0 :sharp 1.0 px 0.5 0.55 0.0)]
                      (nth (first rows) 6)))
@@ -1263,7 +1263,7 @@
           info (fn [img x y ds]
                  (let [nf (:noise-fields img) dmap (:detail img)
                        blur (:blur img) blurd (:blur-drift img)
-                       [rows reason] (seed/stroke-segments
+                       [rows reason] (#'seed/stroke-segments
                                       nf dmap 5 x y 1.0 1.0 0.0 0.5 ds 0.5 2.5
                                       hd wd 24 0.9 0.5 0.0 0.5 1.0 blur W H
                                       0.5 0.0 :sharp 1.0 blurd 0.5 0.55 0.0)]
