@@ -1,5 +1,7 @@
 # splat-painter
 
+[![Run on Starwish](https://starwish.ing/badge/run-on-starwish.svg)](https://starwish.ing/@nemo/splat-painter)
+
 A GUI tool that uses a field of 2D Gaussian splats to create an oil-painting
 look built by progressive refinement. The painting starts wth an opaque underpainting
 of large soft strokes, then successively finer, more translucent layers of brush strokes
